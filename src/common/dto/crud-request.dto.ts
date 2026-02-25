@@ -13,8 +13,17 @@ export const AUDIT_FIELDS = [
 ] as const;
 
 export function buildCrudRequestDtos<T extends Type<object>>(entity: T) {
-  class CreateDto extends OmitType(entity, AUDIT_FIELDS as never) {}
+  const BaseCreateDto = OmitType(entity, AUDIT_FIELDS as never);
+
+  class CreateDto extends BaseCreateDto {}
+  Object.defineProperty(CreateDto, 'name', {
+    value: `Create${entity.name}Dto`,
+  });
+
   class UpdateDto extends PartialType(CreateDto) {}
+  Object.defineProperty(UpdateDto, 'name', {
+    value: `Update${entity.name}Dto`,
+  });
 
   return { CreateDto, UpdateDto };
 }
