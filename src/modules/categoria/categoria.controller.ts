@@ -1,4 +1,5 @@
 import { Controller } from '@nestjs/common';
+
 import { ApiTags } from '@nestjs/swagger';
 import { CrudController } from '../../common/crud/crud.controller';
 import { Categoria } from '../entities/categoria.entity';
