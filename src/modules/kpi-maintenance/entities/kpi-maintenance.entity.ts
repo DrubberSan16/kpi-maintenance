@@ -6,7 +6,7 @@ export class EquipoEntity {
   @Column() codigo: string;
   @Column() nombre: string;
   @Column() equipo_tipo_id: string;
-  @Column({ nullable: true }) location_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) location_id?: string | null;
   @Column({ default: 'MEDIA' }) criticidad: string;
   @Column({ default: 'OPERATIVO' }) estado_operativo: string;
   @Column('numeric', { precision: 18, scale: 2, default: 0 }) horometro_actual: number;
