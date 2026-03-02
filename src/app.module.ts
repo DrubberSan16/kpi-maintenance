@@ -13,11 +13,12 @@ import { KpiMaintenanceModule } from './modules/kpi-maintenance/kpi-maintenance.
 
         return {
           type: 'postgres',
-          host: config.get('DB_HOST', '127.0.0.1'),
-          port: Number(config.get('DB_PORT', 5432)),
-          username: config.get('DB_USERNAME') ?? config.get('DB_USER', 'postgres'),
-          password: config.get('DB_PASSWORD') ?? config.get('DB_PASS', 'postgres'),
-          database: config.get('DB_DATABASE') ?? config.get('DB_NAME', 'postgres'),
+          host: config.get('DB_HOST'),
+          port: Number(config.get('DB_PORT') || 5432),
+          username: config.get('DB_USER'),
+          password: config.get('DB_PASS'),
+          database: config.get('DB_NAME'),
+          schema: 'kpi_inventory',
           autoLoadEntities: true,
           synchronize: false,
           logging: false,
