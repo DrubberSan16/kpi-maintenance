@@ -1,7 +1,116 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import {
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { KpiMaintenanceService } from '../services/kpi-maintenance.service';
-import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, UpdateBitacoraDto, UpdateEquipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, WorkOrderQueryDto } from '../dto';
+import {
+  AlertaQueryDto,
+  ChangeEstadoDto,
+  CreateBitacoraDto,
+  CreateConsumoDto,
+  CreateEquipoDto,
+  CreateEventoDto,
+  CreatePlanDto,
+  CreatePlanTareaDto,
+  CreateProgramacionDto,
+  DateRangeDto,
+  EquipoQueryDto,
+  IssueMaterialsDto,
+  UpdateBitacoraDto,
+  UpdateEquipoDto,
+  UpdatePlanDto,
+  UpdatePlanTareaDto,
+  UpdateProgramacionDto,
+  WorkOrderQueryDto,
+} from '../dto';
+
+const bodyExamples = {
+  createEquipo: {
+    codigo: 'EQ-001',
+    nombre: 'Excavadora CAT 320',
+    equipo_tipo_id: 'd5f4b3e7-668f-44ac-8d59-9e992cbca3d8',
+    location_id: 'c1b9cb58-68fd-41f4-8e7f-1c2bc1df51c5',
+    criticidad: 'ALTA',
+    estado_operativo: 'OPERATIVO',
+    horometro_actual: 1250.5,
+  },
+  createBitacora: {
+    fecha: '2026-03-01T10:30:00.000Z',
+    horometro: 1251,
+    estado_id: '2dbf65ab-a4ad-4f9b-b9ca-cf9cd5ea2d84',
+    observaciones: 'Se realizó inspección visual',
+    registrado_por: 'f5c4bc8b-eeb5-4fa6-b7a2-f47f3cf271cb',
+  },
+  changeEstado: {
+    estado_id: '2dbf65ab-a4ad-4f9b-b9ca-cf9cd5ea2d84',
+    fecha_inicio: '2026-03-01T11:00:00.000Z',
+    motivo: 'Equipo detenido por mantención preventiva',
+  },
+  createEvento: {
+    tipo_evento: 'FALLA',
+    work_order_id: 'f7f1f13f-beb9-4471-bdd7-3f73fe3fa6d6',
+    fecha_inicio: '2026-03-01T11:00:00.000Z',
+    fecha_fin: '2026-03-01T14:30:00.000Z',
+    severidad: 3,
+    descripcion: 'Falla en sistema hidráulico',
+  },
+  createPlan: {
+    codigo: 'PLAN-250H',
+    nombre: 'Mantenimiento cada 250 horas',
+    tipo: 'PREVENTIVO',
+    frecuencia_tipo: 'HORAS',
+    frecuencia_valor: 250,
+  },
+  createPlanTarea: {
+    orden: 1,
+    actividad: 'Cambio de aceite de motor',
+    field_type: 'CHECKBOX',
+  },
+  createProgramacion: {
+    equipo_id: '1ec0ef12-5fd3-414f-aee4-5f163dd98a8c',
+    plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',
+    ultima_ejecucion_fecha: '2026-02-20T08:00:00.000Z',
+    ultima_ejecucion_horas: 1000,
+    proxima_fecha: '2026-03-20T08:00:00.000Z',
+    proxima_horas: 1250,
+    activo: true,
+  },
+  createConsumo: {
+    producto_id: 'ec7be6b7-9ed0-4e15-aa7f-79b3f8f2b84f',
+    bodega_id: '6013e2f8-62db-4142-9c40-5cdfb9de09af',
+    cantidad: 2.5,
+    costo_unitario: 14500,
+    observacion: 'Consumo para cambio de filtro',
+  },
+  issueMaterials: {
+    items: [
+      {
+        producto_id: 'ec7be6b7-9ed0-4e15-aa7f-79b3f8f2b84f',
+        bodega_id: '6013e2f8-62db-4142-9c40-5cdfb9de09af',
+        cantidad: 1,
+      },
+      {
+        producto_id: 'ac5c35f5-3079-412f-b08f-c140de8f891f',
+        bodega_id: '6013e2f8-62db-4142-9c40-5cdfb9de09af',
+        cantidad: 4,
+      },
+    ],
+    observacion: 'Salida de materiales para OT-1287',
+  },
+} as const;
 
 @Controller()
 export class KpiMaintenanceController {
@@ -9,144 +118,326 @@ export class KpiMaintenanceController {
 
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Listar equipos con filtros opcionales' })
-  @Get('equipos') listEquipos(@Query() query: EquipoQueryDto) { return this.service.listEquipos(query); }
+  @Get('equipos')
+  listEquipos(@Query() query: EquipoQueryDto) {
+    return this.service.listEquipos(query);
+  }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @Get('equipos/:id') getEquipo(@Param('id') id: string) { return this.service.getEquipo(id); }
+  @Get('equipos/:id')
+  getEquipo(@Param('id') id: string) {
+    return this.service.getEquipo(id);
+  }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Crear un equipo' })
-  @ApiBody({ type: CreateEquipoDto, required: true })
-  @Post('equipos') createEquipo(@Body() dto: CreateEquipoDto) { return this.service.createEquipo(dto); }
+  @ApiBody({
+    type: CreateEquipoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createEquipo } },
+  })
+  @Post('equipos')
+  createEquipo(@Body() dto: CreateEquipoDto) {
+    return this.service.createEquipo(dto);
+  }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Actualizar un equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @ApiBody({ type: UpdateEquipoDto, required: true })
-  @Patch('equipos/:id') updateEquipo(@Param('id') id: string, @Body() dto: UpdateEquipoDto) { return this.service.updateEquipo(id, dto); }
+  @ApiBody({
+    type: UpdateEquipoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createEquipo } },
+  })
+  @Patch('equipos/:id')
+  updateEquipo(@Param('id') id: string, @Body() dto: UpdateEquipoDto) {
+    return this.service.updateEquipo(id, dto);
+  }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Eliminar un equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @Delete('equipos/:id') deleteEquipo(@Param('id') id: string) { return this.service.deleteEquipo(id); }
+  @Delete('equipos/:id')
+  deleteEquipo(@Param('id') id: string) {
+    return this.service.deleteEquipo(id);
+  }
 
   @ApiTags('Bitácora')
   @ApiOperation({ summary: 'Listar bitácora de un equipo por rango de fechas' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @Get('equipos/:id/bitacora') listBitacora(@Param('id') id: string, @Query() range: DateRangeDto) { return this.service.listBitacora(id, range); }
+  @Get('equipos/:id/bitacora')
+  listBitacora(@Param('id') id: string, @Query() range: DateRangeDto) {
+    return this.service.listBitacora(id, range);
+  }
   @ApiTags('Bitácora')
   @ApiOperation({ summary: 'Crear registro de bitácora para un equipo' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @ApiBody({ type: CreateBitacoraDto, required: true })
-  @Post('equipos/:id/bitacora') createBitacora(@Param('id') id: string, @Body() dto: CreateBitacoraDto) { return this.service.createBitacora(id, dto); }
+  @ApiBody({
+    type: CreateBitacoraDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createBitacora } },
+  })
+  @Post('equipos/:id/bitacora')
+  createBitacora(@Param('id') id: string, @Body() dto: CreateBitacoraDto) {
+    return this.service.createBitacora(id, dto);
+  }
   @ApiTags('Bitácora')
   @ApiOperation({ summary: 'Actualizar registro de bitácora por ID' })
   @ApiParam({ name: 'id', description: 'ID de la bitácora', required: true })
-  @ApiBody({ type: UpdateBitacoraDto, required: true })
-  @Patch('bitacora/:id') updateBitacora(@Param('id') id: string, @Body() dto: UpdateBitacoraDto) { return this.service.updateBitacora(id, dto); }
+  @ApiBody({
+    type: UpdateBitacoraDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createBitacora } },
+  })
+  @Patch('bitacora/:id')
+  updateBitacora(@Param('id') id: string, @Body() dto: UpdateBitacoraDto) {
+    return this.service.updateBitacora(id, dto);
+  }
   @ApiTags('Bitácora')
   @ApiOperation({ summary: 'Eliminar registro de bitácora por ID' })
   @ApiParam({ name: 'id', description: 'ID de la bitácora', required: true })
-  @Delete('bitacora/:id') deleteBitacora(@Param('id') id: string) { return this.service.deleteBitacora(id); }
+  @Delete('bitacora/:id')
+  deleteBitacora(@Param('id') id: string) {
+    return this.service.deleteBitacora(id);
+  }
 
   @ApiTags('Estados')
   @ApiOperation({ summary: 'Cambiar estado de un equipo' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @ApiBody({ type: ChangeEstadoDto, required: true })
-  @Post('equipos/:id/estado') changeEstado(@Param('id') id: string, @Body() dto: ChangeEstadoDto) { return this.service.changeEstado(id, dto); }
+  @ApiBody({
+    type: ChangeEstadoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.changeEstado } },
+  })
+  @Post('equipos/:id/estado')
+  changeEstado(@Param('id') id: string, @Body() dto: ChangeEstadoDto) {
+    return this.service.changeEstado(id, dto);
+  }
   @ApiTags('Estados')
   @ApiOperation({ summary: 'Listar historial de estados por equipo' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @Get('equipos/:id/estado') listEstados(@Param('id') id: string, @Query() range: DateRangeDto) { return this.service.listEstados(id, range); }
+  @Get('equipos/:id/estado')
+  listEstados(@Param('id') id: string, @Query() range: DateRangeDto) {
+    return this.service.listEstados(id, range);
+  }
 
   @ApiTags('Eventos')
   @ApiOperation({ summary: 'Crear evento para un equipo' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @ApiBody({ type: CreateEventoDto, required: true })
-  @Post('equipos/:id/eventos') createEvento(@Param('id') id: string, @Body() dto: CreateEventoDto) { return this.service.createEvento(id, dto); }
+  @ApiBody({
+    type: CreateEventoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createEvento } },
+  })
+  @Post('equipos/:id/eventos')
+  createEvento(@Param('id') id: string, @Body() dto: CreateEventoDto) {
+    return this.service.createEvento(id, dto);
+  }
   @ApiTags('Eventos')
   @ApiOperation({ summary: 'Listar eventos de un equipo' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @ApiQuery({ name: 'tipo_evento', required: false, description: 'Filtrar por tipo de evento' })
-  @Get('equipos/:id/eventos') listEventos(@Param('id') id: string, @Query() query: DateRangeDto & { tipo_evento?: string }) { return this.service.listEventos(id, query); }
+  @ApiQuery({
+    name: 'tipo_evento',
+    required: false,
+    description: 'Filtrar por tipo de evento',
+  })
+  @Get('equipos/:id/eventos')
+  listEventos(
+    @Param('id') id: string,
+    @Query() query: DateRangeDto & { tipo_evento?: string },
+  ) {
+    return this.service.listEventos(id, query);
+  }
 
   @ApiTags('Planes')
   @ApiOperation({ summary: 'Crear plan de mantenimiento' })
-  @ApiBody({ type: CreatePlanDto, required: true })
-  @Post('planes') createPlan(@Body() dto: CreatePlanDto) { return this.service.createPlan(dto); }
+  @ApiBody({
+    type: CreatePlanDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createPlan } },
+  })
+  @Post('planes')
+  createPlan(@Body() dto: CreatePlanDto) {
+    return this.service.createPlan(dto);
+  }
   @ApiTags('Planes')
   @ApiOperation({ summary: 'Listar planes de mantenimiento' })
-  @Get('planes') listPlanes() { return this.service.listPlanes(); }
+  @Get('planes')
+  listPlanes() {
+    return this.service.listPlanes();
+  }
   @ApiTags('Planes')
   @ApiOperation({ summary: 'Obtener plan por ID' })
   @ApiParam({ name: 'id', description: 'ID del plan', required: true })
-  @Get('planes/:id') getPlan(@Param('id') id: string) { return this.service.getPlan(id); }
+  @Get('planes/:id')
+  getPlan(@Param('id') id: string) {
+    return this.service.getPlan(id);
+  }
   @ApiTags('Planes')
   @ApiOperation({ summary: 'Actualizar plan por ID' })
   @ApiParam({ name: 'id', description: 'ID del plan', required: true })
-  @ApiBody({ type: UpdatePlanDto, required: true })
-  @Patch('planes/:id') updatePlan(@Param('id') id: string, @Body() dto: UpdatePlanDto) { return this.service.updatePlan(id, dto); }
+  @ApiBody({
+    type: UpdatePlanDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createPlan } },
+  })
+  @Patch('planes/:id')
+  updatePlan(@Param('id') id: string, @Body() dto: UpdatePlanDto) {
+    return this.service.updatePlan(id, dto);
+  }
   @ApiTags('Planes')
   @ApiOperation({ summary: 'Eliminar plan por ID' })
   @ApiParam({ name: 'id', description: 'ID del plan', required: true })
-  @Delete('planes/:id') deletePlan(@Param('id') id: string) { return this.service.deletePlan(id); }
+  @Delete('planes/:id')
+  deletePlan(@Param('id') id: string) {
+    return this.service.deletePlan(id);
+  }
 
   @ApiTags('Plan - Tareas')
   @ApiOperation({ summary: 'Crear tarea de un plan' })
   @ApiParam({ name: 'id', description: 'ID del plan', required: true })
-  @ApiBody({ type: CreatePlanTareaDto, required: true })
-  @Post('planes/:id/tareas') createPlanTarea(@Param('id') id: string, @Body() dto: CreatePlanTareaDto) { return this.service.createPlanTarea(id, dto); }
+  @ApiBody({
+    type: CreatePlanTareaDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createPlanTarea } },
+  })
+  @Post('planes/:id/tareas')
+  createPlanTarea(@Param('id') id: string, @Body() dto: CreatePlanTareaDto) {
+    return this.service.createPlanTarea(id, dto);
+  }
   @ApiTags('Plan - Tareas')
   @ApiOperation({ summary: 'Listar tareas de un plan' })
   @ApiParam({ name: 'id', description: 'ID del plan', required: true })
-  @Get('planes/:id/tareas') listPlanTareas(@Param('id') id: string) { return this.service.listPlanTareas(id); }
+  @Get('planes/:id/tareas')
+  listPlanTareas(@Param('id') id: string) {
+    return this.service.listPlanTareas(id);
+  }
   @ApiTags('Plan - Tareas')
   @ApiOperation({ summary: 'Actualizar tarea de plan por ID' })
   @ApiParam({ name: 'id', description: 'ID de la tarea', required: true })
-  @ApiBody({ type: UpdatePlanTareaDto, required: true })
-  @Patch('planes/tareas/:id') updatePlanTarea(@Param('id') id: string, @Body() dto: UpdatePlanTareaDto) { return this.service.updatePlanTarea(id, dto); }
+  @ApiBody({
+    type: UpdatePlanTareaDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createPlanTarea } },
+  })
+  @Patch('planes/tareas/:id')
+  updatePlanTarea(@Param('id') id: string, @Body() dto: UpdatePlanTareaDto) {
+    return this.service.updatePlanTarea(id, dto);
+  }
   @ApiTags('Plan - Tareas')
   @ApiOperation({ summary: 'Eliminar tarea de plan por ID' })
   @ApiParam({ name: 'id', description: 'ID de la tarea', required: true })
-  @Delete('planes/tareas/:id') deletePlanTarea(@Param('id') id: string) { return this.service.deletePlanTarea(id); }
+  @Delete('planes/tareas/:id')
+  deletePlanTarea(@Param('id') id: string) {
+    return this.service.deletePlanTarea(id);
+  }
 
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Crear programación de mantenimiento' })
-  @ApiBody({ type: CreateProgramacionDto, required: true })
-  @Post('programaciones') createProgramacion(@Body() dto: CreateProgramacionDto) { return this.service.createProgramacion(dto); }
+  @ApiBody({
+    type: CreateProgramacionDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createProgramacion } },
+  })
+  @Post('programaciones')
+  createProgramacion(@Body() dto: CreateProgramacionDto) {
+    return this.service.createProgramacion(dto);
+  }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Listar programaciones de mantenimiento' })
-  @Get('programaciones') listProgramaciones() { return this.service.listProgramaciones(); }
+  @Get('programaciones')
+  listProgramaciones() {
+    return this.service.listProgramaciones();
+  }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Obtener programación por ID' })
-  @ApiParam({ name: 'id', description: 'ID de la programación', required: true })
-  @Get('programaciones/:id') getProgramacion(@Param('id') id: string) { return this.service.getProgramacion(id); }
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la programación',
+    required: true,
+  })
+  @Get('programaciones/:id')
+  getProgramacion(@Param('id') id: string) {
+    return this.service.getProgramacion(id);
+  }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Actualizar programación por ID' })
-  @ApiParam({ name: 'id', description: 'ID de la programación', required: true })
-  @ApiBody({ type: UpdateProgramacionDto, required: true })
-  @Patch('programaciones/:id') updateProgramacion(@Param('id') id: string, @Body() dto: UpdateProgramacionDto) { return this.service.updateProgramacion(id, dto); }
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la programación',
+    required: true,
+  })
+  @ApiBody({
+    type: UpdateProgramacionDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createProgramacion } },
+  })
+  @Patch('programaciones/:id')
+  updateProgramacion(
+    @Param('id') id: string,
+    @Body() dto: UpdateProgramacionDto,
+  ) {
+    return this.service.updateProgramacion(id, dto);
+  }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Eliminar programación por ID' })
-  @ApiParam({ name: 'id', description: 'ID de la programación', required: true })
-  @Delete('programaciones/:id') deleteProgramacion(@Param('id') id: string) { return this.service.deleteProgramacion(id); }
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la programación',
+    required: true,
+  })
+  @Delete('programaciones/:id')
+  deleteProgramacion(@Param('id') id: string) {
+    return this.service.deleteProgramacion(id);
+  }
 
   @ApiTags('Alertas')
   @ApiOperation({ summary: 'Listar alertas con filtros opcionales' })
-  @Get('alertas') listAlertas(@Query() query: AlertaQueryDto) { return this.service.listAlertas(query); }
+  @Get('alertas')
+  listAlertas(@Query() query: AlertaQueryDto) {
+    return this.service.listAlertas(query);
+  }
   @ApiTags('Alertas')
   @ApiOperation({ summary: 'Recalcular alertas del sistema' })
-  @Post('alertas/recalcular') recalculate() { return this.service.recalculateAlertas(); }
+  @Post('alertas/recalcular')
+  recalculate() {
+    return this.service.recalculateAlertas();
+  }
 
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar órdenes de trabajo con filtros opcionales' })
-  @Get('work-orders') listWorkOrders(@Query() query: WorkOrderQueryDto) { return this.service.listWorkOrders(query); }
+  @Get('work-orders')
+  listWorkOrders(@Query() query: WorkOrderQueryDto) {
+    return this.service.listWorkOrders(query);
+  }
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Registrar consumo en una orden de trabajo' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
-  @ApiBody({ type: CreateConsumoDto, required: true })
-  @Post('work-orders/:id/consumos') createConsumo(@Param('id') id: string, @Body() dto: CreateConsumoDto) { return this.service.createConsumo(id, dto); }
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiBody({
+    type: CreateConsumoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createConsumo } },
+  })
+  @Post('work-orders/:id/consumos')
+  createConsumo(@Param('id') id: string, @Body() dto: CreateConsumoDto) {
+    return this.service.createConsumo(id, dto);
+  }
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Emitir materiales en una orden de trabajo' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
-  @ApiBody({ type: IssueMaterialsDto, required: true })
-  @Post('work-orders/:id/issue-materials') issueMaterials(@Param('id') id: string, @Body() dto: IssueMaterialsDto) { return this.service.issueMaterials(id, dto); }
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiBody({
+    type: IssueMaterialsDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.issueMaterials } },
+  })
+  @Post('work-orders/:id/issue-materials')
+  issueMaterials(@Param('id') id: string, @Body() dto: IssueMaterialsDto) {
+    return this.service.issueMaterials(id, dto);
+  }
 }
