@@ -35,6 +35,8 @@ import {
   UpdatePlanTareaDto,
   UpdateProgramacionDto,
   WorkOrderQueryDto,
+  CreateEquipoTipoDto,
+  UpdateEquipoTipoDto
 } from '../dto';
 
 const bodyExamples = {
@@ -110,6 +112,11 @@ const bodyExamples = {
     ],
     observacion: 'Salida de materiales para OT-1287',
   },
+  createEquipoTipo: {
+    codigo: 'EXCAVADORA',
+    nombre: 'Excavadora',
+    descripcion: 'Tipo de equipo para excavadoras',
+  },
 } as const;
 
 @Controller()
@@ -158,6 +165,46 @@ export class KpiMaintenanceController {
   @Delete('equipos/:id')
   deleteEquipo(@Param('id') id: string) {
     return this.service.deleteEquipo(id);
+  }
+
+  @ApiTags('Tipo Equipo')
+  @ApiOperation({ summary: 'Listar tipos de equipos'})
+  @Get('tipo-equipo')
+  listTipoEquipo() {
+    return this.service.listEquipoTipos();
+  }
+
+  @ApiTags('Tipo Equipo')
+  @ApiOperation({ summary: 'Crear tipo de equipo'})
+  @ApiBody({
+    type: CreateEquipoTipoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createEquipoTipo } },
+  })
+  @Post('tipo-equipo')
+  createTipoEquipo(@Body() dto: CreateEquipoTipoDto) {
+    return this.service.createEquipoTipo(dto);
+  }
+
+  @ApiTags('Tipo Equipo')
+  @ApiOperation({ summary: 'Actualizar tipo de equipo por ID'})
+  @ApiParam({ name: 'id', description: 'ID del tipo de equipo', required: true })
+  @ApiBody({
+    type: UpdateEquipoTipoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createEquipoTipo } },
+  })
+  @Patch('tipo-equipo/:id')
+  updateTipoEquipo(@Param('id') id: string, @Body() dto: UpdateEquipoTipoDto) {
+    return this.service.updateEquipoTipo(id, dto);
+  }
+
+  @ApiTags('Tipo Equipo')
+  @ApiOperation({ summary: 'Eliminar tipo de equipo por ID'})
+  @ApiParam({ name: 'id', description: 'ID del tipo de equipo', required: true })
+  @Delete('tipo-equipo/:id')
+  deleteTipoEquipo(@Param('id') id: string) {
+    return this.service.deleteEquipoTipo(id);
   }
 
   @ApiTags('Bitácora')

@@ -38,6 +38,19 @@ export class CreateEquipoDto {
 
 export class UpdateEquipoDto extends CreateEquipoDto {}
 
+export class CreateEquipoTipoDto {
+  @ApiProperty({ description: 'Código único del Tipo de Equipo'})
+  @IsString() @IsNotEmpty() codigo: string;
+  @ApiProperty({ description: 'Nombre del Tipo de Equipo' })
+  @IsString() @IsNotEmpty() nombre: string;
+  @ApiPropertyOptional({ description: 'Descripcion del tipo de equipo'})
+  @IsOptional() @IsString() descripcion?: string;
+  @ApiPropertyOptional({ description: 'ID de usuario que registra', format: 'uuid' })
+  @IsOptional() @IsUUID() registrado_por?: string;
+}
+
+export class UpdateEquipoTipoDto extends CreateEquipoTipoDto {}
+
 export class CreateBitacoraDto {
   @ApiProperty({ description: 'Fecha del registro en formato ISO 8601' })
   @IsDateString() fecha: string;

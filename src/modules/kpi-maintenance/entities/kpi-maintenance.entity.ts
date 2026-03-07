@@ -21,6 +21,22 @@ export class EquipoEntity {
   @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
 }
 
+@Entity({ schema: 'kpi_maintenance', name: 'tb_equipo_tipo'})
+export class EquipoTipoEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column() nombre: string;
+  @Column({ type: 'text', nullable: true}) descripcion: string;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true }) deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
+}
+
 @Entity({ schema: 'kpi_maintenance', name: 'tb_bitacora_diaria' })
 export class BitacoraDiariaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
@@ -80,7 +96,7 @@ export class PlanMantenimientoEntity {
   @Column() nombre: string;
   @Column({ default: 'PREVENTIVO' }) tipo: string;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
-  @Column({ default: 'HORAS' }) frecuencia_tipo: string;
+  @Column({ default: 'HORAS' }) frecuencia_tipo: string;  
   @Column({ default: 0 }) frecuencia_valor: number;
   @Column({ default: false }) requiere_parada: boolean;
   @Column({ default: 'ACTIVE' }) status: string;

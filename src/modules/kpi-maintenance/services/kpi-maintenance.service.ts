@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, FindOptionsWhere, IsNull, ObjectLiteral, Repository } from 'typeorm';
-import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderEntity } from '../entities/kpi-maintenance.entity';
-import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, UpdateBitacoraDto, UpdateEquipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, WorkOrderQueryDto } from '../dto';
+import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderEntity } from '../entities/kpi-maintenance.entity';
+import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEquipoTipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, UpdateBitacoraDto, UpdateEquipoDto, UpdateEquipoTipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, WorkOrderQueryDto } from '../dto';
 
 @Injectable()
 export class KpiMaintenanceService {
@@ -22,7 +22,7 @@ export class KpiMaintenanceService {
     @InjectRepository(ProductoEntity) private readonly productoRepo: Repository<ProductoEntity>,
     @InjectRepository(ReservaStockEntity) private readonly reservaRepo: Repository<ReservaStockEntity>,
     @InjectDataSource() private readonly dataSource: DataSource,
-  ) {}
+  ) { }
 
   private wrap(data: unknown, message = 'OK', meta?: unknown) { return { data, meta, message }; }
 
@@ -42,6 +42,25 @@ export class KpiMaintenanceService {
   async createEquipo(dto: CreateEquipoDto) { return this.wrap(await this.equipoRepo.save(this.equipoRepo.create({ ...dto, horometro_actual: dto.horometro_actual ?? 0 })), 'Equipo creado'); }
   async updateEquipo(id: string, dto: UpdateEquipoDto) { const e = await this.findEquipoOrFail(id); Object.assign(e, dto); return this.wrap(await this.equipoRepo.save(e), 'Equipo actualizado'); }
   async deleteEquipo(id: string) { const e = await this.findEquipoOrFail(id); e.is_deleted = true; e.deleted_at = new Date(); await this.equipoRepo.save(e); return this.wrap(true, 'Equipo eliminado'); }
+
+  async listEquipoTipos() {
+    return this.wrap(await this.equipoRepo.manager.find(EquipoTipoEntity, {
+      where: { is_deleted: false }
+    }), 'Tipos de equipo listados');
+  }
+  async createEquipoTipo(dto: CreateEquipoTipoDto) {
+    return this.wrap(await this.equipoRepo.manager.save(EquipoTipoEntity, this.equipoRepo.manager.create(EquipoTipoEntity, dto)), 'Tipo de equipo creado');
+  }
+  async updateEquipoTipo(id: string, dto: UpdateEquipoTipoDto) {
+    const t = await this.findOneOrFail(this.equipoRepo.manager.getRepository(EquipoTipoEntity), {
+      id, is_deleted: false
+    }); Object.assign(t, dto); return this.wrap(await this.equipoRepo.manager.save(EquipoTipoEntity, t), 'Tipo de equipo actualizado');
+  }
+  async deleteEquipoTipo(id: string) {
+    const t = await this.findOneOrFail(this.equipoRepo.manager.getRepository(EquipoTipoEntity), {
+      id, is_deleted: false
+    }); t.is_deleted = true; t.deleted_at = new Date(); await this.equipoRepo.manager.save(EquipoTipoEntity, t); return this.wrap(true, 'Tipo de equipo eliminado');
+  }
 
   async listBitacora(equipoId: string, range: DateRangeDto) {
     await this.findEquipoOrFail(equipoId);
