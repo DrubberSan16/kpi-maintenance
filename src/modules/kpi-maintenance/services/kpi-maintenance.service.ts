@@ -1,8 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
+import { basename, extname, join } from 'path';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, FindOptionsWhere, IsNull, ObjectLiteral, Repository } from 'typeorm';
-import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderEntity } from '../entities/kpi-maintenance.entity';
-import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEquipoTipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, UpdateBitacoraDto, UpdateEquipoDto, UpdateEquipoTipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, WorkOrderQueryDto } from '../dto';
+import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from '../entities/kpi-maintenance.entity';
+import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEquipoTipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, CreateWorkOrderDto, CreateWorkOrderTareaDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, UpdateBitacoraDto, UpdateEquipoDto, UpdateEquipoTipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, UpdateWorkOrderDto, UpdateWorkOrderTareaDto, UploadWorkOrderAdjuntoDto, WorkOrderAdjuntoQueryDto, WorkOrderQueryDto } from '../dto';
 
 @Injectable()
 export class KpiMaintenanceService {
@@ -21,8 +24,12 @@ export class KpiMaintenanceService {
     @InjectRepository(StockBodegaEntity) private readonly stockRepo: Repository<StockBodegaEntity>,
     @InjectRepository(ProductoEntity) private readonly productoRepo: Repository<ProductoEntity>,
     @InjectRepository(ReservaStockEntity) private readonly reservaRepo: Repository<ReservaStockEntity>,
+    @InjectRepository(WorkOrderTareaEntity) private readonly woTareaRepo: Repository<WorkOrderTareaEntity>,
+    @InjectRepository(WorkOrderAdjuntoEntity) private readonly woAdjuntoRepo: Repository<WorkOrderAdjuntoEntity>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) { }
+
+  private readonly uploadRoot = process.env.WORK_ORDER_UPLOAD_DIR || join(process.cwd(), 'storage', 'work-orders');
 
   private wrap(data: unknown, message = 'OK', meta?: unknown) { return { data, meta, message }; }
 
@@ -166,6 +173,123 @@ export class KpiMaintenanceService {
     if (q.estado) qb.andWhere('wo.status_workflow = :estado', { estado: q.estado });
     if (q.maintenance_kind) qb.andWhere('wo.maintenance_kind = :kind', { kind: q.maintenance_kind });
     return this.wrap(await qb.getMany(), 'Work orders listadas');
+  }
+
+
+  async createWorkOrder(dto: CreateWorkOrderDto) {
+    await this.findEquipoOrFail(dto.equipment_id);
+    if (dto.plan_id) await this.findOneOrFail(this.planRepo, { id: dto.plan_id, is_deleted: false });
+    const created = await this.woRepo.save(this.woRepo.create({
+      equipment_id: dto.equipment_id,
+      maintenance_kind: dto.maintenance_kind ?? dto.plan_id ?? null,
+      status_workflow: dto.status_workflow ?? 'PENDIENTE',
+    }));
+    if (dto.alerta_id) {
+      const alerta = await this.findOneOrFail(this.alertaRepo, { id: dto.alerta_id, is_deleted: false });
+      alerta.work_order_id = created.id;
+      alerta.estado = 'EN_PROCESO';
+      await this.alertaRepo.save(alerta);
+    }
+    return this.wrap(created, 'Work order creada');
+  }
+
+  async updateWorkOrder(id: string, dto: UpdateWorkOrderDto) {
+    const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    Object.assign(wo, dto);
+    return this.wrap(await this.woRepo.save(wo), 'Work order actualizada');
+  }
+
+  async deleteWorkOrder(id: string) {
+    const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    wo.is_deleted = true;
+    await this.woRepo.save(wo);
+    return this.wrap(true, 'Work order eliminada');
+  }
+
+  async listWorkOrderTareas(workOrderId: string) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    return this.wrap(await this.woTareaRepo.find({ where: { work_order_id: workOrderId, is_deleted: false } }), 'Tareas de OT listadas');
+  }
+
+  async createWorkOrderTarea(workOrderId: string, dto: CreateWorkOrderTareaDto) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    await this.findOneOrFail(this.planRepo, { id: dto.plan_id, is_deleted: false });
+    await this.findOneOrFail(this.planTareaRepo, { id: dto.tarea_id, plan_id: dto.plan_id, is_deleted: false });
+    const created = await this.woTareaRepo.save(this.woTareaRepo.create({ ...dto, work_order_id: workOrderId }));
+    return this.wrap(created, 'Tarea de OT creada');
+  }
+
+  async updateWorkOrderTarea(id: string, dto: UpdateWorkOrderTareaDto) {
+    const tarea = await this.findOneOrFail(this.woTareaRepo, { id, is_deleted: false });
+    Object.assign(tarea, dto);
+    return this.wrap(await this.woTareaRepo.save(tarea), 'Tarea de OT actualizada');
+  }
+
+  async deleteWorkOrderTarea(id: string) {
+    const tarea = await this.findOneOrFail(this.woTareaRepo, { id, is_deleted: false });
+    tarea.is_deleted = true;
+    await this.woTareaRepo.save(tarea);
+    return this.wrap(true, 'Tarea de OT eliminada');
+  }
+
+  async uploadWorkOrderAdjunto(workOrderId: string, dto: UploadWorkOrderAdjuntoDto) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(dto.contenido_base64, 'base64');
+    } catch {
+      throw new BadRequestException('contenido_base64 inválido');
+    }
+    if (!buffer.length) throw new BadRequestException('Archivo vacío');
+    const folder = join(this.uploadRoot, workOrderId);
+    await mkdir(folder, { recursive: true });
+    const originalName = basename(dto.nombre);
+    const filePath = join(folder, originalName);
+    await writeFile(filePath, buffer);
+    const hash = createHash('sha256').update(buffer).digest('hex');
+    const created = await this.woAdjuntoRepo.save(this.woAdjuntoRepo.create({
+      work_order_id: workOrderId,
+      tipo: dto.tipo ?? 'EVIDENCIA',
+      nombre: originalName,
+      url: filePath,
+      hash_sha256: hash,
+      meta: { ...(dto.meta ?? {}), mime_type: dto.mime_type ?? null, extension: extname(originalName) || null, size_bytes: buffer.length },
+    }));
+    return this.wrap(created, 'Adjunto cargado');
+  }
+
+  async listWorkOrderAdjuntos(workOrderId: string, query: WorkOrderAdjuntoQueryDto) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    const where: FindOptionsWhere<WorkOrderAdjuntoEntity> = { work_order_id: workOrderId, is_deleted: false };
+    if (query.tipo) where.tipo = query.tipo;
+    return this.wrap(await this.woAdjuntoRepo.find({ where }), 'Adjuntos listados');
+  }
+
+  async getWorkOrderAdjunto(workOrderId: string, adjuntoId: string) {
+    const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, { id: adjuntoId, work_order_id: workOrderId, is_deleted: false });
+    const buffer = await readFile(adjunto.url);
+    const base64 = buffer.toString('base64');
+    const meta = (adjunto.meta ?? {}) as Record<string, unknown>;
+    const mimeType = typeof meta.mime_type === 'string' ? meta.mime_type : 'application/octet-stream';
+    return this.wrap({
+      id: adjunto.id,
+      work_order_id: adjunto.work_order_id,
+      tipo: adjunto.tipo,
+      nombre: adjunto.nombre,
+      hash_sha256: adjunto.hash_sha256,
+      contenido_base64: base64,
+      content_type: mimeType,
+      data_url: `data:${mimeType};base64,${base64}`,
+      meta: adjunto.meta,
+    }, 'Adjunto obtenido');
+  }
+
+  async deleteWorkOrderAdjunto(workOrderId: string, adjuntoId: string) {
+    const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, { id: adjuntoId, work_order_id: workOrderId, is_deleted: false });
+    adjunto.is_deleted = true;
+    await this.woAdjuntoRepo.save(adjunto);
+    try { await unlink(adjunto.url); } catch { /* ignore */ }
+    return this.wrap(true, 'Adjunto eliminado');
   }
 
   async createConsumo(workOrderId: string, dto: CreateConsumoDto) {

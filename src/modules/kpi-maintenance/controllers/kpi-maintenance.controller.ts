@@ -36,7 +36,13 @@ import {
   UpdateProgramacionDto,
   WorkOrderQueryDto,
   CreateEquipoTipoDto,
-  UpdateEquipoTipoDto
+  CreateWorkOrderDto,
+  CreateWorkOrderTareaDto,
+  UpdateEquipoTipoDto,
+  UpdateWorkOrderDto,
+  UpdateWorkOrderTareaDto,
+  UploadWorkOrderAdjuntoDto,
+  WorkOrderAdjuntoQueryDto
 } from '../dto';
 
 const bodyExamples = {
@@ -116,6 +122,25 @@ const bodyExamples = {
     codigo: 'EXCAVADORA',
     nombre: 'Excavadora',
     descripcion: 'Tipo de equipo para excavadoras',
+  },
+
+  createWorkOrder: {
+    equipment_id: '1ec0ef12-5fd3-414f-aee4-5f163dd98a8c',
+    maintenance_kind: 'PREVENTIVO',
+    status_workflow: 'PENDIENTE',
+    plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',
+  },
+  createWorkOrderTarea: {
+    plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',
+    tarea_id: 'cb44df27-46a4-4dd1-8b56-c69e963f2e93',
+    valor_boolean: true,
+    observacion: 'Se completó según checklist',
+  },
+  uploadAdjunto: {
+    tipo: 'EVIDENCIA',
+    nombre: 'foto-motor.jpg',
+    contenido_base64: 'iVBORw0KGgoAAAANSUhEUgAA...',
+    mime_type: 'image/jpeg',
   },
 } as const;
 
@@ -455,6 +480,113 @@ export class KpiMaintenanceController {
   listWorkOrders(@Query() query: WorkOrderQueryDto) {
     return this.service.listWorkOrders(query);
   }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Crear orden de trabajo' })
+  @ApiBody({
+    type: CreateWorkOrderDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createWorkOrder } },
+  })
+  @Post('work-orders')
+  createWorkOrder(@Body() dto: CreateWorkOrderDto) {
+    return this.service.createWorkOrder(dto);
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Actualizar orden de trabajo por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiBody({ type: UpdateWorkOrderDto, required: true })
+  @Patch('work-orders/:id')
+  updateWorkOrder(@Param('id') id: string, @Body() dto: UpdateWorkOrderDto) {
+    return this.service.updateWorkOrder(id, dto);
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar orden de trabajo por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @Delete('work-orders/:id')
+  deleteWorkOrder(@Param('id') id: string) {
+    return this.service.deleteWorkOrder(id);
+  }
+
+  @ApiTags('Work Orders - Tareas')
+  @ApiOperation({ summary: 'Listar tareas registradas de una orden de trabajo' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @Get('work-orders/:id/tareas')
+  listWorkOrderTareas(@Param('id') id: string) {
+    return this.service.listWorkOrderTareas(id);
+  }
+
+  @ApiTags('Work Orders - Tareas')
+  @ApiOperation({ summary: 'Crear tarea ejecutada para una orden de trabajo' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiBody({
+    type: CreateWorkOrderTareaDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createWorkOrderTarea } },
+  })
+  @Post('work-orders/:id/tareas')
+  createWorkOrderTarea(@Param('id') id: string, @Body() dto: CreateWorkOrderTareaDto) {
+    return this.service.createWorkOrderTarea(id, dto);
+  }
+
+  @ApiTags('Work Orders - Tareas')
+  @ApiOperation({ summary: 'Actualizar tarea ejecutada de OT por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la tarea de OT', required: true })
+  @ApiBody({ type: UpdateWorkOrderTareaDto, required: true })
+  @Patch('work-orders/tareas/:id')
+  updateWorkOrderTarea(@Param('id') id: string, @Body() dto: UpdateWorkOrderTareaDto) {
+    return this.service.updateWorkOrderTarea(id, dto);
+  }
+
+  @ApiTags('Work Orders - Tareas')
+  @ApiOperation({ summary: 'Eliminar tarea ejecutada de OT por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la tarea de OT', required: true })
+  @Delete('work-orders/tareas/:id')
+  deleteWorkOrderTarea(@Param('id') id: string) {
+    return this.service.deleteWorkOrderTarea(id);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Subir archivo adjunto de una OT en base64' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiBody({
+    type: UploadWorkOrderAdjuntoDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.uploadAdjunto } },
+  })
+  @Post('work-orders/:id/adjuntos')
+  uploadWorkOrderAdjunto(@Param('id') id: string, @Body() dto: UploadWorkOrderAdjuntoDto) {
+    return this.service.uploadWorkOrderAdjunto(id, dto);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Listar adjuntos de una OT' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @Get('work-orders/:id/adjuntos')
+  listWorkOrderAdjuntos(@Param('id') id: string, @Query() query: WorkOrderAdjuntoQueryDto) {
+    return this.service.listWorkOrderAdjuntos(id, query);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Descargar adjunto de una OT (base64 + data_url)' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({ name: 'adjuntoId', description: 'ID del adjunto', required: true })
+  @Get('work-orders/:id/adjuntos/:adjuntoId')
+  getWorkOrderAdjunto(@Param('id') id: string, @Param('adjuntoId') adjuntoId: string) {
+    return this.service.getWorkOrderAdjunto(id, adjuntoId);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Eliminar adjunto de una OT por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({ name: 'adjuntoId', description: 'ID del adjunto', required: true })
+  @Delete('work-orders/:id/adjuntos/:adjuntoId')
+  deleteWorkOrderAdjunto(@Param('id') id: string, @Param('adjuntoId') adjuntoId: string) {
+    return this.service.deleteWorkOrderAdjunto(id, adjuntoId);
+  }
+
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Registrar consumo en una orden de trabajo' })
   @ApiParam({
