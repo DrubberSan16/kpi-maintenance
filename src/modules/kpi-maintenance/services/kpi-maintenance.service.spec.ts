@@ -20,12 +20,14 @@ describe('KpiMaintenanceService', () => {
   const stockRepo = repo();
   const productoRepo = repo();
   const reservaRepo = repo();
+  const woTareaRepo = repo();
+  const woAdjuntoRepo = repo();
   const qr: any = { connect: jest.fn(), startTransaction: jest.fn(), commitTransaction: jest.fn(), rollbackTransaction: jest.fn(), release: jest.fn(), manager: { save: jest.fn(async (x, y) => y ?? x), create: jest.fn((_, x) => x), findOne: jest.fn() } };
   const ds = { createQueryRunner: jest.fn(() => qr) } as unknown as DataSource;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new KpiMaintenanceService(equipoRepo as any, bitacoraRepo as any, alertaRepo as any, estadoRepo as any, estadoCatalogoRepo as any, eventoRepo as any, planRepo as any, planTareaRepo as any, programacionRepo as any, woRepo as any, consumoRepo as any, stockRepo as any, productoRepo as any, reservaRepo as any, ds);
+    service = new KpiMaintenanceService(equipoRepo as any, bitacoraRepo as any, alertaRepo as any, estadoRepo as any, estadoCatalogoRepo as any, eventoRepo as any, planRepo as any, planTareaRepo as any, programacionRepo as any, woRepo as any, consumoRepo as any, stockRepo as any, productoRepo as any, reservaRepo as any, woTareaRepo as any, woAdjuntoRepo as any, ds);
   });
 
   it('bitácora: horómetro retrocede -> alerta y conflicto', async () => {

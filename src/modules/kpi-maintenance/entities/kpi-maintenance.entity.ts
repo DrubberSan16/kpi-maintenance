@@ -134,7 +134,7 @@ export class ProgramacionPlanEntity {
 export class AlertaMantenimientoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({type: 'uuid'}) equipo_id: string;
-  @Column({type: 'uuid'}) tipo_alerta: string;
+  @Column() tipo_alerta: string;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' }) fecha_generada: Date;
   @Column({ default: 'ABIERTA' }) estado: string;
   @Column({ type: 'text', nullable: true }) detalle?: string | null;
@@ -154,6 +154,35 @@ export class ConsumoRepuestoEntity {
   @Column('numeric', { precision: 14, scale: 4, default: 0 }) costo_unitario: number;
   @Column('numeric', { precision: 18, scale: 4, default: 0 }) subtotal: number;
   @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_tarea' })
+export class WorkOrderTareaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({type: 'uuid'}) work_order_id: string;
+  @Column({type: 'uuid'}) plan_id: string;
+  @Column({type: 'uuid'}) tarea_id: string;
+  @Column({ type: 'boolean', nullable: true }) valor_boolean?: boolean | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true }) valor_numeric?: number | null;
+  @Column({ type: 'text', nullable: true }) valor_text?: string | null;
+  @Column({ type: 'jsonb', nullable: true }) valor_json?: Record<string, unknown> | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_adjunto' })
+export class WorkOrderAdjuntoEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({type: 'uuid'}) work_order_id: string;
+  @Column({ default: 'EVIDENCIA' }) tipo: string;
+  @Column({ type: 'text', nullable: true }) nombre?: string | null;
+  @Column({ type: 'text' }) url: string;
+  @Column({ type: 'text', nullable: true }) hash_sha256?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) meta: Record<string, unknown>;
+  @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
 }
 

@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsDateString, IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator';
+import { IsBoolean, IsDateString, IsEnum, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class EquipoQueryDto {
@@ -157,6 +157,26 @@ export class WorkOrderQueryDto {
   @IsOptional() @IsString() maintenance_kind?: string;
 }
 
+export class CreateWorkOrderDto {
+  @ApiProperty({ description: 'ID del equipo', format: 'uuid' })
+  @IsUUID() equipment_id: string;
+  @ApiPropertyOptional({ description: 'Tipo de mantenimiento de la OT' })
+  @IsOptional() @IsString() maintenance_kind?: string;
+  @ApiPropertyOptional({ description: 'Estado de workflow inicial' })
+  @IsOptional() @IsString() status_workflow?: string;
+  @ApiPropertyOptional({ description: 'ID de la programación que origina la OT', format: 'uuid' })
+  @IsOptional() @IsUUID() plan_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la alerta que origina la OT', format: 'uuid' })
+  @IsOptional() @IsUUID() alerta_id?: string;
+}
+
+export class UpdateWorkOrderDto {
+  @ApiPropertyOptional({ description: 'Estado de workflow de la OT' })
+  @IsOptional() @IsString() status_workflow?: string;
+  @ApiPropertyOptional({ description: 'Tipo de mantenimiento de la OT' })
+  @IsOptional() @IsString() maintenance_kind?: string;
+}
+
 export class CreateConsumoDto {
   @ApiProperty({ description: 'ID del producto consumido', format: 'uuid' })
   @IsUUID() producto_id: string;
@@ -184,4 +204,54 @@ export class IssueMaterialsDto {
   @ValidateNested({ each: true }) @Type(() => IssueMaterialItemDto) items: IssueMaterialItemDto[];
   @ApiPropertyOptional({ description: 'Observación general de la salida de materiales' })
   @IsOptional() @IsString() observacion?: string;
+}
+
+export class CreateWorkOrderTareaDto {
+  @ApiProperty({ description: 'ID del plan', format: 'uuid' })
+  @IsUUID() plan_id: string;
+  @ApiProperty({ description: 'ID de la tarea de plan', format: 'uuid' })
+  @IsUUID() tarea_id: string;
+  @ApiPropertyOptional({ description: 'Valor booleano' })
+  @IsOptional() @IsBoolean() valor_boolean?: boolean;
+  @ApiPropertyOptional({ description: 'Valor numérico', type: Number })
+  @IsOptional() @Type(() => Number) @IsNumber() valor_numeric?: number;
+  @ApiPropertyOptional({ description: 'Valor textual' })
+  @IsOptional() @IsString() valor_text?: string;
+  @ApiPropertyOptional({ description: 'Valor estructurado en json' })
+  @IsOptional() @IsObject() valor_json?: Record<string, unknown>;
+  @ApiPropertyOptional({ description: 'Observación de la ejecución' })
+  @IsOptional() @IsString() observacion?: string;
+}
+
+export class UpdateWorkOrderTareaDto {
+  @ApiPropertyOptional({ description: 'Valor booleano' })
+  @IsOptional() @IsBoolean() valor_boolean?: boolean;
+  @ApiPropertyOptional({ description: 'Valor numérico', type: Number })
+  @IsOptional() @Type(() => Number) @IsNumber() valor_numeric?: number;
+  @ApiPropertyOptional({ description: 'Valor textual' })
+  @IsOptional() @IsString() valor_text?: string;
+  @ApiPropertyOptional({ description: 'Valor estructurado en json' })
+  @IsOptional() @IsObject() valor_json?: Record<string, unknown>;
+  @ApiPropertyOptional({ description: 'Observación de la ejecución' })
+  @IsOptional() @IsString() observacion?: string;
+  @ApiPropertyOptional({ description: 'Estado de registro' })
+  @IsOptional() @IsString() status?: string;
+}
+
+export class UploadWorkOrderAdjuntoDto {
+  @ApiPropertyOptional({ description: 'Tipo de adjunto', default: 'EVIDENCIA' })
+  @IsOptional() @IsString() tipo?: string;
+  @ApiProperty({ description: 'Nombre original del archivo (ej. foto1.jpg)' })
+  @IsString() @IsNotEmpty() nombre: string;
+  @ApiProperty({ description: 'Contenido codificado en base64 (sin data-url)' })
+  @IsString() @IsNotEmpty() contenido_base64: string;
+  @ApiPropertyOptional({ description: 'Mime type del archivo (ej. image/jpeg, application/pdf)' })
+  @IsOptional() @IsString() mime_type?: string;
+  @ApiPropertyOptional({ description: 'Metadatos del archivo en formato json' })
+  @IsOptional() @IsObject() meta?: Record<string, unknown>;
+}
+
+export class WorkOrderAdjuntoQueryDto {
+  @ApiPropertyOptional({ description: 'Filtrar por tipo de adjunto' })
+  @IsOptional() @IsString() tipo?: string;
 }
