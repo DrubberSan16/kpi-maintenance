@@ -19,6 +19,15 @@ export class EquipoEntity {
   @Column({ default: false }) is_deleted: boolean;
   @Column({ type: 'timestamp without time zone', nullable: true }) deleted_at?: Date | null;
   @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
+  @Column() marca_id: string;
+}
+
+@Entity({ schema: 'kpi_inventory', name: 'tb_marca' })
+export class MarcaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;  
+  @Column() nombre: string;  
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ default: false }) is_deleted: boolean;
 }
 
 @Entity({ schema: 'kpi_maintenance', name: 'tb_equipo_tipo'})

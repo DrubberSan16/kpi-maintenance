@@ -9,6 +9,8 @@ export class EquipoQueryDto {
   @IsOptional() @IsUUID() location_id?: string;
   @ApiPropertyOptional({ description: 'ID del tipo de equipo', format: 'uuid' })
   @IsOptional() @IsUUID() equipo_tipo_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la marca', format: 'uuid' })
+  @IsOptional() @IsUUID() marca_id?: string;
   @ApiPropertyOptional({ description: 'Estado operativo del equipo' })
   @IsOptional() @IsString() estado_operativo?: string;
   @ApiPropertyOptional({ description: 'Nivel de criticidad del equipo' })
@@ -28,6 +30,8 @@ export class CreateEquipoDto {
   @IsUUID() equipo_tipo_id: string;
   @ApiPropertyOptional({ description: 'ID de la ubicación', format: 'uuid' })
   @IsOptional() @IsUUID() location_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la marca', format: 'uuid' })
+  @IsOptional() @IsUUID() marca_id?: string;
   @ApiPropertyOptional({ description: 'Nivel de criticidad' })
   @IsOptional() @IsString() criticidad?: string;
   @ApiPropertyOptional({ description: 'Estado operativo actual' })

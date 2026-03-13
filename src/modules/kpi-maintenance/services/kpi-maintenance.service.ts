@@ -37,6 +37,7 @@ export class KpiMaintenanceService {
     const page = query.page ?? 1; const limit = Math.min(query.limit ?? 10, 100);
     const qb = this.equipoRepo.createQueryBuilder('e').where('e.is_deleted = false');
     if (query.codigo) qb.andWhere('e.codigo ILIKE :codigo', { codigo: `%${query.codigo}%` });
+    if (query.marca_id) qb.andWhere('e.marca_id = :marca_id', { marca_id: query.marca_id });
     if (query.location_id) qb.andWhere('e.location_id = :location_id', { location_id: query.location_id });
     if (query.equipo_tipo_id) qb.andWhere('e.equipo_tipo_id = :equipo_tipo_id', { equipo_tipo_id: query.equipo_tipo_id });
     if (query.estado_operativo) qb.andWhere('e.estado_operativo = :estado_operativo', { estado_operativo: query.estado_operativo });

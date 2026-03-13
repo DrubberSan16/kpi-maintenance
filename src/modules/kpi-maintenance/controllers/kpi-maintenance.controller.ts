@@ -51,6 +51,7 @@ const bodyExamples = {
     nombre: 'Excavadora CAT 320',
     equipo_tipo_id: 'd5f4b3e7-668f-44ac-8d59-9e992cbca3d8',
     location_id: 'c1b9cb58-68fd-41f4-8e7f-1c2bc1df51c5',
+    marca_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
     criticidad: 'ALTA',
     estado_operativo: 'OPERATIVO',
     horometro_actual: 1250.5,
