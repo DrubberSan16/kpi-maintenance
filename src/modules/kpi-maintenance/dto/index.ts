@@ -55,6 +55,20 @@ export class CreateEquipoTipoDto {
 
 export class UpdateEquipoTipoDto extends CreateEquipoTipoDto {}
 
+export class EquipoTipoQueryDto {
+  @ApiPropertyOptional({ description: 'Código del tipo de equipo' })
+  @IsOptional() @IsString() codigo?: string;
+  @ApiPropertyOptional({ description: 'Nombre del tipo de equipo' })
+  @IsOptional() @IsString() nombre?: string;
+}
+
+export class LocationQueryDto {
+  @ApiPropertyOptional({ description: 'Código de la ubicación' })
+  @IsOptional() @IsString() codigo?: string;
+  @ApiPropertyOptional({ description: 'Nombre de la ubicación' })
+  @IsOptional() @IsString() nombre?: string;
+}
+
 export class CreateLocationDto {
   @ApiProperty({ description: 'Código único de la ubicación' })
   @IsString() @IsNotEmpty() codigo: string

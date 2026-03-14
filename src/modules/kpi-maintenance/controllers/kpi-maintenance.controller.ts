@@ -44,7 +44,8 @@ import {
   UploadWorkOrderAdjuntoDto,
   WorkOrderAdjuntoQueryDto,
   CreateLocationDto,
-  UpdateLocationDto
+  UpdateLocationDto,
+  LocationQueryDto
 } from '../dto';
 
 const bodyExamples = {
@@ -241,10 +242,18 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Locaciones')
-  @ApiOperation({ summary: 'Listar locaciones' })
+  @ApiOperation({ summary: 'Listar locaciones con filtros opcionales' })
   @Get('locaciones')
-  listLocaciones() {
-    return this.service.listLocations();
+  listLocaciones(@Query() query: LocationQueryDto) {
+    return this.service.listLocations(query);
+  }
+  
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Obtener locación por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
+  @Get('locaciones/:id')
+  getLocacion(@Param('id') id: string) {
+    return this.service.getLocation(id);
   }
 
   @ApiTags('Locaciones')
