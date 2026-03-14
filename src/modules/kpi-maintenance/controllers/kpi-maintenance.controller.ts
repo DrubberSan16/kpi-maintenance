@@ -45,7 +45,8 @@ import {
   WorkOrderAdjuntoQueryDto,
   CreateLocationDto,
   UpdateLocationDto,
-  LocationQueryDto
+  LocationQueryDto,
+  EquipoTipoQueryDto
 } from '../dto';
 
 const bodyExamples = {
@@ -202,10 +203,10 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Tipo Equipo')
-  @ApiOperation({ summary: 'Listar tipos de equipos'})
+  @ApiOperation({ summary: 'Listar tipos de equipos con filtros opcionales' })
   @Get('tipo-equipo')
-  listTipoEquipo() {
-    return this.service.listEquipoTipos();
+  listTipoEquipo(@Query() query: EquipoTipoQueryDto) {
+    return this.service.listEquipoTipos(query);
   }
 
   @ApiTags('Tipo Equipo')

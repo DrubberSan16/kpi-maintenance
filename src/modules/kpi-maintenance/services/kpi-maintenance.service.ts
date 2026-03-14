@@ -5,7 +5,7 @@ import { basename, extname, join } from 'path';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, FindOptionsWhere, In, IsNull, ObjectLiteral, Repository } from 'typeorm';
 import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, LocationEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from '../entities/kpi-maintenance.entity';
-import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEquipoTipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, CreateWorkOrderDto, CreateWorkOrderTareaDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, LocationQueryDto, UpdateBitacoraDto, UpdateEquipoDto, UpdateEquipoTipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, UpdateWorkOrderDto, UpdateWorkOrderTareaDto, UploadWorkOrderAdjuntoDto, WorkOrderAdjuntoQueryDto, WorkOrderQueryDto } from '../dto';
+import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEquipoTipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, CreateWorkOrderDto, CreateWorkOrderTareaDto, DateRangeDto, EquipoQueryDto, EquipoTipoQueryDto, IssueMaterialsDto, LocationQueryDto, UpdateBitacoraDto, UpdateEquipoDto, UpdateEquipoTipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, UpdateWorkOrderDto, UpdateWorkOrderTareaDto, UploadWorkOrderAdjuntoDto, WorkOrderAdjuntoQueryDto, WorkOrderQueryDto } from '../dto';
 
 @Injectable()
 export class KpiMaintenanceService {
@@ -53,10 +53,14 @@ export class KpiMaintenanceService {
   async updateEquipo(id: string, dto: UpdateEquipoDto) { const e = await this.findEquipoOrFail(id); Object.assign(e, dto); return this.wrap(await this.equipoRepo.save(e), 'Equipo actualizado'); }
   async deleteEquipo(id: string) { const e = await this.findEquipoOrFail(id); e.is_deleted = true; e.deleted_at = new Date(); await this.equipoRepo.save(e); return this.wrap(true, 'Equipo eliminado'); }
 
-  async listEquipoTipos() {
-    return this.wrap(await this.equipoTipoRepo.manager.find(EquipoTipoEntity, {
-      where: { is_deleted: false }
-    }), 'Tipos de equipo listados');
+  async listEquipoTipos( query: EquipoTipoQueryDto ) {
+    const page = query.page ?? 1; 
+    const limit = Math.min(query.limit ?? 10, 100);    
+    const qb = this.equipoTipoRepo.createQueryBuilder('t').where('t.is_deleted = false');
+    if (query.codigo) qb.andWhere('t.codigo ILIKE :codigo', { codigo: `%${query.codigo}%` });
+    if (query.nombre) qb.andWhere('t.nombre ILIKE :nombre', { nombre: `%${query.nombre}%` });
+    return this.wrap(await qb.skip((page - 1) * limit).take(limit).getMany(), 'Tipos de equipo listados');
+    
   }
   async createEquipoTipo(dto: CreateEquipoTipoDto) {
     return this.wrap(await this.equipoTipoRepo.manager.save(EquipoTipoEntity, this.equipoTipoRepo.manager.create(EquipoTipoEntity, dto)), 'Tipo de equipo creado');
@@ -73,10 +77,12 @@ export class KpiMaintenanceService {
   }
 
   async listLocations( query: LocationQueryDto ) {
+    const page = query.page ?? 1; 
+    const limit = Math.min(query.limit ?? 10, 100);
     const qb = this.locationRepo.createQueryBuilder('l').where('l.is_deleted = false');
     if (query.codigo) qb.andWhere('l.codigo ILIKE :codigo', { codigo: `%${query.codigo}%` });
     if (query.nombre) qb.andWhere('l.nombre ILIKE :nombre', { nombre: `%${query.nombre}%` });
-    return this.wrap(await qb.getMany(), 'Locations listados');
+    return this.wrap(await qb.skip((page - 1) * limit).take(limit).getMany(), 'Locations listados');
   }
 
   async getLocation(id: string) {

@@ -60,6 +60,10 @@ export class EquipoTipoQueryDto {
   @IsOptional() @IsString() codigo?: string;
   @ApiPropertyOptional({ description: 'Nombre del tipo de equipo' })
   @IsOptional() @IsString() nombre?: string;
+  @ApiPropertyOptional({ description: 'Página a consultar', minimum: 1, type: Number })
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(1) page?: number;
+  @ApiPropertyOptional({ description: 'Cantidad de registros por página', minimum: 1, type: Number })
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(1) limit?: number;
 }
 
 export class LocationQueryDto {
@@ -67,6 +71,10 @@ export class LocationQueryDto {
   @IsOptional() @IsString() codigo?: string;
   @ApiPropertyOptional({ description: 'Nombre de la ubicación' })
   @IsOptional() @IsString() nombre?: string;
+  @ApiPropertyOptional({ description: 'Página a consultar', minimum: 1, type: Number })
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(1) page?: number;
+  @ApiPropertyOptional({ description: 'Cantidad de registros por página', minimum: 1, type: Number })
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(1) limit?: number;
 }
 
 export class CreateLocationDto {
