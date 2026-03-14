@@ -1,16 +1,18 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
 import { basename, extname, join } from 'path';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindOptionsWhere, IsNull, ObjectLiteral, Repository } from 'typeorm';
-import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from '../entities/kpi-maintenance.entity';
+import { DataSource, FindOptionsWhere, In, IsNull, ObjectLiteral, Repository } from 'typeorm';
+import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, LocationEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from '../entities/kpi-maintenance.entity';
 import { AlertaQueryDto, ChangeEstadoDto, CreateBitacoraDto, CreateConsumoDto, CreateEquipoDto, CreateEquipoTipoDto, CreateEventoDto, CreatePlanDto, CreatePlanTareaDto, CreateProgramacionDto, CreateWorkOrderDto, CreateWorkOrderTareaDto, DateRangeDto, EquipoQueryDto, IssueMaterialsDto, UpdateBitacoraDto, UpdateEquipoDto, UpdateEquipoTipoDto, UpdatePlanDto, UpdatePlanTareaDto, UpdateProgramacionDto, UpdateWorkOrderDto, UpdateWorkOrderTareaDto, UploadWorkOrderAdjuntoDto, WorkOrderAdjuntoQueryDto, WorkOrderQueryDto } from '../dto';
 
 @Injectable()
 export class KpiMaintenanceService {
   constructor(
     @InjectRepository(EquipoEntity) private readonly equipoRepo: Repository<EquipoEntity>,
+    @InjectRepository(EquipoTipoEntity) private readonly equipoTipoRepo: Repository<EquipoTipoEntity>,
+    @InjectRepository(LocationEntity) private readonly locationRepo: Repository<LocationEntity>,
     @InjectRepository(BitacoraDiariaEntity) private readonly bitacoraRepo: Repository<BitacoraDiariaEntity>,
     @InjectRepository(AlertaMantenimientoEntity) private readonly alertaRepo: Repository<AlertaMantenimientoEntity>,
     @InjectRepository(EstadoEquipoEntity) private readonly estadoRepo: Repository<EstadoEquipoEntity>,
@@ -52,22 +54,50 @@ export class KpiMaintenanceService {
   async deleteEquipo(id: string) { const e = await this.findEquipoOrFail(id); e.is_deleted = true; e.deleted_at = new Date(); await this.equipoRepo.save(e); return this.wrap(true, 'Equipo eliminado'); }
 
   async listEquipoTipos() {
-    return this.wrap(await this.equipoRepo.manager.find(EquipoTipoEntity, {
+    return this.wrap(await this.equipoTipoRepo.manager.find(EquipoTipoEntity, {
       where: { is_deleted: false }
     }), 'Tipos de equipo listados');
   }
   async createEquipoTipo(dto: CreateEquipoTipoDto) {
-    return this.wrap(await this.equipoRepo.manager.save(EquipoTipoEntity, this.equipoRepo.manager.create(EquipoTipoEntity, dto)), 'Tipo de equipo creado');
+    return this.wrap(await this.equipoTipoRepo.manager.save(EquipoTipoEntity, this.equipoTipoRepo.manager.create(EquipoTipoEntity, dto)), 'Tipo de equipo creado');
   }
   async updateEquipoTipo(id: string, dto: UpdateEquipoTipoDto) {
-    const t = await this.findOneOrFail(this.equipoRepo.manager.getRepository(EquipoTipoEntity), {
+    const t = await this.findOneOrFail(this.equipoTipoRepo.manager.getRepository(EquipoTipoEntity), {
       id, is_deleted: false
-    }); Object.assign(t, dto); return this.wrap(await this.equipoRepo.manager.save(EquipoTipoEntity, t), 'Tipo de equipo actualizado');
+    }); Object.assign(t, dto); return this.wrap(await this.equipoTipoRepo.manager.save(EquipoTipoEntity, t), 'Tipo de equipo actualizado');
   }
   async deleteEquipoTipo(id: string) {
-    const t = await this.findOneOrFail(this.equipoRepo.manager.getRepository(EquipoTipoEntity), {
+    const t = await this.findOneOrFail(this.equipoTipoRepo.manager.getRepository(EquipoTipoEntity), {
       id, is_deleted: false
-    }); t.is_deleted = true; t.deleted_at = new Date(); await this.equipoRepo.manager.save(EquipoTipoEntity, t); return this.wrap(true, 'Tipo de equipo eliminado');
+    }); t.is_deleted = true; t.deleted_at = new Date(); await this.equipoTipoRepo.manager.save(EquipoTipoEntity, t); return this.wrap(true, 'Tipo de equipo eliminado');
+  }
+
+  async listLocations() {
+    return this.wrap(await this.locationRepo.manager.find(LocationEntity, {
+      where: { is_deleted: false }
+    }), 'Locations listados');
+  }
+
+  async getLocation(id: string) {
+    return this.wrap(await this.findOneOrFail(this.locationRepo.manager.getRepository(LocationEntity), {
+      id, is_deleted: false
+    }), 'Location obtenida');
+  }
+
+  async createLocation(dto: CreateEquipoTipoDto) {
+    return this.wrap(await this.locationRepo.manager.save(LocationEntity, this.locationRepo.manager.create(LocationEntity, dto)), 'Location creada');
+  }
+
+  async updateLocation(id: string, dto: UpdateEquipoTipoDto) {
+    const l = await this.findOneOrFail(this.locationRepo.manager.getRepository(LocationEntity), {
+      id, is_deleted: false
+    }); Object.assign(l, dto); return this.wrap(await this.locationRepo.manager.save(LocationEntity, l), 'Location actualizada');
+  }
+
+  async deleteLocation(id: string) {
+    const l = await this.findOneOrFail(this.locationRepo.manager.getRepository(LocationEntity), {
+      id, is_deleted: false
+    }); l.is_deleted = true; l.deleted_at = new Date(); await this.locationRepo.manager.save(LocationEntity, l); return this.wrap(true, 'Location eliminada');
   }
 
   async listBitacora(equipoId: string, range: DateRangeDto) {

@@ -55,6 +55,17 @@ export class CreateEquipoTipoDto {
 
 export class UpdateEquipoTipoDto extends CreateEquipoTipoDto {}
 
+export class CreateLocationDto {
+  @ApiProperty({ description: 'Código único de la ubicación' })
+  @IsString() @IsNotEmpty() codigo: string
+  @ApiProperty({ description: 'Nombre de la ubicación' })
+  @IsString() @IsNotEmpty() nombre: string;
+  @ApiPropertyOptional({ description: 'Descripción de la ubicación' })
+  @IsOptional() @IsString() descripcion?: string;
+}
+
+export class UpdateLocationDto extends CreateLocationDto {}
+
 export class CreateBitacoraDto {
   @ApiProperty({ description: 'Fecha del registro en formato ISO 8601' })
   @IsDateString() fecha: string;

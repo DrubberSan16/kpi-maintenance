@@ -30,6 +30,17 @@ export class MarcaEntity {
   @Column({ default: false }) is_deleted: boolean;
 }
 
+@Entity({ schema: 'kpi_maintenance', name: 'tb_location' })
+export class LocationEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column() nombre: string;
+  @Column({ type: 'text', nullable: true }) descripcion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true }) deleted_at?: Date | null;
+}
+
 @Entity({ schema: 'kpi_maintenance', name: 'tb_equipo_tipo'})
 export class EquipoTipoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;

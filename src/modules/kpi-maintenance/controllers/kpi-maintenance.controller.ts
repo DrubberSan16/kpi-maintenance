@@ -42,7 +42,9 @@ import {
   UpdateWorkOrderDto,
   UpdateWorkOrderTareaDto,
   UploadWorkOrderAdjuntoDto,
-  WorkOrderAdjuntoQueryDto
+  WorkOrderAdjuntoQueryDto,
+  CreateLocationDto,
+  UpdateLocationDto
 } from '../dto';
 
 const bodyExamples = {
@@ -143,6 +145,11 @@ const bodyExamples = {
     contenido_base64: 'iVBORw0KGgoAAAANSUhEUgAA...',
     mime_type: 'image/jpeg',
   },
+  createLocation: {
+    codigo: 'BODEGA-PRINCIPAL',
+    nombre: 'Bodega Principal',
+    descripcion: 'Ubicación principal para almacenamiento de equipos',
+  },
 } as const;
 
 @Controller()
@@ -231,6 +238,46 @@ export class KpiMaintenanceController {
   @Delete('tipo-equipo/:id')
   deleteTipoEquipo(@Param('id') id: string) {
     return this.service.deleteEquipoTipo(id);
+  }
+
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Listar locaciones' })
+  @Get('locaciones')
+  listLocaciones() {
+    return this.service.listLocations();
+  }
+
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Crear locación' })
+  @ApiBody({
+    type: CreateLocationDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createLocation } },
+  })
+  @Post('locaciones')
+  createLocation(@Body() dto: CreateLocationDto) {
+    return this.service.createLocation(dto);
+  }
+
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Actualizar locación por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
+  @ApiBody({
+    type: UpdateLocationDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.createLocation } },
+  })
+  @Patch('locaciones/:id')
+  updateLocation(@Param('id') id: string, @Body() dto: UpdateLocationDto) {
+    return this.service.updateLocation(id, dto);
+  }
+
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Eliminar locación por ID' })
+  @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
+  @Delete('locaciones/:id')
+  deleteLocation(@Param('id') id: string) {
+    return this.service.deleteLocation(id);
   }
 
   @ApiTags('Bitácora')

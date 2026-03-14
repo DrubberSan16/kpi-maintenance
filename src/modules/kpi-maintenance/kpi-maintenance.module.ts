@@ -2,7 +2,7 @@ import { Module, OnModuleInit } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { KpiMaintenanceController } from './controllers/kpi-maintenance.controller';
 import { KpiMaintenanceService } from './services/kpi-maintenance.service';
-import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from './entities/kpi-maintenance.entity';
+import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, LocationEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from './entities/kpi-maintenance.entity';
 
 @Module({
   imports: [
@@ -29,6 +29,7 @@ import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity,
       KardexEntity,
       WorkOrderTareaEntity,
       WorkOrderAdjuntoEntity,
+      LocationEntity
     ]),
   ],
   controllers: [KpiMaintenanceController],
