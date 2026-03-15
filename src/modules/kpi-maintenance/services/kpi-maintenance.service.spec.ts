@@ -58,20 +58,14 @@ describe('KpiMaintenanceService', () => {
     expect(alertaRepo.save).toHaveBeenCalledTimes(1);
   });
 
-  it('recalcular alertas crea alerta PROGRAMADA para programación activa fuera de umbrales', async () => {
-    programacionRepo.find.mockResolvedValue([{ equipo_id: 'e1', plan_id: 'p1', proxima_horas: '78000', proxima_fecha: '2026-03-21', activo: true, is_deleted: false }]);
+  it('recalcular alertas no crea alerta cuando programación activa está fuera de umbrales', async () => {
+    programacionRepo.find.mockResolvedValue([{ equipo_id: 'e1', plan_id: 'p1', proxima_horas: '78000', proxima_fecha: '2099-03-21', activo: true, is_deleted: false }]);
     equipoRepo.findOne.mockResolvedValue({ id: 'e1', horometro_actual: '6000', is_deleted: false });
-    alertaRepo.findOne.mockResolvedValue(null);
 
     await service.recalculateAlertas();
 
-    expect(alertaRepo.findOne).toHaveBeenCalledWith({ where: { equipo_id: 'e1', tipo_alerta: 'PROGRAMADA', referencia: 'PLAN:p1', estado: 'ABIERTA', is_deleted: false } });
-    expect(alertaRepo.save).toHaveBeenCalledWith(expect.objectContaining({
-      equipo_id: 'e1',
-      tipo_alerta: 'PROGRAMADA',
-      referencia: 'PLAN:p1',
-      detalle: 'Programación activa para plan p1',
-    }));
+    expect(alertaRepo.findOne).not.toHaveBeenCalled();
+    expect(alertaRepo.save).not.toHaveBeenCalled();
   });
 
   it('issue-materials usa transacción y rollback ante fallo', async () => {
