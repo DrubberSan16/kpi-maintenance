@@ -61,7 +61,6 @@ describe('KpiMaintenanceService', () => {
   it('recalcular alertas crea MPG_1300 cuando programación activa está fuera de umbrales', async () => {
     programacionRepo.find.mockResolvedValue([{ id: 'prog-1', equipo_id: 'e1', plan_id: 'p1', proxima_horas: '78000', proxima_fecha: '2099-03-21', activo: true, is_deleted: false }]);
     equipoRepo.findOne.mockResolvedValue({ id: 'e1', horometro_actual: '6000', is_deleted: false });
-    alertaRepo.findOne.mockResolvedValue(null);
 
     await service.recalculateAlertas();
 
@@ -72,6 +71,7 @@ describe('KpiMaintenanceService', () => {
       referencia: 'PLAN:p1',
       detalle: 'Programación activa fuera de umbrales para plan p1',
     }));
+
   });
 
   it('recalcular alertas acumula errores de validación y continúa con otras programaciones', async () => {
