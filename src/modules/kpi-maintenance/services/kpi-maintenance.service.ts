@@ -184,27 +184,85 @@ export class KpiMaintenanceService {
   async recalculateAlertas() {
     const programaciones = await this.programacionRepo.find({ where: { is_deleted: false, activo: true } });
     let upserts = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+
     for (const prog of programaciones) {
-      const equipo = await this.equipoRepo.findOne({ where: { id: prog.equipo_id, is_deleted: false } });
-      if (!equipo) continue;
-      const h = Number(equipo.horometro_actual ?? 0);
-      const pH = prog.proxima_horas ? Number(prog.proxima_horas) : null;
-      const pF = prog.proxima_fecha ? new Date(prog.proxima_fecha) : null;
-      const today = new Date();
-      let tipo: string | null = null;
-      let detalle = `Recalculada plan ${prog.plan_id}`;
-      if (pH !== null && h >= pH) tipo = 'OVERDUE';
-      else if (pF && today > pF) tipo = 'OVERDUE';
-      else if (pH !== null) {
-        const diff = pH - h;
-        if (diff <= 325) tipo = 'MPG_325'; else if (diff <= 650) tipo = 'MPG_650'; else if (diff <= 975) tipo = 'MPG_975'; else if (diff <= 1300) tipo = 'MPG_1300';
+      try {
+        if (!prog.plan_id || !prog.equipo_id) {
+          skipped++;
+          errors.push(`Programación inválida sin plan/equipo: ${prog.id ?? 'sin-id'}`);
+          continue;
+        }
+
+        const equipo = await this.equipoRepo.findOne({ where: { id: prog.equipo_id, is_deleted: false } });
+        if (!equipo) {
+          skipped++;
+          errors.push(`Equipo no encontrado para programación ${prog.id ?? prog.plan_id}`);
+          continue;
+        }
+
+        const h = Number(equipo.horometro_actual ?? 0);
+        if (!Number.isFinite(h)) {
+          skipped++;
+          errors.push(`Horómetro inválido en equipo ${equipo.id}`);
+          continue;
+        }
+
+        const pHRaw = prog.proxima_horas;
+        const pH = pHRaw !== null && pHRaw !== undefined ? Number(pHRaw) : null;
+        if (pHRaw !== null && pHRaw !== undefined && !Number.isFinite(pH)) {
+          skipped++;
+          errors.push(`proxima_horas inválida en programación ${prog.id ?? prog.plan_id}`);
+          continue;
+        }
+
+        const pF = prog.proxima_fecha ? new Date(prog.proxima_fecha) : null;
+        if (pF && Number.isNaN(pF.getTime())) {
+          skipped++;
+          errors.push(`proxima_fecha inválida en programación ${prog.id ?? prog.plan_id}`);
+          continue;
+        }
+
+        const today = new Date();
+        let tipo: string | null = null;
+        let detalle = `Recalculada plan ${prog.plan_id}`;
+
+        if (pH !== null && h >= pH) tipo = 'OVERDUE';
+        else if (pF && today > pF) tipo = 'OVERDUE';
+        else if (pH !== null) {
+          const diff = pH - h;
+          if (diff <= 325) tipo = 'MPG_325';
+          else if (diff <= 650) tipo = 'MPG_650';
+          else if (diff <= 975) tipo = 'MPG_975';
+          else tipo = 'MPG_1300';
+        } else if (pF) {
+          tipo = 'MPG_1300';
+        }
+
+        if (!tipo) {
+          skipped++;
+          errors.push(`Sin criterio de alerta para programación ${prog.id ?? prog.plan_id}`);
+          continue;
+        }
+
+        if (pH !== null && h < pH && tipo === 'MPG_1300') {
+          detalle = `Programación activa fuera de umbrales para plan ${prog.plan_id}`;
+        }
+
+        const reference = `PLAN:${prog.plan_id}`;
+        const existing = await this.alertaRepo.findOne({ where: { equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, estado: 'ABIERTA', is_deleted: false } });
+        if (!existing) {
+          await this.alertaRepo.save(this.alertaRepo.create({ equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, detalle }));
+          upserts++;
+        }
+      } catch (e: any) {
+        skipped++;
+        errors.push(`Error procesando programación ${prog.id ?? prog.plan_id}: ${e?.message ?? 'desconocido'}`);
       }
-      if (!tipo) continue;
-      const reference = `PLAN:${prog.plan_id}`;
-      const existing = await this.alertaRepo.findOne({ where: { equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, estado: 'ABIERTA', is_deleted: false } });
-      if (!existing) { await this.alertaRepo.save(this.alertaRepo.create({ equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, detalle })); upserts++; }
     }
-    return this.wrap({ total: upserts }, 'Alertas recalculadas');
+
+    return this.wrap({ total: upserts, skipped, errors }, 'Alertas recalculadas');
   }
 
   async listWorkOrders(q: WorkOrderQueryDto) {

@@ -58,14 +58,36 @@ describe('KpiMaintenanceService', () => {
     expect(alertaRepo.save).toHaveBeenCalledTimes(1);
   });
 
-  it('recalcular alertas no crea alerta cuando programación activa está fuera de umbrales', async () => {
-    programacionRepo.find.mockResolvedValue([{ equipo_id: 'e1', plan_id: 'p1', proxima_horas: '78000', proxima_fecha: '2099-03-21', activo: true, is_deleted: false }]);
+  it('recalcular alertas crea MPG_1300 cuando programación activa está fuera de umbrales', async () => {
+    programacionRepo.find.mockResolvedValue([{ id: 'prog-1', equipo_id: 'e1', plan_id: 'p1', proxima_horas: '78000', proxima_fecha: '2099-03-21', activo: true, is_deleted: false }]);
     equipoRepo.findOne.mockResolvedValue({ id: 'e1', horometro_actual: '6000', is_deleted: false });
 
     await service.recalculateAlertas();
 
-    expect(alertaRepo.findOne).not.toHaveBeenCalled();
-    expect(alertaRepo.save).not.toHaveBeenCalled();
+    expect(alertaRepo.findOne).toHaveBeenCalledWith({ where: { equipo_id: 'e1', tipo_alerta: 'MPG_1300', referencia: 'PLAN:p1', estado: 'ABIERTA', is_deleted: false } });
+    expect(alertaRepo.save).toHaveBeenCalledWith(expect.objectContaining({
+      equipo_id: 'e1',
+      tipo_alerta: 'MPG_1300',
+      referencia: 'PLAN:p1',
+      detalle: 'Programación activa fuera de umbrales para plan p1',
+    }));
+
+  });
+
+  it('recalcular alertas acumula errores de validación y continúa con otras programaciones', async () => {
+    programacionRepo.find.mockResolvedValue([
+      { id: 'prog-invalid', equipo_id: 'e1', plan_id: 'p1', proxima_horas: 'NO_NUM', activo: true, is_deleted: false },
+      { id: 'prog-ok', equipo_id: 'e2', plan_id: 'p2', proxima_horas: '120', activo: true, is_deleted: false },
+    ]);
+    equipoRepo.findOne.mockResolvedValueOnce({ id: 'e1', horometro_actual: '100', is_deleted: false }).mockResolvedValueOnce({ id: 'e2', horometro_actual: '100', is_deleted: false });
+    alertaRepo.findOne.mockResolvedValueOnce(null);
+
+    const result = await service.recalculateAlertas();
+
+    expect(alertaRepo.save).toHaveBeenCalledTimes(1);
+    expect(result.data.total).toBe(1);
+    expect(result.data.skipped).toBe(1);
+    expect(result.data.errors).toEqual(expect.arrayContaining([expect.stringContaining('proxima_horas inválida')]));
   });
 
   it('issue-materials usa transacción y rollback ante fallo', async () => {
