@@ -7,6 +7,8 @@ const repo = () => ({ findOne: jest.fn(), save: jest.fn(), create: jest.fn((x) =
 describe('KpiMaintenanceService', () => {
   let service: KpiMaintenanceService;
   const equipoRepo = repo();
+  const equipoTipoRepo = repo();
+  const locationRepo = repo();
   const bitacoraRepo = repo();
   const alertaRepo = repo();
   const estadoRepo = repo();
@@ -27,7 +29,7 @@ describe('KpiMaintenanceService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new KpiMaintenanceService(equipoRepo as any, bitacoraRepo as any, alertaRepo as any, estadoRepo as any, estadoCatalogoRepo as any, eventoRepo as any, planRepo as any, planTareaRepo as any, programacionRepo as any, woRepo as any, consumoRepo as any, stockRepo as any, productoRepo as any, reservaRepo as any, woTareaRepo as any, woAdjuntoRepo as any, ds);
+    service = new KpiMaintenanceService(equipoRepo as any, equipoTipoRepo as any, locationRepo as any, bitacoraRepo as any, alertaRepo as any, estadoRepo as any, estadoCatalogoRepo as any, eventoRepo as any, planRepo as any, planTareaRepo as any, programacionRepo as any, woRepo as any, consumoRepo as any, stockRepo as any, productoRepo as any, reservaRepo as any, woTareaRepo as any, woAdjuntoRepo as any, ds);
   });
 
   it('bitácora: horómetro retrocede -> alerta y conflicto', async () => {
@@ -54,6 +56,22 @@ describe('KpiMaintenanceService', () => {
     await service.recalculateAlertas();
     await service.recalculateAlertas();
     expect(alertaRepo.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('recalcular alertas crea alerta PROGRAMADA para programación activa fuera de umbrales', async () => {
+    programacionRepo.find.mockResolvedValue([{ equipo_id: 'e1', plan_id: 'p1', proxima_horas: '78000', proxima_fecha: '2026-03-21', activo: true, is_deleted: false }]);
+    equipoRepo.findOne.mockResolvedValue({ id: 'e1', horometro_actual: '6000', is_deleted: false });
+    alertaRepo.findOne.mockResolvedValue(null);
+
+    await service.recalculateAlertas();
+
+    expect(alertaRepo.findOne).toHaveBeenCalledWith({ where: { equipo_id: 'e1', tipo_alerta: 'PROGRAMADA', referencia: 'PLAN:p1', estado: 'ABIERTA', is_deleted: false } });
+    expect(alertaRepo.save).toHaveBeenCalledWith(expect.objectContaining({
+      equipo_id: 'e1',
+      tipo_alerta: 'PROGRAMADA',
+      referencia: 'PLAN:p1',
+      detalle: 'Programación activa para plan p1',
+    }));
   });
 
   it('issue-materials usa transacción y rollback ante fallo', async () => {
