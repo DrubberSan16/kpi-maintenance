@@ -192,15 +192,23 @@ export class KpiMaintenanceService {
       const pF = prog.proxima_fecha ? new Date(prog.proxima_fecha) : null;
       const today = new Date();
       let tipo: string | null = null;
+      let detalle = `Recalculada plan ${prog.plan_id}`;
       if (pH !== null && h >= pH) tipo = 'OVERDUE';
       else if (pF && today > pF) tipo = 'OVERDUE';
       else if (pH !== null) {
         const diff = pH - h;
         if (diff <= 325) tipo = 'MPG_325'; else if (diff <= 650) tipo = 'MPG_650'; else if (diff <= 975) tipo = 'MPG_975'; else if (diff <= 1300) tipo = 'MPG_1300';
       }
+      if (!tipo) {
+        if (pF || pH !== null) {
+          tipo = 'PROGRAMADA';
+          detalle = `Programación activa para plan ${prog.plan_id}`;
+        }
+      }
       if (!tipo) continue;
-      const existing = await this.alertaRepo.findOne({ where: { equipo_id: prog.equipo_id, tipo_alerta: tipo, estado: 'ABIERTA', is_deleted: false } });
-      if (!existing) { await this.alertaRepo.save(this.alertaRepo.create({ equipo_id: prog.equipo_id, tipo_alerta: tipo, detalle: `Recalculada plan ${prog.plan_id}` })); upserts++; }
+      const reference = `PLAN:${prog.plan_id}`;
+      const existing = await this.alertaRepo.findOne({ where: { equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, estado: 'ABIERTA', is_deleted: false } });
+      if (!existing) { await this.alertaRepo.save(this.alertaRepo.create({ equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, detalle })); upserts++; }
     }
     return this.wrap({ total: upserts }, 'Alertas recalculadas');
   }
