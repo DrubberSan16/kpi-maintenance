@@ -199,12 +199,6 @@ export class KpiMaintenanceService {
         const diff = pH - h;
         if (diff <= 325) tipo = 'MPG_325'; else if (diff <= 650) tipo = 'MPG_650'; else if (diff <= 975) tipo = 'MPG_975'; else if (diff <= 1300) tipo = 'MPG_1300';
       }
-      if (!tipo) {
-        if (pF || pH !== null) {
-          tipo = 'PROGRAMADA';
-          detalle = `Programación activa para plan ${prog.plan_id}`;
-        }
-      }
       if (!tipo) continue;
       const reference = `PLAN:${prog.plan_id}`;
       const existing = await this.alertaRepo.findOne({ where: { equipo_id: prog.equipo_id, tipo_alerta: tipo, referencia: reference, estado: 'ABIERTA', is_deleted: false } });
