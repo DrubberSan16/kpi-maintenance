@@ -905,6 +905,7 @@ export class KpiMaintenanceService {
         type: dto.type,
         equipment_id: dto.equipment_id ?? null,
         plan_id: dto.plan_id ?? null,
+        valor_json: dto.valor_json ?? null,
         title: dto.title,
         description: dto.description ?? null,
         status_workflow: dto.status_workflow ?? 'PLANNED',

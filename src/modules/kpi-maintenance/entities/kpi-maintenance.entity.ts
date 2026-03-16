@@ -303,6 +303,10 @@ export class WorkOrderEntity {
   @Column({ type: 'uuid', nullable: true }) equipment_id?: string | null;
   @Column({ type: 'uuid', nullable: true }) plan_id?: string | null;
   @Column() title: string;
+   @Column({ type: 'jsonb', nullable: true }) valor_json?: Record<
+    string,
+    unknown
+  > | null;
   @Column({ type: 'text', nullable: true }) description?: string | null;
   @Column({ name: 'status_workflow' }) status_workflow: string;
   @Column({ type: 'integer', default: 5 }) priority: number;

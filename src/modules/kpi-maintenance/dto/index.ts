@@ -565,6 +565,10 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsUUID()
   plan_id?: string;
+  @ApiPropertyOptional({ description: 'Valor estructurado en json' })
+  @IsOptional()
+  @IsObject()
+  valor_json?: Record<string, unknown>;
   @ApiProperty({ description: 'Título de la OT' })
   @IsString()
   @IsNotEmpty()
