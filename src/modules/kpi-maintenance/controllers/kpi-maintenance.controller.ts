@@ -148,6 +148,11 @@ const bodyExamples = {
     maintenance_kind: 'PREVENTIVO',
     status_workflow: 'PLANNED',
     priority: 3,
+    valor_json: {
+      accion: '',
+      prevencion: '',
+      causa: ''
+    }
   },
   createWorkOrderTarea: {
     plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',

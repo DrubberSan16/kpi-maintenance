@@ -661,7 +661,11 @@ export class UpdateWorkOrderDto {
   @ApiPropertyOptional({ description: 'Fecha cierre real (ISO 8601)' })
   @IsOptional()
   @IsDateString()
-  closed_at?: string;
+  closed_at?: string;  
+  @ApiPropertyOptional({ description: 'Valor estructurado en json' })
+  @IsOptional()
+  @IsObject()
+  valor_json?: Record<string, unknown>;
 }
 
 export class CreateConsumoDto {
