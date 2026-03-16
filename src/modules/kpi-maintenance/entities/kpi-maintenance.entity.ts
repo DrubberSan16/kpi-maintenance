@@ -139,7 +139,7 @@ export class EventoEquipoEntity {
 @Entity({ schema: 'kpi_maintenance', name: 'tb_falla_catalogo' })
 export class FallaCatalogoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column({ nullable: true }) codigo?: string | null;
+  @Column({ type: 'text', nullable: true }) codigo?: string | null;
   @Column({ type: 'text' }) sintoma: string;
   @Column({ type: 'text', nullable: true }) causa?: string | null;
   @Column({ type: 'text', nullable: true }) accion_recomendada?: string | null;
