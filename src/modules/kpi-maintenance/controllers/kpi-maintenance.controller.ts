@@ -23,6 +23,11 @@ import {
   CreateConsumoDto,
   CreateEquipoDto,
   CreateEventoDto,
+  CreateFallaCatalogoDto,
+  CreateLecturaEquipoDto,
+  CreateLubricacionPuntoDto,
+  CreateComponenteDto,
+  ComponenteQueryDto,
   CreatePlanDto,
   CreatePlanTareaDto,
   CreateProgramacionDto,
@@ -39,6 +44,10 @@ import {
   CreateWorkOrderDto,
   CreateWorkOrderTareaDto,
   UpdateEquipoTipoDto,
+  UpdateComponenteDto,
+  UpdateFallaCatalogoDto,
+  UpdateLecturaEquipoDto,
+  UpdateLubricacionPuntoDto,
   UpdateWorkOrderDto,
   UpdateWorkOrderTareaDto,
   UploadWorkOrderAdjuntoDto,
@@ -46,7 +55,7 @@ import {
   CreateLocationDto,
   UpdateLocationDto,
   LocationQueryDto,
-  EquipoTipoQueryDto
+  EquipoTipoQueryDto,
 } from '../dto';
 
 const bodyExamples = {
@@ -130,10 +139,15 @@ const bodyExamples = {
   },
 
   createWorkOrder: {
+    code: 'OT-2026-0001',
+    type: 'MANTENIMIENTO',
     equipment_id: '1ec0ef12-5fd3-414f-aee4-5f163dd98a8c',
-    maintenance_kind: 'PREVENTIVO',
-    status_workflow: 'PENDIENTE',
     plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',
+    title: 'Mantenimiento preventivo 250H',
+    description: 'Cambio de aceite y filtros',
+    maintenance_kind: 'PREVENTIVO',
+    status_workflow: 'PLANNED',
+    priority: 3,
   },
   createWorkOrderTarea: {
     plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',
@@ -210,7 +224,7 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Tipo Equipo')
-  @ApiOperation({ summary: 'Crear tipo de equipo'})
+  @ApiOperation({ summary: 'Crear tipo de equipo' })
   @ApiBody({
     type: CreateEquipoTipoDto,
     required: true,
@@ -222,8 +236,12 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Tipo Equipo')
-  @ApiOperation({ summary: 'Actualizar tipo de equipo por ID'})
-  @ApiParam({ name: 'id', description: 'ID del tipo de equipo', required: true })
+  @ApiOperation({ summary: 'Actualizar tipo de equipo por ID' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID del tipo de equipo',
+    required: true,
+  })
   @ApiBody({
     type: UpdateEquipoTipoDto,
     required: true,
@@ -235,8 +253,12 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Tipo Equipo')
-  @ApiOperation({ summary: 'Eliminar tipo de equipo por ID'})
-  @ApiParam({ name: 'id', description: 'ID del tipo de equipo', required: true })
+  @ApiOperation({ summary: 'Eliminar tipo de equipo por ID' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID del tipo de equipo',
+    required: true,
+  })
   @Delete('tipo-equipo/:id')
   deleteTipoEquipo(@Param('id') id: string) {
     return this.service.deleteEquipoTipo(id);
@@ -248,7 +270,7 @@ export class KpiMaintenanceController {
   listLocaciones(@Query() query: LocationQueryDto) {
     return this.service.listLocations(query);
   }
-  
+
   @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Obtener locación por ID' })
   @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
@@ -532,6 +554,149 @@ export class KpiMaintenanceController {
     return this.service.recalculateAlertas();
   }
 
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Listar componentes de equipo' })
+  @Get('componentes')
+  listComponentes(@Query() query: ComponenteQueryDto) {
+    return this.service.listComponentes(query);
+  }
+
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Obtener componente por ID' })
+  @Get('componentes/:id')
+  getComponente(@Param('id') id: string) {
+    return this.service.getComponente(id);
+  }
+
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Crear componente de equipo' })
+  @Post('componentes')
+  createComponente(@Body() dto: CreateComponenteDto) {
+    return this.service.createComponente(dto);
+  }
+
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Actualizar componente por ID' })
+  @Patch('componentes/:id')
+  updateComponente(@Param('id') id: string, @Body() dto: UpdateComponenteDto) {
+    return this.service.updateComponente(id, dto);
+  }
+
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Eliminar componente por ID' })
+  @Delete('componentes/:id')
+  deleteComponente(@Param('id') id: string) {
+    return this.service.deleteComponente(id);
+  }
+
+  @ApiTags('Fallas')
+  @ApiOperation({ summary: 'Listar catálogo de fallas' })
+  @Get('fallas')
+  listFallas() {
+    return this.service.listFallasCatalogo();
+  }
+
+  @ApiTags('Fallas')
+  @ApiOperation({ summary: 'Obtener falla por ID' })
+  @Get('fallas/:id')
+  getFalla(@Param('id') id: string) {
+    return this.service.getFallaCatalogo(id);
+  }
+
+  @ApiTags('Fallas')
+  @ApiOperation({ summary: 'Crear falla de catálogo' })
+  @Post('fallas')
+  createFalla(@Body() dto: CreateFallaCatalogoDto) {
+    return this.service.createFallaCatalogo(dto);
+  }
+
+  @ApiTags('Fallas')
+  @ApiOperation({ summary: 'Actualizar falla de catálogo' })
+  @Patch('fallas/:id')
+  updateFalla(@Param('id') id: string, @Body() dto: UpdateFallaCatalogoDto) {
+    return this.service.updateFallaCatalogo(id, dto);
+  }
+
+  @ApiTags('Fallas')
+  @ApiOperation({ summary: 'Eliminar falla de catálogo' })
+  @Delete('fallas/:id')
+  deleteFalla(@Param('id') id: string) {
+    return this.service.deleteFallaCatalogo(id);
+  }
+
+  @ApiTags('Lecturas')
+  @ApiOperation({ summary: 'Listar lecturas de equipo' })
+  @Get('lecturas')
+  listLecturas(@Query('equipo_id') equipoId?: string) {
+    return this.service.listLecturas(equipoId);
+  }
+
+  @ApiTags('Lecturas')
+  @ApiOperation({ summary: 'Obtener lectura por ID' })
+  @Get('lecturas/:id')
+  getLectura(@Param('id') id: string) {
+    return this.service.getLectura(id);
+  }
+
+  @ApiTags('Lecturas')
+  @ApiOperation({ summary: 'Crear lectura de equipo' })
+  @Post('lecturas')
+  createLectura(@Body() dto: CreateLecturaEquipoDto) {
+    return this.service.createLectura(dto);
+  }
+
+  @ApiTags('Lecturas')
+  @ApiOperation({ summary: 'Actualizar lectura de equipo' })
+  @Patch('lecturas/:id')
+  updateLectura(@Param('id') id: string, @Body() dto: UpdateLecturaEquipoDto) {
+    return this.service.updateLectura(id, dto);
+  }
+
+  @ApiTags('Lecturas')
+  @ApiOperation({ summary: 'Eliminar lectura de equipo' })
+  @Delete('lecturas/:id')
+  deleteLectura(@Param('id') id: string) {
+    return this.service.deleteLectura(id);
+  }
+
+  @ApiTags('Lubricación')
+  @ApiOperation({ summary: 'Listar puntos de lubricación' })
+  @Get('lubricaciones')
+  listLubricaciones(@Query('equipo_id') equipoId?: string) {
+    return this.service.listLubricaciones(equipoId);
+  }
+
+  @ApiTags('Lubricación')
+  @ApiOperation({ summary: 'Obtener punto de lubricación por ID' })
+  @Get('lubricaciones/:id')
+  getLubricacion(@Param('id') id: string) {
+    return this.service.getLubricacion(id);
+  }
+
+  @ApiTags('Lubricación')
+  @ApiOperation({ summary: 'Crear punto de lubricación' })
+  @Post('lubricaciones')
+  createLubricacion(@Body() dto: CreateLubricacionPuntoDto) {
+    return this.service.createLubricacion(dto);
+  }
+
+  @ApiTags('Lubricación')
+  @ApiOperation({ summary: 'Actualizar punto de lubricación' })
+  @Patch('lubricaciones/:id')
+  updateLubricacion(
+    @Param('id') id: string,
+    @Body() dto: UpdateLubricacionPuntoDto,
+  ) {
+    return this.service.updateLubricacion(id, dto);
+  }
+
+  @ApiTags('Lubricación')
+  @ApiOperation({ summary: 'Eliminar punto de lubricación' })
+  @Delete('lubricaciones/:id')
+  deleteLubricacion(@Param('id') id: string) {
+    return this.service.deleteLubricacion(id);
+  }
+
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar órdenes de trabajo con filtros opcionales' })
   @Get('work-orders')
@@ -553,7 +718,11 @@ export class KpiMaintenanceController {
 
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Actualizar orden de trabajo por ID' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
   @ApiBody({ type: UpdateWorkOrderDto, required: true })
   @Patch('work-orders/:id')
   updateWorkOrder(@Param('id') id: string, @Body() dto: UpdateWorkOrderDto) {
@@ -562,15 +731,25 @@ export class KpiMaintenanceController {
 
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Eliminar orden de trabajo por ID' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
   @Delete('work-orders/:id')
   deleteWorkOrder(@Param('id') id: string) {
     return this.service.deleteWorkOrder(id);
   }
 
   @ApiTags('Work Orders - Tareas')
-  @ApiOperation({ summary: 'Listar tareas registradas de una orden de trabajo' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiOperation({
+    summary: 'Listar tareas registradas de una orden de trabajo',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
   @Get('work-orders/:id/tareas')
   listWorkOrderTareas(@Param('id') id: string) {
     return this.service.listWorkOrderTareas(id);
@@ -578,14 +757,21 @@ export class KpiMaintenanceController {
 
   @ApiTags('Work Orders - Tareas')
   @ApiOperation({ summary: 'Crear tarea ejecutada para una orden de trabajo' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
   @ApiBody({
     type: CreateWorkOrderTareaDto,
     required: true,
     examples: { ejemplo: { value: bodyExamples.createWorkOrderTarea } },
   })
   @Post('work-orders/:id/tareas')
-  createWorkOrderTarea(@Param('id') id: string, @Body() dto: CreateWorkOrderTareaDto) {
+  createWorkOrderTarea(
+    @Param('id') id: string,
+    @Body() dto: CreateWorkOrderTareaDto,
+  ) {
     return this.service.createWorkOrderTarea(id, dto);
   }
 
@@ -594,7 +780,10 @@ export class KpiMaintenanceController {
   @ApiParam({ name: 'id', description: 'ID de la tarea de OT', required: true })
   @ApiBody({ type: UpdateWorkOrderTareaDto, required: true })
   @Patch('work-orders/tareas/:id')
-  updateWorkOrderTarea(@Param('id') id: string, @Body() dto: UpdateWorkOrderTareaDto) {
+  updateWorkOrderTarea(
+    @Param('id') id: string,
+    @Body() dto: UpdateWorkOrderTareaDto,
+  ) {
     return this.service.updateWorkOrderTarea(id, dto);
   }
 
@@ -608,40 +797,76 @@ export class KpiMaintenanceController {
 
   @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Subir archivo adjunto de una OT en base64' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
   @ApiBody({
     type: UploadWorkOrderAdjuntoDto,
     required: true,
     examples: { ejemplo: { value: bodyExamples.uploadAdjunto } },
   })
   @Post('work-orders/:id/adjuntos')
-  uploadWorkOrderAdjunto(@Param('id') id: string, @Body() dto: UploadWorkOrderAdjuntoDto) {
+  uploadWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Body() dto: UploadWorkOrderAdjuntoDto,
+  ) {
     return this.service.uploadWorkOrderAdjunto(id, dto);
   }
 
   @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Listar adjuntos de una OT' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
   @Get('work-orders/:id/adjuntos')
-  listWorkOrderAdjuntos(@Param('id') id: string, @Query() query: WorkOrderAdjuntoQueryDto) {
+  listWorkOrderAdjuntos(
+    @Param('id') id: string,
+    @Query() query: WorkOrderAdjuntoQueryDto,
+  ) {
     return this.service.listWorkOrderAdjuntos(id, query);
   }
 
   @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Descargar adjunto de una OT (base64 + data_url)' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
-  @ApiParam({ name: 'adjuntoId', description: 'ID del adjunto', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiParam({
+    name: 'adjuntoId',
+    description: 'ID del adjunto',
+    required: true,
+  })
   @Get('work-orders/:id/adjuntos/:adjuntoId')
-  getWorkOrderAdjunto(@Param('id') id: string, @Param('adjuntoId') adjuntoId: string) {
+  getWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Param('adjuntoId') adjuntoId: string,
+  ) {
     return this.service.getWorkOrderAdjunto(id, adjuntoId);
   }
 
   @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Eliminar adjunto de una OT por ID' })
-  @ApiParam({ name: 'id', description: 'ID de la orden de trabajo', required: true })
-  @ApiParam({ name: 'adjuntoId', description: 'ID del adjunto', required: true })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiParam({
+    name: 'adjuntoId',
+    description: 'ID del adjunto',
+    required: true,
+  })
   @Delete('work-orders/:id/adjuntos/:adjuntoId')
-  deleteWorkOrderAdjunto(@Param('id') id: string, @Param('adjuntoId') adjuntoId: string) {
+  deleteWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Param('adjuntoId') adjuntoId: string,
+  ) {
     return this.service.deleteWorkOrderAdjunto(id, adjuntoId);
   }
 

@@ -2,7 +2,35 @@ import { Module, OnModuleInit } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { KpiMaintenanceController } from './controllers/kpi-maintenance.controller';
 import { KpiMaintenanceService } from './services/kpi-maintenance.service';
-import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity, EntregaMaterialDetEntity, EntregaMaterialEntity, EquipoEntity, EquipoTipoEntity, EstadoEquipoCatalogoEntity, EstadoEquipoEntity, EventoEquipoEntity, KardexEntity, LocationEntity, MovimientoInventarioDetEntity, MovimientoInventarioEntity, PlanMantenimientoEntity, PlanTareaEntity, ProductoEntity, ProgramacionPlanEntity, ReservaStockEntity, StockBodegaEntity, WorkOrderAdjuntoEntity, WorkOrderEntity, WorkOrderTareaEntity } from './entities/kpi-maintenance.entity';
+import {
+  AlertaMantenimientoEntity,
+  BitacoraDiariaEntity,
+  ConsumoRepuestoEntity,
+  EntregaMaterialDetEntity,
+  EntregaMaterialEntity,
+  EquipoComponenteEntity,
+  EquipoEntity,
+  EquipoTipoEntity,
+  EstadoEquipoCatalogoEntity,
+  EstadoEquipoEntity,
+  EventoEquipoEntity,
+  FallaCatalogoEntity,
+  KardexEntity,
+  LecturaEquipoEntity,
+  LocationEntity,
+  LubricacionPuntoEntity,
+  MovimientoInventarioDetEntity,
+  MovimientoInventarioEntity,
+  PlanMantenimientoEntity,
+  PlanTareaEntity,
+  ProductoEntity,
+  ProgramacionPlanEntity,
+  ReservaStockEntity,
+  StockBodegaEntity,
+  WorkOrderAdjuntoEntity,
+  WorkOrderEntity,
+  WorkOrderTareaEntity,
+} from './entities/kpi-maintenance.entity';
 
 @Module({
   imports: [
@@ -14,6 +42,10 @@ import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity,
       EstadoEquipoCatalogoEntity,
       EquipoTipoEntity,
       EventoEquipoEntity,
+      EquipoComponenteEntity,
+      FallaCatalogoEntity,
+      LecturaEquipoEntity,
+      LubricacionPuntoEntity,
       PlanMantenimientoEntity,
       PlanTareaEntity,
       ProgramacionPlanEntity,
@@ -29,7 +61,7 @@ import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity,
       KardexEntity,
       WorkOrderTareaEntity,
       WorkOrderAdjuntoEntity,
-      LocationEntity
+      LocationEntity,
     ]),
   ],
   controllers: [KpiMaintenanceController],
@@ -37,5 +69,7 @@ import { AlertaMantenimientoEntity, BitacoraDiariaEntity, ConsumoRepuestoEntity,
 })
 export class KpiMaintenanceModule implements OnModuleInit {
   constructor(private readonly service: KpiMaintenanceService) {}
-  onModuleInit() { void this.service.seedEstadosCatalogo(); }
+  onModuleInit() {
+    void this.service.seedEstadosCatalogo();
+  }
 }
