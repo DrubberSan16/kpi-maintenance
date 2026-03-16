@@ -32,7 +32,7 @@ export class EquipoComponenteEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'uuid' }) equipo_id: string;
   @Column({ type: 'uuid', nullable: true }) parent_id?: string | null;
-  @Column({ nullable: true }) codigo?: string | null;
+  @Column({ type: 'text', nullable: true }) codigo?: string | null;
   @Column() nombre: string;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
@@ -42,7 +42,7 @@ export class EquipoComponenteEntity {
 @Entity({ schema: 'kpi_inventory', name: 'tb_marca' })
 export class MarcaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column() nombre: string;
+  @Column({ type: 'text' }) nombre: string;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
 }
@@ -50,8 +50,8 @@ export class MarcaEntity {
 @Entity({ schema: 'kpi_maintenance', name: 'tb_location' })
 export class LocationEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column() codigo: string;
-  @Column() nombre: string;
+  @Column({ type: 'text' }) codigo: string;
+  @Column({ type: 'text' }) nombre: string;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
