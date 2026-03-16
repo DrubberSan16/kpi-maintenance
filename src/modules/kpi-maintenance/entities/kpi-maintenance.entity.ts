@@ -160,7 +160,7 @@ export class LecturaEquipoEntity {
     | number
     | null;
   @Column({ type: 'text', nullable: true }) valor_texto?: string | null;
-  @Column({ nullable: true }) unidad?: string | null;
+  @Column({ type: 'text', nullable: true }) unidad?: string | null;
   @Column({ type: 'uuid', nullable: true }) tomado_por?: string | null;
   @Column({ type: 'text', nullable: true }) observacion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
@@ -176,7 +176,7 @@ export class LubricacionPuntoEntity {
   @Column({ type: 'text', nullable: true }) lubricante?: string | null;
   @Column('numeric', { precision: 18, scale: 4, nullable: true })
   cantidad_recomendada?: number | null;
-  @Column({ nullable: true }) unidad?: string | null;
+  @Column({ type: 'text', nullable: true }) unidad?: string | null;
   @Column({ default: 'HORAS' }) frecuencia_tipo: string;
   @Column({ type: 'integer', default: 0 }) frecuencia_valor: number;
   @Column({ default: 'ACTIVE' }) status: string;
