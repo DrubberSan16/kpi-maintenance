@@ -710,6 +710,18 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Obtener orden de trabajo por ID' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Get('work-orders/:id')
+  getWorkOrder(@Param('id') id: string) {
+    return this.service.getWorkOrder(id);
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Crear orden de trabajo' })
   @ApiBody({
     type: CreateWorkOrderDto,

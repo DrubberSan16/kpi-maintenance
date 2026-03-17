@@ -1014,6 +1014,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(await qb.getMany(), 'Work orders listadas');
   }
 
+  async getWorkOrder(id: string) {
+    return this.wrap(
+      await this.findOneOrFail(this.woRepo, { id, is_deleted: false }),
+      'Work order obtenida',
+    );
+  }
+
   async createWorkOrder(dto: CreateWorkOrderDto) {
     if (dto.equipment_id) await this.findEquipoOrFail(dto.equipment_id);
     if (dto.plan_id)
