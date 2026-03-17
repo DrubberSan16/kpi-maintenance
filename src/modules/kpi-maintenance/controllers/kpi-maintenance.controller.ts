@@ -151,8 +151,8 @@ const bodyExamples = {
     valor_json: {
       accion: '',
       prevencion: '',
-      causa: ''
-    }
+      causa: '',
+    },
   },
   createWorkOrderTarea: {
     plan_id: '3a92f88a-0e64-4c58-a0ab-a94f657fcb80',
@@ -556,7 +556,7 @@ export class KpiMaintenanceController {
   @ApiOperation({ summary: 'Recalcular alertas del sistema' })
   @Post('alertas/recalcular')
   recalculate() {
-    return this.service.recalculateAlertas();
+    return this.service.triggerAlertRecalculation();
   }
 
   @ApiTags('Componentes')
