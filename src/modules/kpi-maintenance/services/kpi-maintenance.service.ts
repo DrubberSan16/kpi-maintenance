@@ -3,7 +3,10 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
@@ -89,7 +92,16 @@ import {
 } from '../dto';
 
 @Injectable()
-export class KpiMaintenanceService {
+export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(KpiMaintenanceService.name);
+  private recalculationInterval: NodeJS.Timeout | null = null;
+  private recalculationRunning = false;
+
+  private readonly RECALCULATION_INTERVAL_MS = 2 * 60 * 1000;
+  private readonly RECALCULATION_BATCH_SIZE = 100;
+  private readonly RECALCULATION_WORKERS = 4;
+  private readonly MAX_STORED_ERRORS = 200;
+
   constructor(
     @InjectRepository(EquipoEntity)
     private readonly equipoRepo: Repository<EquipoEntity>,
@@ -141,6 +153,64 @@ export class KpiMaintenanceService {
   private readonly uploadRoot =
     process.env.WORK_ORDER_UPLOAD_DIR ||
     join(process.cwd(), 'storage', 'work-orders');
+
+  onModuleInit() {
+    this.scheduleAlertRecalculation();
+    this.triggerAlertRecalculation('startup').catch((e: any) => {
+      this.logger.error(
+        `No se pudo iniciar recálculo de alertas en startup: ${e?.message ?? 'desconocido'}`,
+      );
+    });
+  }
+
+  onModuleDestroy() {
+    if (this.recalculationInterval) {
+      clearInterval(this.recalculationInterval);
+      this.recalculationInterval = null;
+    }
+  }
+
+  private scheduleAlertRecalculation() {
+    if (this.recalculationInterval) return;
+    this.recalculationInterval = setInterval(() => {
+      this.triggerAlertRecalculation('interval').catch((e: any) => {
+        this.logger.error(
+          `Error en recálculo automático de alertas: ${e?.message ?? 'desconocido'}`,
+        );
+      });
+    }, this.RECALCULATION_INTERVAL_MS);
+  }
+
+  async triggerAlertRecalculation(source = 'manual') {
+    if (this.recalculationRunning) {
+      return this.wrap(
+        { accepted: false, source },
+        'Recalculo de alertas ya se encuentra en ejecución',
+      );
+    }
+
+    this.recalculationRunning = true;
+    void this.recalculateAlertas()
+      .then((result) => {
+        const stats = result.data as { total?: number; skipped?: number };
+        this.logger.log(
+          `Recalculo de alertas finalizado (${source}): total=${stats.total ?? 0}, skipped=${stats.skipped ?? 0}`,
+        );
+      })
+      .catch((e: any) => {
+        this.logger.error(
+          `Error ejecutando recálculo de alertas (${source}): ${e?.message ?? 'desconocido'}`,
+        );
+      })
+      .finally(() => {
+        this.recalculationRunning = false;
+      });
+
+    return this.wrap(
+      { accepted: true, source },
+      'Recalculo de alertas ejecutándose en segundo plano',
+    );
+  }
 
   private wrap(data: unknown, message = 'OK', meta?: unknown) {
     return { data, meta, message };
@@ -760,121 +830,173 @@ export class KpiMaintenanceService {
   }
 
   async recalculateAlertas() {
-    const programaciones = await this.programacionRepo.find({
-      where: { is_deleted: false, activo: true },
-    });
     let upserts = 0;
     let skipped = 0;
+    let offset = 0;
+    let omittedErrors = 0;
     const errors: string[] = [];
 
-    for (const prog of programaciones) {
-      try {
-        if (!prog.plan_id || !prog.equipo_id) {
-          skipped++;
-          errors.push(
-            `Programación inválida sin plan/equipo: ${prog.id ?? 'sin-id'}`,
-          );
-          continue;
-        }
+    while (true) {
+      const programaciones = await this.programacionRepo.find({
+        where: { is_deleted: false, activo: true },
+        skip: offset,
+        take: this.RECALCULATION_BATCH_SIZE,
+      });
+      if (!programaciones.length) break;
 
-        const equipo = await this.equipoRepo.findOne({
-          where: { id: prog.equipo_id, is_deleted: false },
-        });
-        if (!equipo) {
-          skipped++;
-          errors.push(
-            `Equipo no encontrado para programación ${prog.id ?? prog.plan_id}`,
-          );
-          continue;
-        }
+      const batchStats =
+        await this.processProgramacionesInWorkers(programaciones);
+      upserts += batchStats.upserts;
+      skipped += batchStats.skipped;
 
-        const h = Number(equipo.horometro_actual ?? 0);
-        if (!Number.isFinite(h)) {
-          skipped++;
-          errors.push(`Horómetro inválido en equipo ${equipo.id}`);
-          continue;
-        }
-
-        const pHRaw = prog.proxima_horas;
-        const pH = pHRaw !== null && pHRaw !== undefined ? Number(pHRaw) : null;
-        if (pHRaw !== null && pHRaw !== undefined && !Number.isFinite(pH)) {
-          skipped++;
-          errors.push(
-            `proxima_horas inválida en programación ${prog.id ?? prog.plan_id}`,
-          );
-          continue;
-        }
-
-        const pF = prog.proxima_fecha ? new Date(prog.proxima_fecha) : null;
-        if (pF && Number.isNaN(pF.getTime())) {
-          skipped++;
-          errors.push(
-            `proxima_fecha inválida en programación ${prog.id ?? prog.plan_id}`,
-          );
-          continue;
-        }
-
-        const today = new Date();
-        let tipo: string | null = null;
-        let detalle = `Recalculada plan ${prog.plan_id}`;
-
-        if (pH !== null && h >= pH) tipo = 'OVERDUE';
-        else if (pF && today > pF) tipo = 'OVERDUE';
-        else if (pH !== null) {
-          const diff = pH - h;
-          if (diff <= 325) tipo = 'MPG_325';
-          else if (diff <= 650) tipo = 'MPG_650';
-          else if (diff <= 975) tipo = 'MPG_975';
-          else tipo = 'MPG_1300';
-        } else if (pF) {
-          tipo = 'MPG_1300';
-        }
-
-        if (!tipo) {
-          skipped++;
-          errors.push(
-            `Sin criterio de alerta para programación ${prog.id ?? prog.plan_id}`,
-          );
-          continue;
-        }
-
-        if (pH !== null && h < pH && tipo === 'MPG_1300') {
-          detalle = `Programación activa fuera de umbrales para plan ${prog.plan_id}`;
-        }
-
-        const reference = `PLAN:${prog.plan_id}`;
-        const existing = await this.alertaRepo.findOne({
-          where: {
-            equipo_id: prog.equipo_id,
-            tipo_alerta: tipo,
-            referencia: reference,
-            estado: 'ABIERTA',
-            is_deleted: false,
-          },
-        });
-        if (!existing) {
-          await this.alertaRepo.save(
-            this.alertaRepo.create({
-              equipo_id: prog.equipo_id,
-              tipo_alerta: tipo,
-              referencia: reference,
-              detalle,
-            }),
-          );
-          upserts++;
-        }
-      } catch (e: any) {
-        skipped++;
-        errors.push(
-          `Error procesando programación ${prog.id ?? prog.plan_id}: ${e?.message ?? 'desconocido'}`,
-        );
+      for (const error of batchStats.errors) {
+        if (errors.length < this.MAX_STORED_ERRORS) errors.push(error);
+        else omittedErrors++;
       }
+
+      offset += programaciones.length;
     }
 
     return this.wrap(
-      { total: upserts, skipped, errors },
+      { total: upserts, skipped, errors, omitted_errors: omittedErrors },
       'Alertas recalculadas',
     );
+  }
+
+  private async processProgramacionesInWorkers(
+    programaciones: ProgramacionPlanEntity[],
+  ) {
+    let cursor = 0;
+    let upserts = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    const workers = Math.max(
+      1,
+      Math.min(this.RECALCULATION_WORKERS, programaciones.length),
+    );
+
+    const runWorker = async () => {
+      while (cursor < programaciones.length) {
+        const index = cursor;
+        cursor++;
+        const outcome = await this.processProgramacion(programaciones[index]);
+        if (outcome.upserted) upserts++;
+        if (outcome.skipped) skipped++;
+        if (outcome.error) errors.push(outcome.error);
+      }
+    };
+
+    await Promise.all(Array.from({ length: workers }, () => runWorker()));
+    return { upserts, skipped, errors };
+  }
+
+  private async processProgramacion(prog: ProgramacionPlanEntity) {
+    try {
+      if (!prog.plan_id || !prog.equipo_id) {
+        return {
+          upserted: false,
+          skipped: true,
+          error: `Programación inválida sin plan/equipo: ${prog.id ?? 'sin-id'}`,
+        };
+      }
+
+      const equipo = await this.equipoRepo.findOne({
+        where: { id: prog.equipo_id, is_deleted: false },
+      });
+      if (!equipo) {
+        return {
+          upserted: false,
+          skipped: true,
+          error: `Equipo no encontrado para programación ${prog.id ?? prog.plan_id}`,
+        };
+      }
+
+      const h = Number(equipo.horometro_actual ?? 0);
+      if (!Number.isFinite(h)) {
+        return {
+          upserted: false,
+          skipped: true,
+          error: `Horómetro inválido en equipo ${equipo.id}`,
+        };
+      }
+
+      const pHRaw = prog.proxima_horas;
+      const pH = pHRaw !== null && pHRaw !== undefined ? Number(pHRaw) : null;
+      if (pHRaw !== null && pHRaw !== undefined && !Number.isFinite(pH)) {
+        return {
+          upserted: false,
+          skipped: true,
+          error: `proxima_horas inválida en programación ${prog.id ?? prog.plan_id}`,
+        };
+      }
+
+      const pF = prog.proxima_fecha ? new Date(prog.proxima_fecha) : null;
+      if (pF && Number.isNaN(pF.getTime())) {
+        return {
+          upserted: false,
+          skipped: true,
+          error: `proxima_fecha inválida en programación ${prog.id ?? prog.plan_id}`,
+        };
+      }
+
+      const today = new Date();
+      let tipo: string | null = null;
+      let detalle = `Recalculada plan ${prog.plan_id}`;
+
+      if (pH !== null && h >= pH) tipo = 'OVERDUE';
+      else if (pF && today > pF) tipo = 'OVERDUE';
+      else if (pH !== null) {
+        const diff = pH - h;
+        if (diff <= 325) tipo = 'MPG_325';
+        else if (diff <= 650) tipo = 'MPG_650';
+        else if (diff <= 975) tipo = 'MPG_975';
+        else tipo = 'MPG_1300';
+      } else if (pF) {
+        tipo = 'MPG_1300';
+      }
+
+      if (!tipo) {
+        return {
+          upserted: false,
+          skipped: true,
+          error: `Sin criterio de alerta para programación ${prog.id ?? prog.plan_id}`,
+        };
+      }
+
+      if (pH !== null && h < pH && tipo === 'MPG_1300') {
+        detalle = `Programación activa fuera de umbrales para plan ${prog.plan_id}`;
+      }
+
+      const reference = `PLAN:${prog.plan_id}`;
+      const existing = await this.alertaRepo.findOne({
+        where: {
+          equipo_id: prog.equipo_id,
+          tipo_alerta: tipo,
+          referencia: reference,
+          estado: 'ABIERTA',
+          is_deleted: false,
+        },
+      });
+      if (!existing) {
+        await this.alertaRepo.save(
+          this.alertaRepo.create({
+            equipo_id: prog.equipo_id,
+            tipo_alerta: tipo,
+            referencia: reference,
+            detalle,
+          }),
+        );
+        return { upserted: true, skipped: false, error: null as string | null };
+      }
+
+      return { upserted: false, skipped: false, error: null as string | null };
+    } catch (e: any) {
+      return {
+        upserted: false,
+        skipped: true,
+        error: `Error procesando programación ${prog.id ?? prog.plan_id}: ${e?.message ?? 'desconocido'}`,
+      };
+    }
   }
 
   async listWorkOrders(q: WorkOrderQueryDto) {
