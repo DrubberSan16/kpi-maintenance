@@ -31,7 +31,9 @@ async function bootstrap() {
     )
     .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  const document = SwaggerModule.createDocument(app, swaggerConfig, {
+    autoTagControllers: false,
+  });
 
   // ✅ Swagger SIEMPRE en /<prefix>/docs
   const swaggerPath = globalPrefix ? `${globalPrefix}/docs` : 'docs';
