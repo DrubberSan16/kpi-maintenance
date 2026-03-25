@@ -144,6 +144,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly consumoRepo: Repository<ConsumoRepuestoEntity>,
     @InjectRepository(StockBodegaEntity)
     private readonly stockRepo: Repository<StockBodegaEntity>,
+    @InjectRepository(KardexEntity)
+    private readonly kardexRepo: Repository<KardexEntity>,
     @InjectRepository(ProductoEntity)
     private readonly productoRepo: Repository<ProductoEntity>,
     @InjectRepository(BodegaEntity)
@@ -250,6 +252,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     return { producto, bodega, stock };
+  }
+
+  private async resolveInventoryCostReference(productoId: string, bodegaId: string) {
+    const { producto, bodega } = await this.validateProductoEnBodega(productoId, bodegaId);
+    const kardex = await this.kardexRepo.findOne({
+      where: { producto_id: productoId, bodega_id: bodegaId },
+      order: { fecha: 'DESC', id: 'DESC' },
+    });
+
+    const costoUnitario = this.toNumeric(
+      kardex?.costo_unitario ?? producto?.ultimo_costo ?? 0,
+    );
+    const saldoCostoPromedio = this.toNumeric(
+      kardex?.saldo_costo_promedio ?? producto?.ultimo_costo ?? 0,
+    );
+
+    return {
+      producto_id: productoId,
+      bodega_id: bodegaId,
+      producto_nombre: producto?.nombre ?? null,
+      producto_codigo: producto?.codigo ?? null,
+      producto_label: this.buildProductoLabel(producto) ?? productoId,
+      bodega_nombre: bodega?.nombre ?? null,
+      bodega_codigo: bodega?.codigo ?? null,
+      bodega_label: this.buildBodegaLabel(bodega) ?? bodegaId,
+      costo_unitario: costoUnitario,
+      saldo_costo_promedio: saldoCostoPromedio,
+      fuente: kardex ? 'KARDEX' : 'PRODUCTO',
+      kardex_id: kardex?.id ?? null,
+      fecha_kardex: kardex?.fecha ?? null,
+    };
   }
 
   onModuleInit() {
@@ -1769,6 +1802,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Adjunto eliminado');
   }
 
+  async getInventoryCostReference(productoId: string, bodegaId: string) {
+    return this.wrap(
+      await this.resolveInventoryCostReference(productoId, bodegaId),
+      'Costo de referencia obtenido',
+    );
+  }
+
   async listConsumos(workOrderId: string) {
     await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
     const rows = await this.consumoRepo.find({
@@ -1804,10 +1844,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const { producto, bodega } = await this.validateProductoEnBodega(dto.producto_id, dto.bodega_id);
-    const subtotal = dto.cantidad * dto.costo_unitario;
+    const costReference = await this.resolveInventoryCostReference(dto.producto_id, dto.bodega_id);
+    const costoUnitario = this.toNumeric(dto.costo_unitario, costReference.costo_unitario);
+    const subtotal = dto.cantidad * costoUnitario;
     const saved = await this.consumoRepo.save(
       this.consumoRepo.create({
         ...dto,
+        costo_unitario: costoUnitario,
         work_order_id: workOrderId,
         subtotal,
       }),

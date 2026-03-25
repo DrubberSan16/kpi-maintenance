@@ -684,15 +684,16 @@ export class CreateConsumoDto {
   @IsNumber()
   @Min(0.000001)
   cantidad: number;
-  @ApiProperty({
-    description: 'Costo unitario del consumo',
+  @ApiPropertyOptional({
+    description: 'Costo unitario del consumo. Si no se envía, se toma desde kardex según bodega y producto.',
     type: Number,
     minimum: 0,
   })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  costo_unitario: number;
+  costo_unitario?: number;
   @ApiPropertyOptional({ description: 'Observación del consumo' })
   @IsOptional()
   @IsString()

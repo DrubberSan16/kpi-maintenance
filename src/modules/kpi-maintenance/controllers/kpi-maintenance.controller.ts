@@ -924,6 +924,18 @@ export class KpiMaintenanceController {
     return this.service.deleteWorkOrderAdjunto(id, adjuntoId);
   }
 
+  @ApiTags('Inventory')
+  @ApiOperation({ summary: 'Obtener costo de referencia de un producto por bodega' })
+  @ApiQuery({ name: 'producto_id', required: true, description: 'ID del producto' })
+  @ApiQuery({ name: 'bodega_id', required: true, description: 'ID de la bodega' })
+  @Get('inventory/cost-reference')
+  getInventoryCostReference(
+    @Query('producto_id') productoId: string,
+    @Query('bodega_id') bodegaId: string,
+  ) {
+    return this.service.getInventoryCostReference(productoId, bodegaId);
+  }
+
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar consumos de una orden de trabajo' })
   @ApiParam({
