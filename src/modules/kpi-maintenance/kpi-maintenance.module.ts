@@ -5,6 +5,7 @@ import { KpiMaintenanceService } from './services/kpi-maintenance.service';
 import {
   AlertaMantenimientoEntity,
   BitacoraDiariaEntity,
+  BodegaEntity,
   ConsumoRepuestoEntity,
   EntregaMaterialDetEntity,
   EntregaMaterialEntity,
@@ -55,6 +56,7 @@ import {
       WorkOrderStatusHistoryEntity,
       ConsumoRepuestoEntity,
       StockBodegaEntity,
+      BodegaEntity,
       ProductoEntity,
       ReservaStockEntity,
       EntregaMaterialEntity,

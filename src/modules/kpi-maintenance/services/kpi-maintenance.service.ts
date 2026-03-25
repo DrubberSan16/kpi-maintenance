@@ -43,6 +43,7 @@ import {
   PlanMantenimientoEntity,
   PlanTareaEntity,
   ProductoEntity,
+  BodegaEntity,
   ProgramacionPlanEntity,
   ReservaStockEntity,
   WorkOrderStatusHistoryEntity,
@@ -145,6 +146,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly stockRepo: Repository<StockBodegaEntity>,
     @InjectRepository(ProductoEntity)
     private readonly productoRepo: Repository<ProductoEntity>,
+    @InjectRepository(BodegaEntity)
+    private readonly bodegaRepo: Repository<BodegaEntity>,
     @InjectRepository(ReservaStockEntity)
     private readonly reservaRepo: Repository<ReservaStockEntity>,
     @InjectRepository(WorkOrderTareaEntity)
@@ -157,6 +160,97 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly uploadRoot =
     process.env.WORK_ORDER_UPLOAD_DIR ||
     join(process.cwd(), 'storage', 'work-orders');
+
+  private buildProductoLabel(producto?: Partial<ProductoEntity> | null) {
+    if (!producto) return null;
+    const codigo = String(producto.codigo || '').trim();
+    const nombre = String(producto.nombre || '').trim();
+    if (codigo && nombre) return `${codigo} - ${nombre}`;
+    return nombre || codigo || null;
+  }
+
+  private buildBodegaLabel(bodega?: Partial<BodegaEntity> | null) {
+    if (!bodega) return null;
+    const codigo = String(bodega.codigo || '').trim();
+    const nombre = String(bodega.nombre || '').trim();
+    if (codigo && nombre) return `${codigo} - ${nombre}`;
+    return nombre || codigo || null;
+  }
+
+  private async buildInventoryCatalogMaps(productIds: string[], warehouseIds: string[]) {
+    const uniqueProductIds = [...new Set(productIds.filter(Boolean))];
+    const uniqueWarehouseIds = [...new Set(warehouseIds.filter(Boolean))];
+
+    const [productos, bodegas] = await Promise.all([
+      uniqueProductIds.length
+        ? this.productoRepo.find({ where: { id: In(uniqueProductIds) } })
+        : Promise.resolve([] as ProductoEntity[]),
+      uniqueWarehouseIds.length
+        ? this.bodegaRepo.find({ where: { id: In(uniqueWarehouseIds) } })
+        : Promise.resolve([] as BodegaEntity[]),
+    ]);
+
+    return {
+      productMap: new Map(productos.map((item) => [item.id, item])),
+      warehouseMap: new Map(bodegas.map((item) => [item.id, item])),
+    };
+  }
+
+  private mapConsumoWithCatalogs(
+    row: ConsumoRepuestoEntity,
+    productMap: Map<string, ProductoEntity>,
+    warehouseMap: Map<string, BodegaEntity>,
+  ) {
+    const producto = productMap.get(row.producto_id);
+    const bodega = row.bodega_id ? warehouseMap.get(row.bodega_id) : undefined;
+    return {
+      ...row,
+      producto_codigo: producto?.codigo ?? null,
+      producto_nombre: producto?.nombre ?? null,
+      producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      bodega_codigo: bodega?.codigo ?? null,
+      bodega_nombre: bodega?.nombre ?? null,
+      bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id ?? null,
+    };
+  }
+
+  private mapIssueItemWithCatalogs(
+    row: EntregaMaterialDetEntity,
+    productMap: Map<string, ProductoEntity>,
+    warehouseMap: Map<string, BodegaEntity>,
+  ) {
+    const producto = productMap.get(row.producto_id);
+    const bodega = warehouseMap.get(row.bodega_id);
+    return {
+      ...row,
+      producto_codigo: producto?.codigo ?? null,
+      producto_nombre: producto?.nombre ?? null,
+      producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      bodega_codigo: bodega?.codigo ?? null,
+      bodega_nombre: bodega?.nombre ?? null,
+      bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id,
+    };
+  }
+
+  private async validateProductoEnBodega(productoId: string, bodegaId: string) {
+    const [producto, bodega, stock] = await Promise.all([
+      this.productoRepo.findOne({ where: { id: productoId } }),
+      this.bodegaRepo.findOne({ where: { id: bodegaId } }),
+      this.stockRepo.findOne({ where: { producto_id: productoId, bodega_id: bodegaId } }),
+    ]);
+
+    if (!producto) {
+      throw new NotFoundException('Producto no encontrado');
+    }
+    if (!bodega) {
+      throw new NotFoundException('Bodega no encontrada');
+    }
+    if (!stock) {
+      throw new BadRequestException('El producto seleccionado no pertenece a la bodega indicada.');
+    }
+
+    return { producto, bodega, stock };
+  }
 
   onModuleInit() {
     this.scheduleAlertRecalculation();
@@ -1627,7 +1721,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where: { work_order_id: workOrderId, is_deleted: false },
       order: { id: 'DESC' },
     });
-    return this.wrap(rows, 'Consumos listados');
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      rows.map((row) => row.producto_id),
+      rows.map((row) => row.bodega_id || '').filter(Boolean),
+    );
+    return this.wrap(
+      rows.map((row) => this.mapConsumoWithCatalogs(row, productMap, warehouseMap)),
+      'Consumos listados',
+    );
   }
 
   async listWorkOrderHistory(workOrderId: string) {
@@ -1644,6 +1745,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: workOrderId,
       is_deleted: false,
     });
+    if (!dto.bodega_id) {
+      throw new BadRequestException('La bodega es obligatoria para registrar el consumo.');
+    }
+
+    const { producto, bodega } = await this.validateProductoEnBodega(dto.producto_id, dto.bodega_id);
     const subtotal = dto.cantidad * dto.costo_unitario;
     const saved = await this.consumoRepo.save(
       this.consumoRepo.create({
@@ -1657,7 +1763,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
     });
-    return this.wrap(saved, 'Consumo registrado');
+    return this.wrap(
+      this.mapConsumoWithCatalogs(saved, new Map([[producto.id, producto]]), new Map([[bodega.id, bodega]])),
+      'Consumo registrado',
+    );
   }
 
   async listIssueMaterials(workOrderId: string) {
@@ -1670,11 +1779,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const detalles = entregaIds.length
       ? await this.dataSource.getRepository(EntregaMaterialDetEntity).find({ where: { entrega_id: In(entregaIds) } })
       : [];
+
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      detalles.map((item) => item.producto_id),
+      detalles.map((item) => item.bodega_id),
+    );
+
     return this.wrap(
-      entregas.map((entrega) => ({
-        ...entrega,
-        items: detalles.filter((detalle) => detalle.entrega_id === entrega.id),
-      })),
+      entregas.map((entrega) => {
+        const items = detalles
+          .filter((detalle) => detalle.entrega_id === entrega.id)
+          .map((detalle) => this.mapIssueItemWithCatalogs(detalle, productMap, warehouseMap));
+        return {
+          ...entrega,
+          items,
+          total: items.reduce(
+            (acc, item) => acc + Number(item.costo_unitario || 0) * Number(item.cantidad || 0),
+            0,
+          ),
+        };
+      }),
       'Salidas de materiales listadas',
     );
   }

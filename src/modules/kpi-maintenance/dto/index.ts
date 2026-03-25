@@ -672,10 +672,9 @@ export class CreateConsumoDto {
   @ApiProperty({ description: 'ID del producto consumido', format: 'uuid' })
   @IsUUID()
   producto_id: string;
-  @ApiPropertyOptional({ description: 'ID de la bodega', format: 'uuid' })
-  @IsOptional()
+  @ApiProperty({ description: 'ID de la bodega', format: 'uuid' })
   @IsUUID()
-  bodega_id?: string;
+  bodega_id: string;
   @ApiProperty({
     description: 'Cantidad consumida',
     type: Number,

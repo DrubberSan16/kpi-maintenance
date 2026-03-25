@@ -437,6 +437,8 @@ export class KardexEntity {
 @Entity({ schema: 'kpi_inventory', name: 'tb_producto' })
 export class ProductoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'varchar', length: 60, nullable: true }) codigo?: string | null;
+  @Column({ type: 'varchar', length: 250, nullable: true }) nombre?: string | null;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   ultimo_costo: number;
 }
@@ -444,4 +446,6 @@ export class ProductoEntity {
 @Entity({ schema: 'kpi_inventory', name: 'tb_bodega' })
 export class BodegaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
+  @Column({ type: 'varchar', length: 150, nullable: true }) nombre?: string | null;
 }
