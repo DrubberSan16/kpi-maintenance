@@ -402,7 +402,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async generateNextWorkOrderCode() {
     const rows = await this.woRepo.find({
       select: { code: true, id: true },
-      where: { is_deleted: false },
     });
     const codes = rows
       .map((row) => String(row.code || '').trim())
@@ -418,11 +417,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async resolveRequestedWorkOrderCode(requestedCode?: string | null) {
     const candidate = String(requestedCode || '').trim();
     if (!candidate) {
-      return this.generateNextWorkOrderCode();
+      const generatedCode = await this.generateNextWorkOrderCode();
+      return {
+        requestedCode: null,
+        resolvedCode: generatedCode,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
     }
-    const existing = await this.woRepo.findOne({ where: { code: candidate, is_deleted: false } });
-    if (!existing) return candidate;
-    return this.generateNextWorkOrderCode();
+    const existing = await this.woRepo.findOne({ where: { code: candidate } });
+    if (!existing) {
+      return {
+        requestedCode: candidate,
+        resolvedCode: candidate,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const generatedCode = await this.generateNextWorkOrderCode();
+    return {
+      requestedCode: candidate,
+      resolvedCode: generatedCode,
+      codeWasReassigned: generatedCode !== candidate,
+      reassignmentReason: existing.is_deleted
+        ? 'El código solicitado existía en una OT eliminada lógicamente.'
+        : 'El código solicitado ya estaba en uso.',
+    };
+  }
+
+  private isDuplicateWorkOrderCodeError(error: any) {
+    const driverCode = String(error?.driverError?.code || error?.code || '').trim();
+    const constraint = String(error?.driverError?.constraint || error?.constraint || '').trim();
+    return driverCode === '23505' && constraint === 'tb_work_order_code_key';
   }
 
   private buildMaintenanceRelativePath(path: string) {
@@ -1508,27 +1534,54 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: dto.plan_id,
         is_deleted: false,
       });
+
     const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
-    const resolvedCode = await this.resolveRequestedWorkOrderCode(dto.code);
-    const entity = this.woRepo.create({
-      code: resolvedCode,
-      type: dto.type,
-      equipment_id: dto.equipment_id ?? null,
-      plan_id: dto.plan_id ?? null,
-      valor_json: dto.valor_json ?? null,
-      title: dto.title,
-      description: dto.description ?? null,
-      status_workflow: normalizedStatus,
-      priority: dto.priority ?? 5,
-      provider_type: dto.provider_type ?? 'INTERNO',
-      maintenance_kind: dto.maintenance_kind ?? 'CORRECTIVO',
-      safety_permit_required: dto.safety_permit_required ?? false,
-      safety_permit_code: dto.safety_permit_code ?? null,
-      vendor_id: dto.vendor_id ?? null,
-      purchase_request_id: dto.purchase_request_id ?? null,
-    });
-    this.applyWorkflowDates(entity, null, normalizedStatus);
-    const created = await this.woRepo.save(entity);
+    let resolution = await this.resolveRequestedWorkOrderCode(dto.code);
+    let created: WorkOrderEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const entity = this.woRepo.create({
+        code: resolution.resolvedCode,
+        type: dto.type,
+        equipment_id: dto.equipment_id ?? null,
+        plan_id: dto.plan_id ?? null,
+        valor_json: dto.valor_json ?? null,
+        title: dto.title,
+        description: dto.description ?? null,
+        status_workflow: normalizedStatus,
+        priority: dto.priority ?? 5,
+        provider_type: dto.provider_type ?? 'INTERNO',
+        maintenance_kind: dto.maintenance_kind ?? 'CORRECTIVO',
+        safety_permit_required: dto.safety_permit_required ?? false,
+        safety_permit_code: dto.safety_permit_code ?? null,
+        vendor_id: dto.vendor_id ?? null,
+        purchase_request_id: dto.purchase_request_id ?? null,
+      });
+      this.applyWorkflowDates(entity, null, normalizedStatus);
+
+      try {
+        created = await this.woRepo.save(entity);
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateWorkOrderCodeError(error) || attempt >= 2) {
+          throw error;
+        }
+        const nextCode = await this.generateNextWorkOrderCode();
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.code ?? null,
+          resolvedCode: nextCode,
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El código solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!created) {
+      throw new ConflictException('No se pudo generar un código único para la orden de trabajo.');
+    }
+
     await this.appendWorkOrderHistory(created.id, normalizedStatus, 'Orden de trabajo creada');
     if (dto.alerta_id) {
       const alerta = await this.findOneOrFail(this.alertaRepo, {
@@ -1540,19 +1593,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.alertaRepo.save(alerta);
     }
     const enriched = await this.enrichWorkOrder(created);
+    const responsePayload = {
+      ...enriched,
+      requested_code: resolution.requestedCode,
+      code_was_reassigned: resolution.codeWasReassigned,
+      code_reassignment_reason: resolution.reassignmentReason,
+    };
     await this.publishInAppNotification({
-      title: 'Nueva orden de trabajo',
-      body: `${enriched.code} - ${enriched.title}`,
+      title: 'Nueva orden de trabajo creada',
+      body: resolution.codeWasReassigned
+        ? `${enriched.code} - ${enriched.title}. Código ajustado automáticamente.`
+        : `${enriched.code} - ${enriched.title}`,
       module: 'maintenance',
       entityType: 'work-order',
       entityId: created.id,
       level: normalizedStatus === 'CLOSED' ? 'success' : 'info',
     });
     await this.writeSecurityLog({
-      description: `[WO:${created.id}] Creación de OT ${created.code}`,
+      description: `[WO:${created.id}] Creación de OT ${created.code}${resolution.codeWasReassigned ? ` (reemplazó ${resolution.requestedCode ?? 'sin código'})` : ''}`,
       typeLog: 'WORK_ORDER',
     });
-    return this.wrap(enriched, 'Work order creada');
+    return this.wrap(responsePayload, 'Work order creada');
   }
 
   async updateWorkOrder(id: string, dto: UpdateWorkOrderDto) {
@@ -1575,8 +1636,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     const enriched = await this.enrichWorkOrder(saved);
     await this.publishInAppNotification({
-      title: previousStatus !== saved.status_workflow ? 'Estado de OT actualizado' : 'Orden de trabajo actualizada',
-      body: `${enriched.code} - ${enriched.title} (${saved.status_workflow})`,
+      title: previousStatus !== saved.status_workflow ? 'Estado de orden de trabajo actualizado' : 'Orden de trabajo actualizada',
+      body:
+        previousStatus !== saved.status_workflow
+          ? `${enriched.code} cambió de ${previousStatus} a ${saved.status_workflow}`
+          : `${enriched.code} - ${enriched.title} (${saved.status_workflow})`,
       module: 'maintenance',
       entityType: 'work-order',
       entityId: saved.id,
