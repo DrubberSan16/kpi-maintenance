@@ -29,6 +29,7 @@ import {
   StockBodegaEntity,
   WorkOrderAdjuntoEntity,
   WorkOrderEntity,
+  WorkOrderStatusHistoryEntity,
   WorkOrderTareaEntity,
 } from './entities/kpi-maintenance.entity';
 
@@ -50,6 +51,8 @@ import {
       PlanTareaEntity,
       ProgramacionPlanEntity,
       WorkOrderEntity,
+  WorkOrderStatusHistoryEntity,
+      WorkOrderStatusHistoryEntity,
       ConsumoRepuestoEntity,
       StockBodegaEntity,
       ProductoEntity,

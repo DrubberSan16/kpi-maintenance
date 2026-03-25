@@ -9,6 +9,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { URLSearchParams } from 'url';
 import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
 import { basename, extname, join } from 'path';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -44,6 +45,7 @@ import {
   ProductoEntity,
   ProgramacionPlanEntity,
   ReservaStockEntity,
+  WorkOrderStatusHistoryEntity,
   StockBodegaEntity,
   WorkOrderAdjuntoEntity,
   WorkOrderEntity,
@@ -135,6 +137,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly programacionRepo: Repository<ProgramacionPlanEntity>,
     @InjectRepository(WorkOrderEntity)
     private readonly woRepo: Repository<WorkOrderEntity>,
+    @InjectRepository(WorkOrderStatusHistoryEntity)
+    private readonly woHistoryRepo: Repository<WorkOrderStatusHistoryEntity>,
     @InjectRepository(ConsumoRepuestoEntity)
     private readonly consumoRepo: Repository<ConsumoRepuestoEntity>,
     @InjectRepository(StockBodegaEntity)
@@ -214,6 +218,249 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private wrap(data: unknown, message = 'OK', meta?: unknown) {
     return { data, meta, message };
+  }
+
+
+  private readonly notificationServiceUrl = (
+    process.env.NOTIFICATION_SERVICE_URL || process.env.KPI_NOTIFICATION_URL || ''
+  ).replace(/\/$/, '');
+
+  private readonly securityServiceUrl = (
+    process.env.SECURITY_SERVICE_URL || process.env.KPI_SECURITY_URL || ''
+  ).replace(/\/$/, '');
+
+  private readonly publicBaseUrl = (
+    process.env.PUBLIC_BASE_URL || process.env.APP_PUBLIC_URL || ''
+  ).replace(/\/$/, '');
+
+  private toNumeric(value: unknown, fallback = 0) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  }
+
+  private normalizeWorkflowStatus(value: unknown) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (['PLANNED', 'PLANIFICADA', 'PLANIFICADO', 'CREADA', 'CREADO'].includes(raw)) return 'PLANNED';
+    if (['IN_PROGRESS', 'IN PROGRESS', 'EN_PROCESO', 'EN PROCESO', 'PROCESSING'].includes(raw)) return 'IN_PROGRESS';
+    if (['CLOSED', 'CERRADA', 'CERRADO', 'DONE', 'COMPLETED'].includes(raw)) return 'CLOSED';
+    return raw || 'PLANNED';
+  }
+
+  private buildMaintenanceRelativePath(path: string) {
+    const basePath = String(process.env.BASE_PATH || '/kpi_maintenance').replace(/\/$/, '');
+    return `${basePath}${path.startsWith('/') ? path : `/${path}`}`;
+  }
+
+  private buildMaintenancePublicUrl(path: string) {
+    const relative = this.buildMaintenanceRelativePath(path);
+    return this.publicBaseUrl ? `${this.publicBaseUrl}${relative}` : relative;
+  }
+
+  private async postJson(url: string, payload: Record<string, unknown>) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
+    }
+    return response;
+  }
+
+  private async publishInAppNotification(payload: {
+    title: string;
+    body: string;
+    module?: string;
+    entityType?: string;
+    entityId?: string | null;
+    level?: string;
+    recipients?: string[];
+  }) {
+    if (!this.notificationServiceUrl) return;
+    try {
+      await this.postJson(`${this.notificationServiceUrl}/notifications/in-app`, {
+        title: payload.title,
+        body: payload.body,
+        module: payload.module ?? 'maintenance',
+        entityType: payload.entityType ?? 'work-order',
+        entityId: payload.entityId ?? null,
+        level: payload.level ?? 'info',
+        recipients: payload.recipients ?? [],
+      });
+    } catch (error: any) {
+      this.logger.warn(`No se pudo publicar notificación: ${error?.message ?? 'desconocido'}`);
+    }
+  }
+
+  private async writeSecurityLog(payload: {
+    description: string;
+    status?: string;
+    typeLog?: string;
+    createdBy?: string | null;
+  }) {
+    if (!this.securityServiceUrl) return;
+    try {
+      await this.postJson(`${this.securityServiceUrl}/log-transacts`, {
+        moduleMicroservice: 'kpi_maintenance',
+        status: payload.status ?? 'SUCCESS',
+        typeLog: payload.typeLog ?? 'WORK_ORDER',
+        description: payload.description,
+        createdBy: payload.createdBy ?? null,
+      });
+    } catch (error: any) {
+      this.logger.warn(`No se pudo registrar log transaccional: ${error?.message ?? 'desconocido'}`);
+    }
+  }
+
+  private async appendWorkOrderHistory(
+    workOrderId: string,
+    toStatus: string,
+    note: string,
+    options?: { fromStatus?: string | null; changedBy?: string | null },
+  ) {
+    return this.woHistoryRepo.save(
+      this.woHistoryRepo.create({
+        work_order_id: workOrderId,
+        from_status: options?.fromStatus ?? null,
+        to_status: toStatus,
+        changed_by: options?.changedBy ?? null,
+        note,
+      }),
+    );
+  }
+
+  private applyWorkflowDates(
+    workOrder: WorkOrderEntity,
+    previousStatus: string | null,
+    nextStatus: string,
+  ) {
+    if (nextStatus === 'IN_PROGRESS' && !workOrder.started_at) {
+      workOrder.started_at = new Date();
+    }
+    if (nextStatus === 'CLOSED' && !workOrder.closed_at) {
+      workOrder.closed_at = new Date();
+      if (!workOrder.started_at) workOrder.started_at = new Date();
+    }
+    if (previousStatus === 'CLOSED' && nextStatus !== 'CLOSED') {
+      workOrder.closed_at = null;
+    }
+  }
+
+  private addInterval(dateInput: string | Date, frequencyType: string, frequencyValue: number) {
+    const date = new Date(dateInput);
+    const type = String(frequencyType || 'DIAS').toUpperCase();
+    const value = this.toNumeric(frequencyValue, 0);
+    if (!value) return date;
+    if (type === 'SEMANAS') {
+      date.setDate(date.getDate() + value * 7);
+      return date;
+    }
+    if (type === 'MESES') {
+      date.setMonth(date.getMonth() + value);
+      return date;
+    }
+    date.setDate(date.getDate() + value);
+    return date;
+  }
+
+  private async recalculateProgramacionFields(
+    programacion: ProgramacionPlanEntity,
+    options?: { persist?: boolean },
+  ) {
+    const equipo = await this.findEquipoOrFail(programacion.equipo_id);
+    const plan = await this.findOneOrFail(this.planRepo, {
+      id: programacion.plan_id,
+      is_deleted: false,
+    });
+
+    const freqType = String(plan.frecuencia_tipo || 'HORAS').toUpperCase();
+    const freqValue = this.toNumeric(plan.frecuencia_valor, 0);
+    const patch: Partial<ProgramacionPlanEntity> = {};
+
+    if (freqType === 'HORAS') {
+      const baseHours =
+        programacion.ultima_ejecucion_horas != null
+          ? this.toNumeric(programacion.ultima_ejecucion_horas)
+          : this.toNumeric(equipo.horometro_actual);
+      patch.proxima_horas = Number((baseHours + freqValue).toFixed(2));
+      if (!programacion.ultima_ejecucion_horas && equipo.horometro_actual != null) {
+        patch.ultima_ejecucion_horas = this.toNumeric(equipo.horometro_actual);
+      }
+    } else {
+      const baseDate =
+        programacion.ultima_ejecucion_fecha ||
+        new Date().toISOString().slice(0, 10);
+      patch.proxima_fecha = this
+        .addInterval(baseDate, freqType, freqValue)
+        .toISOString()
+        .slice(0, 10);
+      if (!programacion.ultima_ejecucion_fecha) {
+        patch.ultima_ejecucion_fecha = baseDate;
+      }
+    }
+
+    const currentHours = this.toNumeric(equipo.horometro_actual);
+    const nextHours = patch.proxima_horas ?? programacion.proxima_horas ?? null;
+    const nextDate = patch.proxima_fecha ?? programacion.proxima_fecha ?? null;
+    const hoursRemaining = nextHours == null ? null : Number((this.toNumeric(nextHours) - currentHours).toFixed(2));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const daysRemaining =
+      nextDate == null
+        ? null
+        : Math.ceil((new Date(nextDate).getTime() - today.getTime()) / 86400000);
+    const dueByHours = hoursRemaining != null && hoursRemaining <= 0;
+    const dueByDate = daysRemaining != null && daysRemaining <= 0;
+    const dueSoon =
+      (hoursRemaining != null && hoursRemaining > 0 && hoursRemaining <= Math.max(1, freqValue * 0.1)) ||
+      (daysRemaining != null && daysRemaining > 0 && daysRemaining <= 3);
+
+    const enriched = {
+      ...programacion,
+      ...patch,
+      equipo_nombre: equipo.nombre,
+      equipo_codigo: equipo.codigo,
+      plan_nombre: plan.nombre,
+      plan_codigo: plan.codigo,
+      frecuencia_tipo: plan.frecuencia_tipo,
+      frecuencia_valor: plan.frecuencia_valor,
+      horometro_actual: currentHours,
+      horas_restantes: hoursRemaining,
+      dias_restantes: daysRemaining,
+      estado_programacion: dueByHours || dueByDate ? 'VENCIDA' : dueSoon ? 'PROXIMA' : 'PROGRAMADA',
+    };
+
+    if (options?.persist !== false) {
+      const changed = Object.entries(patch).some(([key, value]) => (programacion as any)[key] !== value);
+      if (changed) {
+        Object.assign(programacion, patch);
+        await this.programacionRepo.save(programacion);
+      }
+    }
+
+    return enriched;
+  }
+
+  private async enrichWorkOrder(workOrder: WorkOrderEntity) {
+    const [equipo, plan] = await Promise.all([
+      workOrder.equipment_id
+        ? this.equipoRepo.findOne({ where: { id: workOrder.equipment_id, is_deleted: false } })
+        : Promise.resolve(null),
+      workOrder.plan_id
+        ? this.planRepo.findOne({ where: { id: workOrder.plan_id, is_deleted: false } })
+        : Promise.resolve(null),
+    ]);
+
+    return {
+      ...workOrder,
+      status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
+      equipment_nombre: equipo?.nombre ?? null,
+      equipment_codigo: equipo?.codigo ?? null,
+      plan_nombre: plan?.nombre ?? null,
+      plan_codigo: plan?.codigo ?? null,
+    };
   }
 
   async listEquipos(query: EquipoQueryDto) {
@@ -438,6 +685,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     equipo.horometro_actual = dto.horometro;
     equipo.fecha_ultima_lectura = new Date(dto.fecha);
     await this.equipoRepo.save(equipo);
+    await this.triggerAlertRecalculation('bitacora');
     return this.wrap(saved, 'Bitácora creada');
   }
 
@@ -447,7 +695,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     Object.assign(b, dto);
-    return this.wrap(await this.bitacoraRepo.save(b), 'Bitácora actualizada');
+    const saved = await this.bitacoraRepo.save(b);
+    const equipo = await this.findEquipoOrFail(saved.equipo_id);
+    if (dto.horometro != null) equipo.horometro_actual = dto.horometro;
+    if (dto.fecha) equipo.fecha_ultima_lectura = new Date(dto.fecha);
+    await this.equipoRepo.save(equipo);
+    await this.triggerAlertRecalculation('bitacora-update');
+    return this.wrap(saved, 'Bitácora actualizada');
   }
   async deleteBitacora(id: string) {
     const b = await this.findOneOrFail(this.bitacoraRepo, {
@@ -593,23 +847,43 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createProgramacion(dto: CreateProgramacionDto) {
-    return this.wrap(
-      await this.programacionRepo.save(this.programacionRepo.create(dto)),
-      'Programación creada',
-    );
+    await this.findEquipoOrFail(dto.equipo_id);
+    await this.findOneOrFail(this.planRepo, { id: dto.plan_id, is_deleted: false });
+    const entity = this.programacionRepo.create(dto);
+    const saved = await this.programacionRepo.save(entity);
+    const enriched = await this.recalculateProgramacionFields(saved);
+    await this.publishInAppNotification({
+      title: 'Nueva programación de mantenimiento',
+      body: `${enriched.plan_nombre} programado para ${enriched.equipo_nombre}`,
+      module: 'maintenance',
+      entityType: 'programacion',
+      entityId: saved.id,
+      level: 'info',
+    });
+    await this.writeSecurityLog({
+      description: `[PROGRAMACION:${saved.id}] Programación creada para equipo ${saved.equipo_id} y plan ${saved.plan_id}` ,
+      typeLog: 'PROGRAMACION',
+    });
+    return this.wrap(enriched, 'Programación creada');
   }
   async listProgramaciones() {
-    return this.wrap(
-      await this.programacionRepo.find({ where: { is_deleted: false } }),
-      'Programaciones listadas',
-    );
+    const rows = await this.programacionRepo.find({ where: { is_deleted: false, activo: true } });
+    const data = await Promise.all(rows.map((row) => this.recalculateProgramacionFields(row, { persist: false })));
+    data.sort((a: any, b: any) => {
+      const left = a.proxima_fecha || '';
+      const right = b.proxima_fecha || '';
+      if (left && right) return String(left).localeCompare(String(right));
+      return this.toNumeric(a.proxima_horas, 99999999) - this.toNumeric(b.proxima_horas, 99999999);
+    });
+    return this.wrap(data, 'Programaciones listadas');
   }
   async getProgramacion(id: string) {
+    const row = await this.findOneOrFail(this.programacionRepo, {
+      id,
+      is_deleted: false,
+    });
     return this.wrap(
-      await this.findOneOrFail(this.programacionRepo, {
-        id,
-        is_deleted: false,
-      }),
+      await this.recalculateProgramacionFields(row, { persist: false }),
       'Programación obtenida',
     );
   }
@@ -619,10 +893,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     Object.assign(p, dto);
-    return this.wrap(
-      await this.programacionRepo.save(p),
-      'Programación actualizada',
-    );
+    const saved = await this.programacionRepo.save(p);
+    const enriched = await this.recalculateProgramacionFields(saved);
+    await this.publishInAppNotification({
+      title: 'Programación actualizada',
+      body: `${enriched.plan_nombre} actualizado para ${enriched.equipo_nombre}`,
+      module: 'maintenance',
+      entityType: 'programacion',
+      entityId: saved.id,
+      level: 'info',
+    });
+    await this.writeSecurityLog({
+      description: `[PROGRAMACION:${saved.id}] Programación actualizada`,
+      typeLog: 'PROGRAMACION',
+    });
+    return this.wrap(enriched, 'Programación actualizada');
   }
   async deleteProgramacion(id: string) {
     const p = await this.findOneOrFail(this.programacionRepo, {
@@ -740,13 +1025,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
   async createLectura(dto: CreateLecturaEquipoDto) {
-    await this.findEquipoOrFail(dto.equipo_id);
+    const equipo = await this.findEquipoOrFail(dto.equipo_id);
     const created = await this.lecturaRepo.save(
       this.lecturaRepo.create({
         ...dto,
         fecha: dto.fecha ? new Date(dto.fecha) : new Date(),
       }),
     );
+    const tipo = String(dto.tipo || '').toUpperCase();
+    if ((tipo.includes('HORO') || tipo.includes('HORA')) && dto.valor != null) {
+      equipo.horometro_actual = dto.valor;
+      equipo.fecha_ultima_lectura = created.fecha;
+      await this.equipoRepo.save(equipo);
+      await this.triggerAlertRecalculation('lectura');
+    }
     return this.wrap(created, 'Lectura creada');
   }
   async updateLectura(id: string, dto: UpdateLecturaEquipoDto) {
@@ -758,7 +1050,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...dto,
       fecha: dto.fecha ? new Date(dto.fecha) : item.fecha,
     });
-    return this.wrap(await this.lecturaRepo.save(item), 'Lectura actualizada');
+    const saved = await this.lecturaRepo.save(item);
+    const tipo = String(saved.tipo || '').toUpperCase();
+    if ((tipo.includes('HORO') || tipo.includes('HORA')) && saved.valor != null) {
+      const equipo = await this.findEquipoOrFail(saved.equipo_id);
+      equipo.horometro_actual = this.toNumeric(saved.valor);
+      equipo.fecha_ultima_lectura = saved.fecha;
+      await this.equipoRepo.save(equipo);
+      await this.triggerAlertRecalculation('lectura-update');
+    }
+    return this.wrap(saved, 'Lectura actualizada');
   }
   async deleteLectura(id: string) {
     const item = await this.findOneOrFail(this.lecturaRepo, {
@@ -1006,19 +1307,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (q.equipo_id)
       qb.andWhere('wo.equipment_id = :equipo', { equipo: q.equipo_id });
     if (q.status_workflow)
-      qb.andWhere('wo.status_workflow = :estado', {
-        estado: q.status_workflow,
+      qb.andWhere('UPPER(wo.status_workflow) = :estado', {
+        estado: this.normalizeWorkflowStatus(q.status_workflow),
       });
     if (q.maintenance_kind)
       qb.andWhere('wo.maintenance_kind = :kind', { kind: q.maintenance_kind });
-    return this.wrap(await qb.getMany(), 'Work orders listadas');
+    qb.orderBy('wo.created_at', 'DESC');
+    const rows = await qb.getMany();
+    return this.wrap(await Promise.all(rows.map((row) => this.enrichWorkOrder(row))), 'Work orders listadas');
   }
 
   async getWorkOrder(id: string) {
-    return this.wrap(
-      await this.findOneOrFail(this.woRepo, { id, is_deleted: false }),
-      'Work order obtenida',
-    );
+    const row = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    return this.wrap(await this.enrichWorkOrder(row), 'Work order obtenida');
   }
 
   async createWorkOrder(dto: CreateWorkOrderDto) {
@@ -1028,47 +1329,95 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: dto.plan_id,
         is_deleted: false,
       });
-    const created = await this.woRepo.save(
-      this.woRepo.create({
-        code: dto.code,
-        type: dto.type,
-        equipment_id: dto.equipment_id ?? null,
-        plan_id: dto.plan_id ?? null,
-        valor_json: dto.valor_json ?? null,
-        title: dto.title,
-        description: dto.description ?? null,
-        status_workflow: dto.status_workflow ?? 'PLANNED',
-        priority: dto.priority ?? 5,
-        provider_type: dto.provider_type ?? 'INTERNO',
-        maintenance_kind: dto.maintenance_kind ?? 'CORRECTIVO',
-        safety_permit_required: dto.safety_permit_required ?? false,
-        safety_permit_code: dto.safety_permit_code ?? null,
-        vendor_id: dto.vendor_id ?? null,
-        purchase_request_id: dto.purchase_request_id ?? null,
-      }),
-    );
+    const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
+    const entity = this.woRepo.create({
+      code: dto.code,
+      type: dto.type,
+      equipment_id: dto.equipment_id ?? null,
+      plan_id: dto.plan_id ?? null,
+      valor_json: dto.valor_json ?? null,
+      title: dto.title,
+      description: dto.description ?? null,
+      status_workflow: normalizedStatus,
+      priority: dto.priority ?? 5,
+      provider_type: dto.provider_type ?? 'INTERNO',
+      maintenance_kind: dto.maintenance_kind ?? 'CORRECTIVO',
+      safety_permit_required: dto.safety_permit_required ?? false,
+      safety_permit_code: dto.safety_permit_code ?? null,
+      vendor_id: dto.vendor_id ?? null,
+      purchase_request_id: dto.purchase_request_id ?? null,
+    });
+    this.applyWorkflowDates(entity, null, normalizedStatus);
+    const created = await this.woRepo.save(entity);
+    await this.appendWorkOrderHistory(created.id, normalizedStatus, 'Orden de trabajo creada');
     if (dto.alerta_id) {
       const alerta = await this.findOneOrFail(this.alertaRepo, {
         id: dto.alerta_id,
         is_deleted: false,
       });
       alerta.work_order_id = created.id;
-      alerta.estado = 'EN_PROCESO';
+      alerta.estado = normalizedStatus === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO';
       await this.alertaRepo.save(alerta);
     }
-    return this.wrap(created, 'Work order creada');
+    const enriched = await this.enrichWorkOrder(created);
+    await this.publishInAppNotification({
+      title: 'Nueva orden de trabajo',
+      body: `${enriched.code} - ${enriched.title}`,
+      module: 'maintenance',
+      entityType: 'work-order',
+      entityId: created.id,
+      level: normalizedStatus === 'CLOSED' ? 'success' : 'info',
+    });
+    await this.writeSecurityLog({
+      description: `[WO:${created.id}] Creación de OT ${created.code}`,
+      typeLog: 'WORK_ORDER',
+    });
+    return this.wrap(enriched, 'Work order creada');
   }
 
   async updateWorkOrder(id: string, dto: UpdateWorkOrderDto) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
     Object.assign(wo, dto);
-    return this.wrap(await this.woRepo.save(wo), 'Work order actualizada');
+    wo.status_workflow = this.normalizeWorkflowStatus(dto.status_workflow ?? wo.status_workflow);
+    this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
+    const saved = await this.woRepo.save(wo);
+    if (previousStatus !== saved.status_workflow) {
+      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus });
+    } else {
+      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus });
+    }
+    const alertas = await this.alertaRepo.find({ where: { work_order_id: saved.id, is_deleted: false } });
+    if (alertas.length) {
+      const nextAlertStatus = saved.status_workflow === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO';
+      for (const alerta of alertas) alerta.estado = nextAlertStatus;
+      await this.alertaRepo.save(alertas);
+    }
+    const enriched = await this.enrichWorkOrder(saved);
+    await this.publishInAppNotification({
+      title: previousStatus !== saved.status_workflow ? 'Estado de OT actualizado' : 'Orden de trabajo actualizada',
+      body: `${enriched.code} - ${enriched.title} (${saved.status_workflow})`,
+      module: 'maintenance',
+      entityType: 'work-order',
+      entityId: saved.id,
+      level: saved.status_workflow === 'CLOSED' ? 'success' : 'info',
+    });
+    await this.writeSecurityLog({
+      description: `[WO:${saved.id}] Actualización de OT ${saved.code} (${previousStatus} -> ${saved.status_workflow})`,
+      typeLog: 'WORK_ORDER',
+    });
+    return this.wrap(enriched, 'Work order actualizada');
   }
 
   async deleteWorkOrder(id: string) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
     wo.is_deleted = true;
     await this.woRepo.save(wo);
+    await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow });
+    await this.writeSecurityLog({
+      description: `[WO:${wo.id}] Eliminación lógica de OT ${wo.code}`,
+      typeLog: 'WORK_ORDER',
+    });
     return this.wrap(true, 'Work order eliminada');
   }
 
@@ -1089,7 +1438,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrderId: string,
     dto: CreateWorkOrderTareaDto,
   ) {
-    await this.findOneOrFail(this.woRepo, {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
@@ -1105,6 +1454,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const created = await this.woTareaRepo.save(
       this.woTareaRepo.create({ ...dto, work_order_id: workOrderId }),
     );
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea registrada: ${dto.tarea_id}`, { fromStatus: workOrder.status_workflow });
     return this.wrap(created, 'Tarea de OT creada');
   }
 
@@ -1114,8 +1464,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     Object.assign(tarea, dto);
+    const saved = await this.woTareaRepo.save(tarea);
+    const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
+    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea actualizada: ${tarea.tarea_id}`, { fromStatus: workOrder.status_workflow });
     return this.wrap(
-      await this.woTareaRepo.save(tarea),
+      saved,
       'Tarea de OT actualizada',
     );
   }
@@ -1127,6 +1480,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     tarea.is_deleted = true;
     await this.woTareaRepo.save(tarea);
+    const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
+    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${tarea.tarea_id}`, { fromStatus: workOrder.status_workflow });
     return this.wrap(true, 'Tarea de OT eliminada');
   }
 
@@ -1134,7 +1489,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrderId: string,
     dto: UploadWorkOrderAdjuntoDto,
   ) {
-    await this.findOneOrFail(this.woRepo, {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
@@ -1166,7 +1521,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
       }),
     );
-    return this.wrap(created, 'Adjunto cargado');
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto agregado: ${originalName}`, { fromStatus: workOrder.status_workflow });
+    await this.writeSecurityLog({
+      description: `[WO:${workOrderId}] Adjunto agregado ${originalName}`,
+      typeLog: 'ADJUNTO',
+    });
+    return this.wrap(
+      {
+        ...created,
+        view_url: this.buildMaintenancePublicUrl(`/work-orders/${workOrderId}/adjuntos/${created.id}/view`),
+      },
+      'Adjunto cargado',
+    );
   }
 
   async listWorkOrderAdjuntos(
@@ -1182,10 +1548,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     };
     if (query.tipo) where.tipo = query.tipo;
+    const rows = await this.woAdjuntoRepo.find({ where });
     return this.wrap(
-      await this.woAdjuntoRepo.find({ where }),
+      rows.map((row) => ({
+        ...row,
+        view_url: this.buildMaintenancePublicUrl(`/work-orders/${workOrderId}/adjuntos/${row.id}/view`),
+      })),
       'Adjuntos listados',
     );
+  }
+
+  async resolveWorkOrderAdjuntoFile(workOrderId: string, adjuntoId: string) {
+    const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
+      id: adjuntoId,
+      work_order_id: workOrderId,
+      is_deleted: false,
+    });
+    const meta = (adjunto.meta ?? {}) as Record<string, unknown>;
+    const mimeType =
+      typeof meta.mime_type === 'string'
+        ? meta.mime_type
+        : 'application/octet-stream';
+    return {
+      filePath: adjunto.url,
+      fileName: adjunto.nombre || `adjunto-${adjunto.id}`,
+      mimeType,
+      meta,
+    };
   }
 
   async getWorkOrderAdjunto(workOrderId: string, adjuntoId: string) {
@@ -1194,13 +1583,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       work_order_id: workOrderId,
       is_deleted: false,
     });
-    const buffer = await readFile(adjunto.url);
-    const base64 = buffer.toString('base64');
-    const meta = (adjunto.meta ?? {}) as Record<string, unknown>;
-    const mimeType =
-      typeof meta.mime_type === 'string'
-        ? meta.mime_type
-        : 'application/octet-stream';
+    const file = await this.resolveWorkOrderAdjuntoFile(workOrderId, adjuntoId);
     return this.wrap(
       {
         id: adjunto.id,
@@ -1208,9 +1591,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         tipo: adjunto.tipo,
         nombre: adjunto.nombre,
         hash_sha256: adjunto.hash_sha256,
-        contenido_base64: base64,
-        content_type: mimeType,
-        data_url: `data:${mimeType};base64,${base64}`,
+        content_type: file.mimeType,
+        view_url: this.buildMaintenancePublicUrl(`/work-orders/${workOrderId}/adjuntos/${adjuntoId}/view`),
         meta: adjunto.meta,
       },
       'Adjunto obtenido',
@@ -1218,6 +1600,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteWorkOrderAdjunto(workOrderId: string, adjuntoId: string) {
+    const workOrder = await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
     const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
       id: adjuntoId,
       work_order_id: workOrderId,
@@ -1230,24 +1613,69 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     } catch {
       /* ignore */
     }
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto eliminado: ${adjunto.nombre ?? adjunto.id}`, { fromStatus: workOrder.status_workflow });
+    await this.writeSecurityLog({
+      description: `[WO:${workOrderId}] Adjunto eliminado ${adjunto.id}`,
+      typeLog: 'ADJUNTO',
+    });
     return this.wrap(true, 'Adjunto eliminado');
   }
 
+  async listConsumos(workOrderId: string) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    const rows = await this.consumoRepo.find({
+      where: { work_order_id: workOrderId, is_deleted: false },
+      order: { id: 'DESC' },
+    });
+    return this.wrap(rows, 'Consumos listados');
+  }
+
+  async listWorkOrderHistory(workOrderId: string) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    const rows = await this.woHistoryRepo.find({
+      where: { work_order_id: workOrderId },
+      order: { changed_at: 'DESC' },
+    });
+    return this.wrap(rows, 'Historial de la OT listado');
+  }
+
   async createConsumo(workOrderId: string, dto: CreateConsumoDto) {
-    await this.findOneOrFail(this.woRepo, {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
     const subtotal = dto.cantidad * dto.costo_unitario;
+    const saved = await this.consumoRepo.save(
+      this.consumoRepo.create({
+        ...dto,
+        work_order_id: workOrderId,
+        subtotal,
+      }),
+    );
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Consumo registrado para producto ${dto.producto_id} por ${dto.cantidad}`, { fromStatus: workOrder.status_workflow });
+    await this.writeSecurityLog({
+      description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
+      typeLog: 'CONSUMO',
+    });
+    return this.wrap(saved, 'Consumo registrado');
+  }
+
+  async listIssueMaterials(workOrderId: string) {
+    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    const entregas = await this.dataSource.getRepository(EntregaMaterialEntity).find({
+      where: { work_order_id: workOrderId, is_deleted: false },
+      order: { fecha: 'DESC' },
+    });
+    const entregaIds = entregas.map((item) => item.id);
+    const detalles = entregaIds.length
+      ? await this.dataSource.getRepository(EntregaMaterialDetEntity).find({ where: { entrega_id: In(entregaIds) } })
+      : [];
     return this.wrap(
-      await this.consumoRepo.save(
-        this.consumoRepo.create({
-          ...dto,
-          work_order_id: workOrderId,
-          subtotal,
-        }),
-      ),
-      'Consumo registrado',
+      entregas.map((entrega) => ({
+        ...entrega,
+        items: detalles.filter((detalle) => detalle.entrega_id === entrega.id),
+      })),
+      'Salidas de materiales listadas',
     );
   }
 
@@ -1256,7 +1684,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await qr.connect();
     await qr.startTransaction();
     try {
-      await this.findOneOrFail(this.woRepo, {
+      const workOrder = await this.findOneOrFail(this.woRepo, {
         id: workOrderId,
         is_deleted: false,
       });
@@ -1356,6 +1784,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       mov.total_costos = total;
       await qr.manager.save(mov);
       await qr.commitTransaction();
+      await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Salida de materiales registrada (${dto.items.length} items)`, { fromStatus: workOrder.status_workflow });
+      await this.writeSecurityLog({
+        description: `[WO:${workOrderId}] Emisión de materiales por total ${total}`,
+        typeLog: 'MATERIALES',
+      });
       return this.wrap(
         { entrega_id: em.id, movimiento_id: mov.id, total },
         'Materiales entregados',

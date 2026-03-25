@@ -18,7 +18,7 @@ import { KpiMaintenanceModule } from './modules/kpi-maintenance/kpi-maintenance.
           username: config.get('DB_USER'),
           password: config.get('DB_PASS'),
           database: config.get('DB_NAME'),
-          schema: 'kpi_inventory',
+          schema: 'kpi_maintenance',
           autoLoadEntities: true,
           synchronize: false,
           logging: false,

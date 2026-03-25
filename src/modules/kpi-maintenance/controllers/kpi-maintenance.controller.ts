@@ -7,7 +7,9 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiBody,
   ApiOperation,
@@ -868,6 +870,33 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Visualizar adjunto de una OT directamente en el navegador' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiParam({
+    name: 'adjuntoId',
+    description: 'ID del adjunto',
+    required: true,
+  })
+  @Get('work-orders/:id/adjuntos/:adjuntoId/view')
+  async viewWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Param('adjuntoId') adjuntoId: string,
+    @Res() res: Response,
+  ) {
+    const file = await this.service.resolveWorkOrderAdjuntoFile(id, adjuntoId);
+    res.setHeader('Content-Type', file.mimeType);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${encodeURIComponent(file.fileName)}"`,
+    );
+    return res.sendFile(file.filePath);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Eliminar adjunto de una OT por ID' })
   @ApiParam({
     name: 'id',
@@ -888,6 +917,30 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Listar consumos de una orden de trabajo' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Get('work-orders/:id/consumos')
+  listConsumos(@Param('id') id: string) {
+    return this.service.listConsumos(id);
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Listar historial de una orden de trabajo' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Get('work-orders/:id/history')
+  listWorkOrderHistory(@Param('id') id: string) {
+    return this.service.listWorkOrderHistory(id);
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Registrar consumo en una orden de trabajo' })
   @ApiParam({
     name: 'id',
@@ -903,6 +956,18 @@ export class KpiMaintenanceController {
   createConsumo(@Param('id') id: string, @Body() dto: CreateConsumoDto) {
     return this.service.createConsumo(id, dto);
   }
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Listar salidas de materiales de una orden de trabajo' })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Get('work-orders/:id/issue-materials')
+  listIssueMaterials(@Param('id') id: string) {
+    return this.service.listIssueMaterials(id);
+  }
+
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Emitir materiales en una orden de trabajo' })
   @ApiParam({

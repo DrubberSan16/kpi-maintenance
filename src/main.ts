@@ -7,6 +7,7 @@ import { TimezoneInterceptor } from './common/interceptors/timezone.interceptor'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.enableCors({ origin: true, credentials: true });
   const config = app.get(ConfigService);
 
   const port = Number(config.get('PORT') || 3000);
