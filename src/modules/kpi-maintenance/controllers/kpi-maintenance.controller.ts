@@ -711,6 +711,14 @@ export class KpiMaintenanceController {
     return this.service.listWorkOrders(query);
   }
 
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Obtener el siguiente código disponible de orden de trabajo' })
+  @Get('work-orders/next-code')
+  getNextWorkOrderCode() {
+    return this.service.getNextWorkOrderCode();
+  }
+
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Obtener orden de trabajo por ID' })
   @ApiParam({

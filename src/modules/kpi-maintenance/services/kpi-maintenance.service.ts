@@ -340,6 +340,58 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return raw || 'PLANNED';
   }
 
+  private incrementWorkOrderPrefix(letter: string) {
+    const nextCharCode = letter.toUpperCase().charCodeAt(0) + 1;
+    if (nextCharCode > 90) return 'A';
+    return String.fromCharCode(nextCharCode);
+  }
+
+  private computeNextWorkOrderCode(lastCode: string | null) {
+    if (!lastCode) return 'OT-A00001';
+    const match = /^OT-([A-Z])(\d{5})$/i.exec(String(lastCode).trim());
+    if (!match) return 'OT-A00001';
+    const currentLetter = (match[1] ?? 'A').toUpperCase();
+    const currentNumber = Number(match[2] ?? '0');
+    if (currentNumber >= 99999) {
+      return `OT-${this.incrementWorkOrderPrefix(currentLetter)}00001`;
+    }
+    return `OT-${currentLetter}${String(currentNumber + 1).padStart(5, '0')}`;
+  }
+
+  private getWorkOrderCodeRank(code: string) {
+    const match = /^OT-([A-Z])(\d{5})$/i.exec(String(code || '').trim());
+    if (!match) return -1;
+    const letter = (match[1] ?? 'A').toUpperCase();
+    const number = Number(match[2] ?? '0');
+    return (letter.charCodeAt(0) - 64) * 100000 + number;
+  }
+
+  private async generateNextWorkOrderCode() {
+    const rows = await this.woRepo.find({
+      select: { code: true, id: true },
+      where: { is_deleted: false },
+    });
+    const codes = rows
+      .map((row) => String(row.code || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => this.getWorkOrderCodeRank(b) - this.getWorkOrderCodeRank(a));
+    return this.computeNextWorkOrderCode(codes[0] ?? null);
+  }
+
+  async getNextWorkOrderCode() {
+    return this.wrap({ code: await this.generateNextWorkOrderCode() }, 'Siguiente código de OT generado');
+  }
+
+  private async resolveRequestedWorkOrderCode(requestedCode?: string | null) {
+    const candidate = String(requestedCode || '').trim();
+    if (!candidate) {
+      return this.generateNextWorkOrderCode();
+    }
+    const existing = await this.woRepo.findOne({ where: { code: candidate, is_deleted: false } });
+    if (!existing) return candidate;
+    return this.generateNextWorkOrderCode();
+  }
+
   private buildMaintenanceRelativePath(path: string) {
     const basePath = String(process.env.BASE_PATH || '/kpi_maintenance').replace(/\/$/, '');
     return `${basePath}${path.startsWith('/') ? path : `/${path}`}`;
@@ -1424,8 +1476,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         is_deleted: false,
       });
     const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
+    const resolvedCode = await this.resolveRequestedWorkOrderCode(dto.code);
     const entity = this.woRepo.create({
-      code: dto.code,
+      code: resolvedCode,
       type: dto.type,
       equipment_id: dto.equipment_id ?? null,
       plan_id: dto.plan_id ?? null,
@@ -1597,7 +1650,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const folder = join(this.uploadRoot, workOrderId);
     await mkdir(folder, { recursive: true });
     const originalName = basename(dto.nombre);
-    const filePath = join(folder, originalName);
+    const storageName = `${Date.now()}-${originalName.replace(/\s+/g, '_')}`;
+    const filePath = join(folder, storageName);
     await writeFile(filePath, buffer);
     const hash = createHash('sha256').update(buffer).digest('hex');
     const created = await this.woAdjuntoRepo.save(
