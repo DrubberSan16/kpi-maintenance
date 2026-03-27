@@ -873,6 +873,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Listar control de componentes criticos' })
+  @Get('inteligencia/control-componentes')
+  listControlComponentesCriticos() {
+    return this.service.listControlComponentesCriticos();
+  }
+
+  @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener resumen KPI documental y operativo' })
   @Get('inteligencia/summary')
   getIntelligenceSummary() {

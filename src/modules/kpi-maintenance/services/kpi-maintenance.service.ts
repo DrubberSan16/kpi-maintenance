@@ -2379,6 +2379,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(rows, 'Eventos de proceso listados');
   }
 
+  async listControlComponentesCriticos() {
+    const rows = await this.controlComponenteRepo.find({
+      where: { is_deleted: false },
+      order: { updated_at: 'DESC', created_at: 'DESC' },
+    });
+
+    const reportIds = [...new Set(rows.map((row) => row.reporte_id).filter(Boolean))] as string[];
+    const reportes = reportIds.length
+      ? await this.reporteDiarioRepo.find({
+          where: { id: In(reportIds), is_deleted: false },
+        })
+      : [];
+    const reportMap = new Map(reportes.map((row) => [row.id, row]));
+
+    return this.wrap(
+      rows.map((row) => {
+        const reporte = row.reporte_id ? reportMap.get(row.reporte_id) : null;
+        return {
+          ...row,
+          reporte_codigo: reporte?.codigo ?? null,
+          fecha_reporte: reporte?.fecha_reporte ?? null,
+          turno_reporte: reporte?.turno ?? null,
+          locacion_reporte: reporte?.locacion ?? null,
+        };
+      }),
+      'Componentes criticos listados',
+    );
+  }
+
   async getIntelligenceSummary() {
     const [
       procedimientos,
