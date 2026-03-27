@@ -338,6 +338,14 @@ export class CreatePlanTareaDto {
   @IsOptional()
   @IsString()
   field_type?: string;
+  @ApiPropertyOptional({ description: 'Indica si la tarea es obligatoria' })
+  @IsOptional()
+  @IsBoolean()
+  required?: boolean;
+  @ApiPropertyOptional({ description: 'Metadatos operativos de la tarea' })
+  @IsOptional()
+  @IsObject()
+  meta?: Record<string, unknown>;
 }
 export class UpdatePlanTareaDto extends CreatePlanTareaDto {}
 
@@ -345,9 +353,14 @@ export class CreateProgramacionDto {
   @ApiProperty({ description: 'ID del equipo', format: 'uuid' })
   @IsUUID()
   equipo_id: string;
-  @ApiProperty({ description: 'ID del plan', format: 'uuid' })
+  @ApiPropertyOptional({ description: 'ID del plan operativo interno', format: 'uuid' })
+  @IsOptional()
   @IsUUID()
-  plan_id: string;
+  plan_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la plantilla MPG seleccionada', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  procedimiento_id?: string;
   @ApiPropertyOptional({ description: 'Última fecha de ejecución (ISO 8601)' })
   @IsOptional()
   @IsDateString()
@@ -566,6 +579,10 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsUUID()
   plan_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la plantilla MPG', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  procedimiento_id?: string;
   @ApiPropertyOptional({ description: 'Valor estructurado en json' })
   @IsOptional()
   @IsObject()
@@ -667,6 +684,10 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsObject()
   valor_json?: Record<string, unknown>;
+  @ApiPropertyOptional({ description: 'ID de la plantilla MPG', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  procedimiento_id?: string;
 }
 
 export class CreateConsumoDto {

@@ -568,6 +568,191 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .filter(Boolean);
   }
 
+  private buildProcedimientoPlanCode(row: ProcedimientoPlantillaEntity) {
+    const base = String(row.codigo || row.id)
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    return `MPGTPL-${base || row.id}`;
+  }
+
+  private buildProcedimientoPlanDescription(row: ProcedimientoPlantillaEntity) {
+    const details = [
+      `[PROCEDIMIENTO:${row.id}]`,
+      row.documento_referencia ? `DOC:${row.documento_referencia}` : '',
+      row.version ? `VER:${row.version}` : '',
+      row.objetivo ?? '',
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+
+    return details.join(' | ');
+  }
+
+  private extractProcedimientoIdFromPlan(plan?: { descripcion?: string | null } | null) {
+    const match = String(plan?.descripcion || '').match(
+      /\[PROCEDIMIENTO:([0-9a-fA-F-]{36})\]/,
+    );
+    return match?.[1] ?? null;
+  }
+
+  private async resolveProcedimientoFromPlan(
+    plan?: PlanMantenimientoEntity | null,
+  ) {
+    const procedimientoId = this.extractProcedimientoIdFromPlan(plan);
+    if (!procedimientoId) return null;
+    return this.procedimientoRepo.findOne({
+      where: { id: procedimientoId, is_deleted: false },
+    });
+  }
+
+  private buildPlanTaskMetaFromProcedimiento(
+    procedimiento: ProcedimientoPlantillaEntity,
+    actividad: ProcedimientoActividadEntity,
+  ) {
+    const evidencias = Array.isArray(actividad.meta?.evidencias_requeridas)
+      ? actividad.meta.evidencias_requeridas
+      : [];
+
+    return {
+      fuente: 'PROCEDIMIENTO_MPG',
+      procedimiento_id: procedimiento.id,
+      procedimiento_codigo: procedimiento.codigo,
+      procedimiento_nombre: procedimiento.nombre,
+      procedimiento_actividad_id: actividad.id,
+      fase: actividad.fase ?? null,
+      detalle: actividad.detalle ?? null,
+      requiere_permiso: actividad.requiere_permiso ?? false,
+      requiere_epp: actividad.requiere_epp ?? false,
+      requiere_bloqueo: actividad.requiere_bloqueo ?? false,
+      requiere_evidencia: actividad.requiere_evidencia ?? false,
+      evidencias_requeridas: evidencias,
+      documento_referencia: procedimiento.documento_referencia ?? null,
+      version: procedimiento.version ?? null,
+    };
+  }
+
+  private async syncPlanFromProcedimiento(procedimientoId: string) {
+    const procedimiento = await this.findOneOrFail(this.procedimientoRepo, {
+      id: procedimientoId,
+      is_deleted: false,
+    });
+    const actividades = await this.procedimientoActividadRepo.find({
+      where: { procedimiento_id: procedimiento.id, is_deleted: false },
+      order: { orden: 'ASC', created_at: 'ASC' },
+    });
+
+    const planCode = this.buildProcedimientoPlanCode(procedimiento);
+    let plan = await this.planRepo.findOne({
+      where: { codigo: planCode, is_deleted: false },
+    });
+
+    if (!plan) {
+      plan = this.planRepo.create({
+        codigo: planCode,
+        nombre: procedimiento.nombre,
+        tipo:
+          procedimiento.clase_mantenimiento ??
+          procedimiento.tipo_proceso ??
+          'PREVENTIVO',
+        descripcion: this.buildProcedimientoPlanDescription(procedimiento),
+        frecuencia_tipo: 'HORAS',
+        frecuencia_valor: procedimiento.frecuencia_horas ?? 0,
+        requiere_parada: actividades.some(
+          (actividad) =>
+            Boolean(actividad.requiere_permiso) ||
+            Boolean(actividad.requiere_bloqueo),
+        ),
+      });
+    } else {
+      Object.assign(plan, {
+        nombre: procedimiento.nombre,
+        tipo:
+          procedimiento.clase_mantenimiento ??
+          procedimiento.tipo_proceso ??
+          plan.tipo,
+        descripcion: this.buildProcedimientoPlanDescription(procedimiento),
+        frecuencia_tipo: 'HORAS',
+        frecuencia_valor: procedimiento.frecuencia_horas ?? 0,
+        requiere_parada: actividades.some(
+          (actividad) =>
+            Boolean(actividad.requiere_permiso) ||
+            Boolean(actividad.requiere_bloqueo),
+        ),
+      });
+    }
+
+    plan = await this.planRepo.save(plan);
+
+    const existingTasks = await this.planTareaRepo.find({
+      where: { plan_id: plan.id, is_deleted: false },
+      order: { orden: 'ASC' },
+    });
+    const existingByActividadId = new Map<string, PlanTareaEntity>();
+    const existingByOrder = new Map<number, PlanTareaEntity>();
+    for (const task of existingTasks) {
+      const actividadId = String(
+        (task.meta as Record<string, unknown> | undefined)
+          ?.procedimiento_actividad_id ?? '',
+      ).trim();
+      if (actividadId) existingByActividadId.set(actividadId, task);
+      if (!existingByOrder.has(task.orden)) existingByOrder.set(task.orden, task);
+    }
+
+    const tasksToSave: PlanTareaEntity[] = [];
+    const keptTaskIds = new Set<string>();
+
+    for (const [index, actividad] of actividades.entries()) {
+      const meta = this.buildPlanTaskMetaFromProcedimiento(
+        procedimiento,
+        actividad,
+      );
+      const existingTask =
+        existingByActividadId.get(String(actividad.id)) ??
+        existingByOrder.get(actividad.orden ?? index + 1);
+
+      if (existingTask) {
+        existingTask.orden = actividad.orden ?? index + 1;
+        existingTask.actividad = actividad.actividad;
+        existingTask.field_type = actividad.requiere_evidencia ? 'JSON' : 'BOOLEAN';
+        existingTask.required = true;
+        existingTask.meta = meta;
+        existingTask.status = 'ACTIVE';
+        existingTask.is_deleted = false;
+        tasksToSave.push(existingTask);
+        keptTaskIds.add(existingTask.id);
+        continue;
+      }
+
+      tasksToSave.push(
+        this.planTareaRepo.create({
+          plan_id: plan.id,
+          orden: actividad.orden ?? index + 1,
+          actividad: actividad.actividad,
+          field_type: actividad.requiere_evidencia ? 'JSON' : 'BOOLEAN',
+          required: true,
+          meta,
+        }),
+      );
+    }
+
+    if (tasksToSave.length) {
+      await this.planTareaRepo.save(tasksToSave);
+    }
+
+    const tasksToDelete = existingTasks.filter(
+      (task) => !keptTaskIds.has(task.id),
+    );
+    if (tasksToDelete.length) {
+      for (const task of tasksToDelete) task.is_deleted = true;
+      await this.planTareaRepo.save(tasksToDelete);
+    }
+
+    return { plan, procedimiento, actividades };
+  }
+
   private toDateOnlyString(value?: string | Date | null) {
     if (!value) return null;
     return new Date(value).toISOString().slice(0, 10);
@@ -759,6 +944,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: programacion.plan_id,
       is_deleted: false,
     });
+    const procedimiento = await this.resolveProcedimientoFromPlan(plan);
 
     const freqType = String(plan.frecuencia_tipo || 'HORAS').toUpperCase();
     const freqValue = this.toNumeric(plan.frecuencia_valor, 0);
@@ -809,6 +995,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipo_codigo: equipo.codigo,
       plan_nombre: plan.nombre,
       plan_codigo: plan.codigo,
+      procedimiento_id: procedimiento?.id ?? null,
+      procedimiento_codigo: procedimiento?.codigo ?? null,
+      procedimiento_nombre: procedimiento?.nombre ?? null,
       frecuencia_tipo: plan.frecuencia_tipo,
       frecuencia_valor: plan.frecuencia_valor,
       horometro_actual: currentHours,
@@ -837,6 +1026,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ? this.planRepo.findOne({ where: { id: workOrder.plan_id, is_deleted: false } })
         : Promise.resolve(null),
     ]);
+    const procedimientoIdFromPayload = String(
+      (workOrder.valor_json as Record<string, unknown> | null | undefined)
+        ?.procedimiento_id ?? '',
+    ).trim();
+    const procedimiento =
+      (procedimientoIdFromPayload
+        ? await this.procedimientoRepo.findOne({
+            where: { id: procedimientoIdFromPayload, is_deleted: false },
+          })
+        : null) ?? (await this.resolveProcedimientoFromPlan(plan));
 
     return {
       ...workOrder,
@@ -845,6 +1044,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipment_codigo: equipo?.codigo ?? null,
       plan_nombre: plan?.nombre ?? null,
       plan_codigo: plan?.codigo ?? null,
+      procedimiento_id: procedimiento?.id ?? null,
+      procedimiento_codigo: procedimiento?.codigo ?? null,
+      procedimiento_nombre: procedimiento?.nombre ?? null,
     };
   }
 
@@ -1233,8 +1435,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async createProgramacion(dto: CreateProgramacionDto) {
     await this.findEquipoOrFail(dto.equipo_id);
-    await this.findOneOrFail(this.planRepo, { id: dto.plan_id, is_deleted: false });
-    const entity = this.programacionRepo.create(dto);
+    let resolvedPlanId = dto.plan_id ?? null;
+    if (dto.procedimiento_id) {
+      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
+      resolvedPlanId = synced.plan.id;
+    }
+    if (!resolvedPlanId) {
+      throw new BadRequestException(
+        'Debes seleccionar una plantilla MPG o un plan operativo.',
+      );
+    }
+    await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
+    const entity = this.programacionRepo.create({
+      equipo_id: dto.equipo_id,
+      plan_id: resolvedPlanId,
+      ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? null,
+      ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? null,
+      proxima_fecha: dto.proxima_fecha ?? null,
+      proxima_horas: dto.proxima_horas ?? null,
+      activo: dto.activo ?? true,
+    });
     const saved = await this.programacionRepo.save(entity);
     const enriched = await this.recalculateProgramacionFields(saved);
     await this.publishInAppNotification({
@@ -1290,7 +1510,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
-    Object.assign(p, dto);
+    let resolvedPlanId = dto.plan_id ?? p.plan_id;
+    if (dto.procedimiento_id) {
+      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
+      resolvedPlanId = synced.plan.id;
+    }
+    if (!resolvedPlanId) {
+      throw new BadRequestException(
+        'Debes seleccionar una plantilla MPG o un plan operativo.',
+      );
+    }
+    Object.assign(p, {
+      equipo_id: dto.equipo_id ?? p.equipo_id,
+      plan_id: resolvedPlanId,
+      ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? p.ultima_ejecucion_fecha ?? null,
+      ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? p.ultima_ejecucion_horas ?? null,
+      proxima_fecha: dto.proxima_fecha ?? p.proxima_fecha ?? null,
+      proxima_horas: dto.proxima_horas ?? p.proxima_horas ?? null,
+      activo: dto.activo ?? p.activo,
+    });
     const saved = await this.programacionRepo.save(p);
     const enriched = await this.recalculateProgramacionFields(saved);
     await this.publishInAppNotification({
@@ -1602,6 +1840,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     const payload = await this.buildProcedimientoPayload(saved);
+    await this.syncPlanFromProcedimiento(saved.id);
     await this.registerProcessEvent({
       tipo_proceso: 'PROCEDIMIENTO_PLANTILLA',
       accion: 'CREATED',
@@ -1683,6 +1922,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const saved = await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
     const payload = await this.buildProcedimientoPayload(saved);
+    await this.syncPlanFromProcedimiento(saved.id);
     await this.registerProcessEvent({
       tipo_proceso: 'PROCEDIMIENTO_PLANTILLA',
       accion: 'UPDATED',
@@ -2707,9 +2947,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async createWorkOrder(dto: CreateWorkOrderDto) {
     if (dto.equipment_id) await this.findEquipoOrFail(dto.equipment_id);
-    if (dto.plan_id)
+    let resolvedPlanId = dto.plan_id ?? null;
+    if (dto.procedimiento_id) {
+      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
+      resolvedPlanId = synced.plan.id;
+    }
+    if (resolvedPlanId)
       await this.findOneOrFail(this.planRepo, {
-        id: dto.plan_id,
+        id: resolvedPlanId,
         is_deleted: false,
       });
 
@@ -2722,8 +2967,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         code: resolution.resolvedCode,
         type: dto.type,
         equipment_id: dto.equipment_id ?? null,
-        plan_id: dto.plan_id ?? null,
-        valor_json: dto.valor_json ?? null,
+        plan_id: resolvedPlanId,
+        valor_json: {
+          ...(dto.valor_json ?? {}),
+          ...(dto.procedimiento_id
+            ? { procedimiento_id: dto.procedimiento_id }
+            : {}),
+        },
         title: dto.title,
         description: dto.description ?? null,
         status_workflow: normalizedStatus,
@@ -2811,7 +3061,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async updateWorkOrder(id: string, dto: UpdateWorkOrderDto) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
     const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
-    Object.assign(wo, dto);
+    let resolvedPlanId = wo.plan_id ?? null;
+    if (dto.procedimiento_id) {
+      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
+      resolvedPlanId = synced.plan.id;
+    }
+    Object.assign(wo, {
+      ...dto,
+      plan_id: resolvedPlanId,
+      valor_json:
+        dto.valor_json || dto.procedimiento_id
+          ? {
+              ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
+              ...(dto.valor_json ?? {}),
+              ...(dto.procedimiento_id
+                ? { procedimiento_id: dto.procedimiento_id }
+                : {}),
+            }
+          : wo.valor_json,
+    });
     wo.status_workflow = this.normalizeWorkflowStatus(dto.status_workflow ?? wo.status_workflow);
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
     const saved = await this.woRepo.save(wo);
