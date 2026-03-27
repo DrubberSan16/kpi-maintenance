@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
@@ -822,4 +823,562 @@ export class WorkOrderAdjuntoQueryDto {
   @IsOptional()
   @IsString()
   tipo?: string;
+}
+
+export class ProcedimientoActividadDto {
+  @ApiPropertyOptional({ description: 'Orden de la actividad', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  orden?: number;
+  @ApiPropertyOptional({ description: 'Fase del procedimiento' })
+  @IsOptional()
+  @IsString()
+  fase?: string;
+  @ApiProperty({ description: 'Actividad principal' })
+  @IsString()
+  @IsNotEmpty()
+  actividad: string;
+  @ApiPropertyOptional({ description: 'Detalle operativo' })
+  @IsOptional()
+  @IsString()
+  detalle?: string;
+  @ApiPropertyOptional({ description: 'Requiere permiso de trabajo' })
+  @IsOptional()
+  @IsBoolean()
+  requiere_permiso?: boolean;
+  @ApiPropertyOptional({ description: 'Requiere uso obligatorio de EPP' })
+  @IsOptional()
+  @IsBoolean()
+  requiere_epp?: boolean;
+  @ApiPropertyOptional({ description: 'Requiere bloqueo o aislamiento' })
+  @IsOptional()
+  @IsBoolean()
+  requiere_bloqueo?: boolean;
+  @ApiPropertyOptional({ description: 'Requiere evidencia' })
+  @IsOptional()
+  @IsBoolean()
+  requiere_evidencia?: boolean;
+  @ApiPropertyOptional({ description: 'Metadatos de la actividad' })
+  @IsOptional()
+  @IsObject()
+  meta?: Record<string, unknown>;
+}
+
+export class CreateProcedimientoPlantillaDto {
+  @ApiProperty({ description: 'Código de la plantilla' })
+  @IsString()
+  @IsNotEmpty()
+  codigo: string;
+  @ApiProperty({ description: 'Nombre de la plantilla' })
+  @IsString()
+  @IsNotEmpty()
+  nombre: string;
+  @ApiProperty({ description: 'Tipo de proceso principal' })
+  @IsString()
+  @IsNotEmpty()
+  tipo_proceso: string;
+  @ApiPropertyOptional({ description: 'Documento o código fuente' })
+  @IsOptional()
+  @IsString()
+  documento_referencia?: string;
+  @ApiPropertyOptional({ description: 'Versión documental' })
+  @IsOptional()
+  @IsString()
+  version?: string;
+  @ApiPropertyOptional({ description: 'Clase de mantenimiento' })
+  @IsOptional()
+  @IsString()
+  clase_mantenimiento?: string;
+  @ApiPropertyOptional({ description: 'Frecuencia en horas', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  frecuencia_horas?: number;
+  @ApiPropertyOptional({ description: 'Objetivo del procedimiento' })
+  @IsOptional()
+  @IsString()
+  objetivo?: string;
+  @ApiPropertyOptional({ description: 'Listado de precauciones', type: [String] })
+  @IsOptional()
+  @IsArray()
+  precauciones?: string[];
+  @ApiPropertyOptional({ description: 'Herramientas requeridas', type: [String] })
+  @IsOptional()
+  @IsArray()
+  herramientas?: string[];
+  @ApiPropertyOptional({ description: 'Materiales requeridos', type: [String] })
+  @IsOptional()
+  @IsArray()
+  materiales?: string[];
+  @ApiPropertyOptional({ description: 'Responsabilidades asociadas', type: [String] })
+  @IsOptional()
+  @IsArray()
+  responsabilidades?: string[];
+  @ApiPropertyOptional({ description: 'Actividades de la plantilla', type: [ProcedimientoActividadDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ProcedimientoActividadDto)
+  actividades?: ProcedimientoActividadDto[];
+}
+
+export class UpdateProcedimientoPlantillaDto extends CreateProcedimientoPlantillaDto {}
+
+export class AnalisisLubricanteDetalleDto {
+  @ApiProperty({ description: 'Compartimento analizado' })
+  @IsString()
+  @IsNotEmpty()
+  compartimento: string;
+  @ApiPropertyOptional({ description: 'Número de muestra' })
+  @IsOptional()
+  @IsString()
+  numero_muestra?: string;
+  @ApiProperty({ description: 'Parámetro evaluado' })
+  @IsString()
+  @IsNotEmpty()
+  parametro: string;
+  @ApiPropertyOptional({ description: 'Resultado numérico', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  resultado_numerico?: number;
+  @ApiPropertyOptional({ description: 'Resultado textual' })
+  @IsOptional()
+  @IsString()
+  resultado_texto?: string;
+  @ApiPropertyOptional({ description: 'Unidad del parámetro' })
+  @IsOptional()
+  @IsString()
+  unidad?: string;
+  @ApiPropertyOptional({ description: 'Valor de línea base', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  linea_base?: number;
+  @ApiPropertyOptional({ description: 'Nivel de alerta' })
+  @IsOptional()
+  @IsString()
+  nivel_alerta?: string;
+  @ApiPropertyOptional({ description: 'Tendencia del parámetro', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  tendencia?: number;
+  @ApiPropertyOptional({ description: 'Observación' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+  @ApiPropertyOptional({ description: 'Orden de visualización', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  orden?: number;
+}
+
+export class CreateAnalisisLubricanteDto {
+  @ApiProperty({ description: 'Código del análisis' })
+  @IsString()
+  @IsNotEmpty()
+  codigo: string;
+  @ApiPropertyOptional({ description: 'Cliente asociado' })
+  @IsOptional()
+  @IsString()
+  cliente?: string;
+  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+  @ApiPropertyOptional({ description: 'Código de equipo' })
+  @IsOptional()
+  @IsString()
+  equipo_codigo?: string;
+  @ApiPropertyOptional({ description: 'Nombre de equipo' })
+  @IsOptional()
+  @IsString()
+  equipo_nombre?: string;
+  @ApiPropertyOptional({ description: 'Compartimento principal' })
+  @IsOptional()
+  @IsString()
+  compartimento_principal?: string;
+  @ApiPropertyOptional({ description: 'Fecha de muestra (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_muestra?: string;
+  @ApiPropertyOptional({ description: 'Fecha de reporte (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_reporte?: string;
+  @ApiPropertyOptional({ description: 'Diagnóstico general' })
+  @IsOptional()
+  @IsString()
+  diagnostico?: string;
+  @ApiPropertyOptional({ description: 'Estado del diagnóstico' })
+  @IsOptional()
+  @IsString()
+  estado_diagnostico?: string;
+  @ApiPropertyOptional({ description: 'Documento origen' })
+  @IsOptional()
+  @IsString()
+  documento_origen?: string;
+  @ApiPropertyOptional({ description: 'Payload de soporte' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+  @ApiPropertyOptional({ description: 'Detalle del análisis', type: [AnalisisLubricanteDetalleDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AnalisisLubricanteDetalleDto)
+  detalles?: AnalisisLubricanteDetalleDto[];
+}
+
+export class UpdateAnalisisLubricanteDto extends CreateAnalisisLubricanteDto {}
+
+export class CronogramaSemanalDetalleDto {
+  @ApiProperty({ description: 'Día de la semana' })
+  @IsString()
+  @IsNotEmpty()
+  dia_semana: string;
+  @ApiPropertyOptional({ description: 'Fecha de la actividad (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_actividad?: string;
+  @ApiPropertyOptional({ description: 'Hora de inicio HH:mm:ss' })
+  @IsOptional()
+  @IsString()
+  hora_inicio?: string;
+  @ApiPropertyOptional({ description: 'Hora de fin HH:mm:ss' })
+  @IsOptional()
+  @IsString()
+  hora_fin?: string;
+  @ApiPropertyOptional({ description: 'Tipo de proceso del bloque' })
+  @IsOptional()
+  @IsString()
+  tipo_proceso?: string;
+  @ApiProperty({ description: 'Actividad planificada' })
+  @IsString()
+  @IsNotEmpty()
+  actividad: string;
+  @ApiPropertyOptional({ description: 'Área responsable' })
+  @IsOptional()
+  @IsString()
+  responsable_area?: string;
+  @ApiPropertyOptional({ description: 'Código del equipo' })
+  @IsOptional()
+  @IsString()
+  equipo_codigo?: string;
+  @ApiPropertyOptional({ description: 'Observación' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+  @ApiPropertyOptional({ description: 'Orden de visualización', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  orden?: number;
+}
+
+export class CreateCronogramaSemanalDto {
+  @ApiProperty({ description: 'Código del cronograma' })
+  @IsString()
+  @IsNotEmpty()
+  codigo: string;
+  @ApiProperty({ description: 'Fecha de inicio de semana (ISO 8601)' })
+  @IsDateString()
+  fecha_inicio: string;
+  @ApiProperty({ description: 'Fecha de fin de semana (ISO 8601)' })
+  @IsDateString()
+  fecha_fin: string;
+  @ApiPropertyOptional({ description: 'Locación' })
+  @IsOptional()
+  @IsString()
+  locacion?: string;
+  @ApiPropertyOptional({ description: 'Referencia de orden o contrato' })
+  @IsOptional()
+  @IsString()
+  referencia_orden?: string;
+  @ApiPropertyOptional({ description: 'Documento origen' })
+  @IsOptional()
+  @IsString()
+  documento_origen?: string;
+  @ApiPropertyOptional({ description: 'Resumen del cronograma' })
+  @IsOptional()
+  @IsString()
+  resumen?: string;
+  @ApiPropertyOptional({ description: 'Payload auxiliar' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+  @ApiPropertyOptional({ description: 'Bloques del cronograma', type: [CronogramaSemanalDetalleDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CronogramaSemanalDetalleDto)
+  detalles?: CronogramaSemanalDetalleDto[];
+}
+
+export class UpdateCronogramaSemanalDto extends CreateCronogramaSemanalDto {}
+
+export class ReporteOperacionDiariaUnidadDto {
+  @ApiProperty({ description: 'Código del equipo' })
+  @IsString()
+  @IsNotEmpty()
+  equipo_codigo: string;
+  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+  @ApiPropertyOptional({ description: 'Fabricante' })
+  @IsOptional()
+  @IsString()
+  fabricante?: string;
+  @ApiPropertyOptional({ description: 'Modo de operación' })
+  @IsOptional()
+  @IsString()
+  modo_operacion?: string;
+  @ApiPropertyOptional({ description: 'Carga en kW', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  carga_kw?: number;
+  @ApiPropertyOptional({ description: 'Horómetro actual', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_actual?: number;
+  @ApiPropertyOptional({ description: 'Horómetro de inicio', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_inicio?: number;
+  @ApiPropertyOptional({ description: 'Horas de operación', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_operacion?: number;
+  @ApiPropertyOptional({ description: 'MPG actual', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  mpg_actual?: number;
+  @ApiPropertyOptional({ description: 'Próximo MPG' })
+  @IsOptional()
+  @IsString()
+  proximo_mpg?: string;
+  @ApiPropertyOptional({ description: 'Horas faltantes', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_faltantes?: number;
+  @ApiPropertyOptional({ description: 'Días faltantes', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  dias_faltantes?: number;
+  @ApiPropertyOptional({ description: 'Fecha próxima (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_proxima?: string;
+  @ApiPropertyOptional({ description: 'Nota' })
+  @IsOptional()
+  @IsString()
+  nota?: string;
+}
+
+export class ReporteCombustibleDto {
+  @ApiProperty({ description: 'Tanque' })
+  @IsString()
+  @IsNotEmpty()
+  tanque: string;
+  @ApiPropertyOptional({ description: 'Tipo de lectura' })
+  @IsOptional()
+  @IsString()
+  tipo_lectura?: string;
+  @ApiPropertyOptional({ description: 'Fecha y hora de lectura (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_lectura?: string;
+  @ApiPropertyOptional({ description: 'Medida en cm', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  medida_cm?: number;
+  @ApiPropertyOptional({ description: 'Medida en ft', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  medida_ft?: number;
+  @ApiPropertyOptional({ description: 'Medida en pulgadas', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  medida_in?: number;
+  @ApiPropertyOptional({ description: 'Galones', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  galones?: number;
+  @ApiPropertyOptional({ description: 'Stock anterior', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  stock_anterior?: number;
+  @ApiPropertyOptional({ description: 'Stock actual', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  stock_actual?: number;
+  @ApiPropertyOptional({ description: 'Stock mínimo', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  stock_minimo?: number;
+  @ApiPropertyOptional({ description: 'Stock máximo', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  stock_maximo?: number;
+  @ApiPropertyOptional({ description: 'Consumo en galones', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  consumo_galones?: number;
+  @ApiPropertyOptional({ description: 'Guía de remisión' })
+  @IsOptional()
+  @IsString()
+  guia_remision?: string;
+  @ApiPropertyOptional({ description: 'Observación' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+}
+
+export class ControlComponenteDto {
+  @ApiProperty({ description: 'Código del equipo' })
+  @IsString()
+  @IsNotEmpty()
+  equipo_codigo: string;
+  @ApiProperty({ description: 'Tipo de componente' })
+  @IsString()
+  @IsNotEmpty()
+  tipo_componente: string;
+  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+  @ApiPropertyOptional({ description: 'Posición o banco' })
+  @IsOptional()
+  @IsString()
+  posicion?: string;
+  @ApiPropertyOptional({ description: 'Serie del componente' })
+  @IsOptional()
+  @IsString()
+  serie?: string;
+  @ApiPropertyOptional({ description: 'Estado del componente' })
+  @IsOptional()
+  @IsString()
+  estado?: string;
+  @ApiPropertyOptional({ description: 'Fecha de instalación (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_instalacion?: string;
+  @ApiPropertyOptional({ description: 'Fecha de retiro (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_retiro?: string;
+  @ApiPropertyOptional({ description: 'Horómetro instalación', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_instalacion?: number;
+  @ApiPropertyOptional({ description: 'Horómetro retiro', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_retiro?: number;
+  @ApiPropertyOptional({ description: 'Horas de uso', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_uso?: number;
+  @ApiPropertyOptional({ description: 'Motivo del cambio o daño' })
+  @IsOptional()
+  @IsString()
+  motivo?: string;
+  @ApiPropertyOptional({ description: 'Responsable' })
+  @IsOptional()
+  @IsString()
+  responsable?: string;
+  @ApiPropertyOptional({ description: 'Documento origen' })
+  @IsOptional()
+  @IsString()
+  documento_origen?: string;
+  @ApiPropertyOptional({ description: 'Metadatos del componente' })
+  @IsOptional()
+  @IsObject()
+  meta?: Record<string, unknown>;
+}
+
+export class CreateReporteOperacionDiariaDto {
+  @ApiProperty({ description: 'Código del reporte' })
+  @IsString()
+  @IsNotEmpty()
+  codigo: string;
+  @ApiProperty({ description: 'Fecha del reporte (ISO 8601)' })
+  @IsDateString()
+  fecha_reporte: string;
+  @ApiPropertyOptional({ description: 'Locación' })
+  @IsOptional()
+  @IsString()
+  locacion?: string;
+  @ApiPropertyOptional({ description: 'Turno' })
+  @IsOptional()
+  @IsString()
+  turno?: string;
+  @ApiPropertyOptional({ description: 'Documento origen' })
+  @IsOptional()
+  @IsString()
+  documento_origen?: string;
+  @ApiPropertyOptional({ description: 'Resumen' })
+  @IsOptional()
+  @IsString()
+  resumen?: string;
+  @ApiPropertyOptional({ description: 'Payload auxiliar' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+  @ApiPropertyOptional({ description: 'Detalle por unidad', type: [ReporteOperacionDiariaUnidadDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReporteOperacionDiariaUnidadDto)
+  unidades?: ReporteOperacionDiariaUnidadDto[];
+  @ApiPropertyOptional({ description: 'Lecturas de combustible', type: [ReporteCombustibleDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReporteCombustibleDto)
+  combustibles?: ReporteCombustibleDto[];
+  @ApiPropertyOptional({ description: 'Control de componentes', type: [ControlComponenteDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ControlComponenteDto)
+  componentes?: ControlComponenteDto[];
+}
+
+export class UpdateReporteOperacionDiariaDto extends CreateReporteOperacionDiariaDto {}
+
+export class EventoProcesoQueryDto {
+  @ApiPropertyOptional({ description: 'Tipo de proceso' })
+  @IsOptional()
+  @IsString()
+  tipo_proceso?: string;
+  @ApiPropertyOptional({ description: 'Límite de resultados', type: Number, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
 }

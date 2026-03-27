@@ -23,8 +23,13 @@ import {
 } from 'typeorm';
 import {
   AlertaMantenimientoEntity,
+  AnalisisLubricanteDetalleEntity,
+  AnalisisLubricanteEntity,
   BitacoraDiariaEntity,
   ConsumoRepuestoEntity,
+  ControlComponenteEntity,
+  CronogramaSemanalDetalleEntity,
+  CronogramaSemanalEntity,
   EntregaMaterialDetEntity,
   EntregaMaterialEntity,
   EquipoComponenteEntity,
@@ -32,6 +37,7 @@ import {
   EquipoTipoEntity,
   EstadoEquipoCatalogoEntity,
   EstadoEquipoEntity,
+  EventoProcesoEntity,
   EventoEquipoEntity,
   FallaCatalogoEntity,
   KardexEntity,
@@ -43,9 +49,14 @@ import {
   PlanMantenimientoEntity,
   PlanTareaEntity,
   ProductoEntity,
+  ProcedimientoActividadEntity,
+  ProcedimientoPlantillaEntity,
   BodegaEntity,
   ProgramacionPlanEntity,
   ReservaStockEntity,
+  ReporteCombustibleEntity,
+  ReporteOperacionDiariaEntity,
+  ReporteOperacionDiariaUnidadEntity,
   WorkOrderStatusHistoryEntity,
   StockBodegaEntity,
   WorkOrderAdjuntoEntity,
@@ -54,11 +65,13 @@ import {
 } from '../entities/kpi-maintenance.entity';
 import {
   AlertaQueryDto,
+  CreateAnalisisLubricanteDto,
   ChangeEstadoDto,
   ComponenteQueryDto,
   CreateBitacoraDto,
   CreateComponenteDto,
   CreateConsumoDto,
+  CreateCronogramaSemanalDto,
   CreateEquipoDto,
   CreateEquipoTipoDto,
   CreateEventoDto,
@@ -68,16 +81,21 @@ import {
   CreateLocationDto,
   CreatePlanDto,
   CreatePlanTareaDto,
+  CreateProcedimientoPlantillaDto,
   CreateProgramacionDto,
+  CreateReporteOperacionDiariaDto,
   CreateWorkOrderDto,
   CreateWorkOrderTareaDto,
   DateRangeDto,
   EquipoQueryDto,
   EquipoTipoQueryDto,
+  EventoProcesoQueryDto,
   IssueMaterialsDto,
+  UpdateAnalisisLubricanteDto,
   LocationQueryDto,
   UpdateBitacoraDto,
   UpdateComponenteDto,
+  UpdateCronogramaSemanalDto,
   UpdateEquipoDto,
   UpdateEquipoTipoDto,
   UpdateFallaCatalogoDto,
@@ -86,7 +104,9 @@ import {
   UpdateLubricacionPuntoDto,
   UpdatePlanDto,
   UpdatePlanTareaDto,
+  UpdateProcedimientoPlantillaDto,
   UpdateProgramacionDto,
+  UpdateReporteOperacionDiariaDto,
   UpdateWorkOrderDto,
   UpdateWorkOrderTareaDto,
   UploadWorkOrderAdjuntoDto,
@@ -130,6 +150,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly lecturaRepo: Repository<LecturaEquipoEntity>,
     @InjectRepository(LubricacionPuntoEntity)
     private readonly lubricacionRepo: Repository<LubricacionPuntoEntity>,
+    @InjectRepository(ProcedimientoPlantillaEntity)
+    private readonly procedimientoRepo: Repository<ProcedimientoPlantillaEntity>,
+    @InjectRepository(ProcedimientoActividadEntity)
+    private readonly procedimientoActividadRepo: Repository<ProcedimientoActividadEntity>,
+    @InjectRepository(AnalisisLubricanteEntity)
+    private readonly analisisLubricanteRepo: Repository<AnalisisLubricanteEntity>,
+    @InjectRepository(AnalisisLubricanteDetalleEntity)
+    private readonly analisisLubricanteDetRepo: Repository<AnalisisLubricanteDetalleEntity>,
+    @InjectRepository(CronogramaSemanalEntity)
+    private readonly cronogramaSemanalRepo: Repository<CronogramaSemanalEntity>,
+    @InjectRepository(CronogramaSemanalDetalleEntity)
+    private readonly cronogramaSemanalDetRepo: Repository<CronogramaSemanalDetalleEntity>,
+    @InjectRepository(ReporteOperacionDiariaEntity)
+    private readonly reporteDiarioRepo: Repository<ReporteOperacionDiariaEntity>,
+    @InjectRepository(ReporteOperacionDiariaUnidadEntity)
+    private readonly reporteDiarioUnidadRepo: Repository<ReporteOperacionDiariaUnidadEntity>,
+    @InjectRepository(ReporteCombustibleEntity)
+    private readonly reporteCombustibleRepo: Repository<ReporteCombustibleEntity>,
+    @InjectRepository(ControlComponenteEntity)
+    private readonly controlComponenteRepo: Repository<ControlComponenteEntity>,
+    @InjectRepository(EventoProcesoEntity)
+    private readonly eventoProcesoRepo: Repository<EventoProcesoEntity>,
     @InjectRepository(PlanMantenimientoEntity)
     private readonly planRepo: Repository<PlanMantenimientoEntity>,
     @InjectRepository(PlanTareaEntity)
@@ -517,6 +559,144 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     } catch (error: any) {
       this.logger.warn(`No se pudo registrar log transaccional: ${error?.message ?? 'desconocido'}`);
     }
+  }
+
+  private normalizeStringArray(values?: string[] | null) {
+    if (!Array.isArray(values)) return [];
+    return values
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+  }
+
+  private toDateOnlyString(value?: string | Date | null) {
+    if (!value) return null;
+    return new Date(value).toISOString().slice(0, 10);
+  }
+
+  private toTimeOnlyString(value?: string | null) {
+    if (!value) return null;
+    const normalized = String(value).trim();
+    if (!normalized) return null;
+    return normalized.length >= 8 ? normalized.slice(0, 8) : normalized;
+  }
+
+  private async softDeleteRows<T extends ObjectLiteral & { is_deleted: boolean }>(
+    repo: Repository<T>,
+    where: FindOptionsWhere<T>,
+  ) {
+    const rows = await repo.find({ where });
+    if (!rows.length) return;
+    for (const row of rows) row.is_deleted = true;
+    await repo.save(rows);
+  }
+
+  private async registerProcessEvent(payload: {
+    tipo_proceso: string;
+    accion: string;
+    referencia_tabla: string;
+    referencia_id?: string | null;
+    referencia_codigo?: string | null;
+    equipo_id?: string | null;
+    title: string;
+    body: string;
+    level?: string;
+    payload_kpi?: Record<string, unknown>;
+    created_by?: string | null;
+  }) {
+    const notificationPayload = {
+      title: payload.title,
+      body: payload.body,
+      module: 'maintenance-intelligence',
+      entityType: payload.tipo_proceso,
+      entityId: payload.referencia_id ?? null,
+      level: payload.level ?? 'info',
+    };
+
+    const event = await this.eventoProcesoRepo.save(
+      this.eventoProcesoRepo.create({
+        tipo_proceso: payload.tipo_proceso,
+        accion: payload.accion,
+        referencia_tabla: payload.referencia_tabla,
+        referencia_id: payload.referencia_id ?? null,
+        referencia_codigo: payload.referencia_codigo ?? null,
+        equipo_id: payload.equipo_id ?? null,
+        estado: 'COMPLETED',
+        notificacion_enviada: false,
+        payload_notificacion: notificationPayload,
+        payload_kpi: payload.payload_kpi ?? {},
+        created_by: payload.created_by ?? null,
+      }),
+    );
+
+    await this.publishInAppNotification({
+      title: payload.title,
+      body: payload.body,
+      module: 'maintenance-intelligence',
+      entityType: payload.tipo_proceso,
+      entityId: payload.referencia_id ?? null,
+      level: payload.level ?? 'info',
+    });
+
+    event.notificacion_enviada = true;
+    await this.eventoProcesoRepo.save(event);
+    return event;
+  }
+
+  private async buildProcedimientoPayload(row: ProcedimientoPlantillaEntity) {
+    const actividades = await this.procedimientoActividadRepo.find({
+      where: { procedimiento_id: row.id, is_deleted: false },
+      order: { orden: 'ASC', created_at: 'ASC' },
+    });
+    return {
+      ...row,
+      actividades,
+    };
+  }
+
+  private async buildAnalisisLubricantePayload(row: AnalisisLubricanteEntity) {
+    const detalles = await this.analisisLubricanteDetRepo.find({
+      where: { analisis_id: row.id, is_deleted: false },
+      order: { orden: 'ASC', created_at: 'ASC' },
+    });
+    return {
+      ...row,
+      detalles,
+    };
+  }
+
+  private async buildCronogramaSemanalPayload(row: CronogramaSemanalEntity) {
+    const detalles = await this.cronogramaSemanalDetRepo.find({
+      where: { cronograma_id: row.id, is_deleted: false },
+      order: { orden: 'ASC', created_at: 'ASC' },
+    });
+    return {
+      ...row,
+      detalles,
+    };
+  }
+
+  private async buildReporteDiarioPayload(row: ReporteOperacionDiariaEntity) {
+    const [unidades, combustibles, componentes] = await Promise.all([
+      this.reporteDiarioUnidadRepo.find({
+        where: { reporte_id: row.id, is_deleted: false },
+        order: { created_at: 'ASC' },
+      }),
+      this.reporteCombustibleRepo.find({
+        where: { reporte_id: row.id, is_deleted: false },
+        order: { fecha_lectura: 'DESC', created_at: 'DESC' },
+      }),
+      this.controlComponenteRepo.find({
+        where: { reporte_id: row.id, is_deleted: false },
+        order: { created_at: 'DESC' },
+      }),
+    ]);
+
+    return {
+      ...row,
+      unidades,
+      combustibles,
+      componentes,
+    };
   }
 
   private async appendWorkOrderHistory(
@@ -1069,6 +1249,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       description: `[PROGRAMACION:${saved.id}] Programación creada para equipo ${saved.equipo_id} y plan ${saved.plan_id}` ,
       typeLog: 'PROGRAMACION',
     });
+    await this.registerProcessEvent({
+      tipo_proceso: 'PROGRAMACION',
+      accion: 'CREATED',
+      referencia_tabla: 'tb_programacion_plan',
+      referencia_id: saved.id,
+      referencia_codigo: enriched.plan_codigo ?? saved.id,
+      equipo_id: saved.equipo_id,
+      title: 'Programación registrada',
+      body: `${enriched.plan_nombre} para ${enriched.equipo_nombre}`,
+      payload_kpi: {
+        estado_programacion: enriched.estado_programacion,
+      },
+    });
     return this.wrap(enriched, 'Programación creada');
   }
   async listProgramaciones() {
@@ -1111,6 +1304,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.writeSecurityLog({
       description: `[PROGRAMACION:${saved.id}] Programación actualizada`,
       typeLog: 'PROGRAMACION',
+    });
+    await this.registerProcessEvent({
+      tipo_proceso: 'PROGRAMACION',
+      accion: 'UPDATED',
+      referencia_tabla: 'tb_programacion_plan',
+      referencia_id: saved.id,
+      referencia_codigo: enriched.plan_codigo ?? saved.id,
+      equipo_id: saved.equipo_id,
+      title: 'Programación actualizada',
+      body: `${enriched.plan_nombre} para ${enriched.equipo_nombre}`,
+      payload_kpi: {
+        estado_programacion: enriched.estado_programacion,
+      },
     });
     return this.wrap(enriched, 'Programación actualizada');
   }
@@ -1323,6 +1529,949 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     item.is_deleted = true;
     await this.lubricacionRepo.save(item);
     return this.wrap(true, 'Punto de lubricación eliminado');
+  }
+
+  async listProcedimientosPlantilla() {
+    const rows = await this.procedimientoRepo.find({
+      where: { is_deleted: false },
+      order: { updated_at: 'DESC', created_at: 'DESC' },
+    });
+    return this.wrap(
+      await Promise.all(rows.map((row) => this.buildProcedimientoPayload(row))),
+      'Procedimientos plantilla listados',
+    );
+  }
+
+  async getProcedimientoPlantilla(id: string) {
+    const row = await this.findOneOrFail(this.procedimientoRepo, {
+      id,
+      is_deleted: false,
+    });
+    return this.wrap(
+      await this.buildProcedimientoPayload(row),
+      'Procedimiento plantilla obtenido',
+    );
+  }
+
+  async createProcedimientoPlantilla(dto: CreateProcedimientoPlantillaDto) {
+    const savedId = await this.dataSource.transaction(async (manager) => {
+      const procedimientoRepo = manager.getRepository(ProcedimientoPlantillaEntity);
+      const actividadRepo = manager.getRepository(ProcedimientoActividadEntity);
+
+      const row = await procedimientoRepo.save(
+        procedimientoRepo.create({
+          codigo: dto.codigo,
+          nombre: dto.nombre,
+          tipo_proceso: dto.tipo_proceso,
+          documento_referencia: dto.documento_referencia ?? null,
+          version: dto.version ?? null,
+          clase_mantenimiento: dto.clase_mantenimiento ?? null,
+          frecuencia_horas: dto.frecuencia_horas ?? null,
+          objetivo: dto.objetivo ?? null,
+          precauciones: this.normalizeStringArray(dto.precauciones),
+          herramientas: this.normalizeStringArray(dto.herramientas),
+          materiales: this.normalizeStringArray(dto.materiales),
+          responsabilidades: this.normalizeStringArray(dto.responsabilidades),
+        }),
+      );
+
+      if (dto.actividades?.length) {
+        await actividadRepo.save(
+          dto.actividades.map((actividad, index) =>
+            actividadRepo.create({
+              procedimiento_id: row.id,
+              orden: actividad.orden ?? index + 1,
+              fase: actividad.fase ?? null,
+              actividad: actividad.actividad,
+              detalle: actividad.detalle ?? null,
+              requiere_permiso: actividad.requiere_permiso ?? false,
+              requiere_epp: actividad.requiere_epp ?? false,
+              requiere_bloqueo: actividad.requiere_bloqueo ?? false,
+              requiere_evidencia: actividad.requiere_evidencia ?? false,
+              meta: actividad.meta ?? {},
+            }),
+          ),
+        );
+      }
+
+      return row.id;
+    });
+
+    const saved = await this.findOneOrFail(this.procedimientoRepo, {
+      id: savedId,
+      is_deleted: false,
+    });
+    const payload = await this.buildProcedimientoPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'PROCEDIMIENTO_PLANTILLA',
+      accion: 'CREATED',
+      referencia_tabla: 'tb_procedimiento_plantilla',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Nueva plantilla de procedimiento',
+      body: `${saved.codigo} - ${saved.nombre}`,
+      payload_kpi: {
+        actividades: payload.actividades.length,
+        tipo_proceso: saved.tipo_proceso,
+      },
+    });
+    return this.wrap(payload, 'Procedimiento plantilla creado');
+  }
+
+  async updateProcedimientoPlantilla(id: string, dto: UpdateProcedimientoPlantillaDto) {
+    await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
+
+    await this.dataSource.transaction(async (manager) => {
+      const procedimientoRepo = manager.getRepository(ProcedimientoPlantillaEntity);
+      const actividadRepo = manager.getRepository(ProcedimientoActividadEntity);
+      const row = await procedimientoRepo.findOne({
+        where: { id, is_deleted: false },
+      });
+      if (!row) throw new NotFoundException('Procedimiento plantilla no encontrado');
+
+      Object.assign(row, {
+        codigo: dto.codigo ?? row.codigo,
+        nombre: dto.nombre ?? row.nombre,
+        tipo_proceso: dto.tipo_proceso ?? row.tipo_proceso,
+        documento_referencia: dto.documento_referencia ?? row.documento_referencia ?? null,
+        version: dto.version ?? row.version ?? null,
+        clase_mantenimiento: dto.clase_mantenimiento ?? row.clase_mantenimiento ?? null,
+        frecuencia_horas: dto.frecuencia_horas ?? row.frecuencia_horas ?? null,
+        objetivo: dto.objetivo ?? row.objetivo ?? null,
+        precauciones: dto.precauciones
+          ? this.normalizeStringArray(dto.precauciones)
+          : row.precauciones,
+        herramientas: dto.herramientas
+          ? this.normalizeStringArray(dto.herramientas)
+          : row.herramientas,
+        materiales: dto.materiales
+          ? this.normalizeStringArray(dto.materiales)
+          : row.materiales,
+        responsabilidades: dto.responsabilidades
+          ? this.normalizeStringArray(dto.responsabilidades)
+          : row.responsabilidades,
+      });
+      await procedimientoRepo.save(row);
+
+      if (dto.actividades) {
+        const current = await actividadRepo.find({
+          where: { procedimiento_id: row.id, is_deleted: false },
+        });
+        for (const item of current) item.is_deleted = true;
+        if (current.length) await actividadRepo.save(current);
+
+        if (dto.actividades.length) {
+          await actividadRepo.save(
+            dto.actividades.map((actividad, index) =>
+              actividadRepo.create({
+                procedimiento_id: row.id,
+                orden: actividad.orden ?? index + 1,
+                fase: actividad.fase ?? null,
+                actividad: actividad.actividad,
+                detalle: actividad.detalle ?? null,
+                requiere_permiso: actividad.requiere_permiso ?? false,
+                requiere_epp: actividad.requiere_epp ?? false,
+                requiere_bloqueo: actividad.requiere_bloqueo ?? false,
+                requiere_evidencia: actividad.requiere_evidencia ?? false,
+                meta: actividad.meta ?? {},
+              }),
+            ),
+          );
+        }
+      }
+    });
+
+    const saved = await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
+    const payload = await this.buildProcedimientoPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'PROCEDIMIENTO_PLANTILLA',
+      accion: 'UPDATED',
+      referencia_tabla: 'tb_procedimiento_plantilla',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Plantilla de procedimiento actualizada',
+      body: `${saved.codigo} - ${saved.nombre}`,
+      payload_kpi: {
+        actividades: payload.actividades.length,
+        tipo_proceso: saved.tipo_proceso,
+      },
+    });
+    return this.wrap(payload, 'Procedimiento plantilla actualizado');
+  }
+
+  async deleteProcedimientoPlantilla(id: string) {
+    const row = await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
+    row.is_deleted = true;
+    await this.procedimientoRepo.save(row);
+    await this.softDeleteRows(this.procedimientoActividadRepo, {
+      procedimiento_id: row.id,
+      is_deleted: false,
+    });
+    return this.wrap(true, 'Procedimiento plantilla eliminado');
+  }
+
+  async listAnalisisLubricante() {
+    const rows = await this.analisisLubricanteRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_reporte: 'DESC', created_at: 'DESC' },
+    });
+    return this.wrap(
+      await Promise.all(rows.map((row) => this.buildAnalisisLubricantePayload(row))),
+      'Análisis de lubricante listados',
+    );
+  }
+
+  async getAnalisisLubricante(id: string) {
+    const row = await this.findOneOrFail(this.analisisLubricanteRepo, {
+      id,
+      is_deleted: false,
+    });
+    return this.wrap(
+      await this.buildAnalisisLubricantePayload(row),
+      'Análisis de lubricante obtenido',
+    );
+  }
+
+  async createAnalisisLubricante(dto: CreateAnalisisLubricanteDto) {
+    const savedId = await this.dataSource.transaction(async (manager) => {
+      const analisisRepo = manager.getRepository(AnalisisLubricanteEntity);
+      const detalleRepo = manager.getRepository(AnalisisLubricanteDetalleEntity);
+      const row = await analisisRepo.save(
+        analisisRepo.create({
+          codigo: dto.codigo,
+          cliente: dto.cliente ?? null,
+          equipo_id: dto.equipo_id ?? null,
+          equipo_codigo: dto.equipo_codigo ?? null,
+          equipo_nombre: dto.equipo_nombre ?? null,
+          compartimento_principal: dto.compartimento_principal ?? null,
+          fecha_muestra: this.toDateOnlyString(dto.fecha_muestra),
+          fecha_reporte: this.toDateOnlyString(dto.fecha_reporte),
+          diagnostico: dto.diagnostico ?? null,
+          estado_diagnostico: dto.estado_diagnostico ?? 'NORMAL',
+          documento_origen: dto.documento_origen ?? null,
+          payload_json: dto.payload_json ?? {},
+        }),
+      );
+
+      if (dto.detalles?.length) {
+        await detalleRepo.save(
+          dto.detalles.map((detalle, index) =>
+            detalleRepo.create({
+              analisis_id: row.id,
+              compartimento: detalle.compartimento,
+              numero_muestra: detalle.numero_muestra ?? null,
+              parametro: detalle.parametro,
+              resultado_numerico: detalle.resultado_numerico ?? null,
+              resultado_texto: detalle.resultado_texto ?? null,
+              unidad: detalle.unidad ?? null,
+              linea_base: detalle.linea_base ?? null,
+              nivel_alerta: detalle.nivel_alerta ?? 'NORMAL',
+              tendencia: detalle.tendencia ?? null,
+              observacion: detalle.observacion ?? null,
+              orden: detalle.orden ?? index + 1,
+            }),
+          ),
+        );
+      }
+
+      return row.id;
+    });
+
+    const saved = await this.findOneOrFail(this.analisisLubricanteRepo, {
+      id: savedId,
+      is_deleted: false,
+    });
+    const payload = await this.buildAnalisisLubricantePayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'ANALISIS_LUBRICANTE',
+      accion: 'CREATED',
+      referencia_tabla: 'tb_analisis_lubricante',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      equipo_id: saved.equipo_id ?? null,
+      title: 'Nuevo análisis de lubricante',
+      body: `${saved.codigo}${saved.equipo_codigo ? ` · ${saved.equipo_codigo}` : ''}`,
+      level:
+        String(saved.estado_diagnostico || 'NORMAL').toUpperCase() === 'ALERTA'
+          ? 'warning'
+          : 'info',
+      payload_kpi: {
+        detalles: payload.detalles.length,
+        estado: saved.estado_diagnostico,
+      },
+    });
+    return this.wrap(payload, 'Análisis de lubricante creado');
+  }
+
+  async updateAnalisisLubricante(id: string, dto: UpdateAnalisisLubricanteDto) {
+    await this.findOneOrFail(this.analisisLubricanteRepo, { id, is_deleted: false });
+
+    await this.dataSource.transaction(async (manager) => {
+      const analisisRepo = manager.getRepository(AnalisisLubricanteEntity);
+      const detalleRepo = manager.getRepository(AnalisisLubricanteDetalleEntity);
+      const row = await analisisRepo.findOne({ where: { id, is_deleted: false } });
+      if (!row) throw new NotFoundException('Análisis de lubricante no encontrado');
+
+      Object.assign(row, {
+        codigo: dto.codigo ?? row.codigo,
+        cliente: dto.cliente ?? row.cliente ?? null,
+        equipo_id: dto.equipo_id ?? row.equipo_id ?? null,
+        equipo_codigo: dto.equipo_codigo ?? row.equipo_codigo ?? null,
+        equipo_nombre: dto.equipo_nombre ?? row.equipo_nombre ?? null,
+        compartimento_principal:
+          dto.compartimento_principal ?? row.compartimento_principal ?? null,
+        fecha_muestra: dto.fecha_muestra
+          ? this.toDateOnlyString(dto.fecha_muestra)
+          : row.fecha_muestra ?? null,
+        fecha_reporte: dto.fecha_reporte
+          ? this.toDateOnlyString(dto.fecha_reporte)
+          : row.fecha_reporte ?? null,
+        diagnostico: dto.diagnostico ?? row.diagnostico ?? null,
+        estado_diagnostico: dto.estado_diagnostico ?? row.estado_diagnostico,
+        documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
+        payload_json: dto.payload_json ?? row.payload_json ?? {},
+      });
+      await analisisRepo.save(row);
+
+      if (dto.detalles) {
+        const current = await detalleRepo.find({
+          where: { analisis_id: row.id, is_deleted: false },
+        });
+        for (const item of current) item.is_deleted = true;
+        if (current.length) await detalleRepo.save(current);
+
+        if (dto.detalles.length) {
+          await detalleRepo.save(
+            dto.detalles.map((detalle, index) =>
+              detalleRepo.create({
+                analisis_id: row.id,
+                compartimento: detalle.compartimento,
+                numero_muestra: detalle.numero_muestra ?? null,
+                parametro: detalle.parametro,
+                resultado_numerico: detalle.resultado_numerico ?? null,
+                resultado_texto: detalle.resultado_texto ?? null,
+                unidad: detalle.unidad ?? null,
+                linea_base: detalle.linea_base ?? null,
+                nivel_alerta: detalle.nivel_alerta ?? 'NORMAL',
+                tendencia: detalle.tendencia ?? null,
+                observacion: detalle.observacion ?? null,
+                orden: detalle.orden ?? index + 1,
+              }),
+            ),
+          );
+        }
+      }
+    });
+
+    const saved = await this.findOneOrFail(this.analisisLubricanteRepo, { id, is_deleted: false });
+    const payload = await this.buildAnalisisLubricantePayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'ANALISIS_LUBRICANTE',
+      accion: 'UPDATED',
+      referencia_tabla: 'tb_analisis_lubricante',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      equipo_id: saved.equipo_id ?? null,
+      title: 'Análisis de lubricante actualizado',
+      body: `${saved.codigo}${saved.equipo_codigo ? ` · ${saved.equipo_codigo}` : ''}`,
+      level:
+        String(saved.estado_diagnostico || 'NORMAL').toUpperCase() === 'ALERTA'
+          ? 'warning'
+          : 'info',
+      payload_kpi: {
+        detalles: payload.detalles.length,
+        estado: saved.estado_diagnostico,
+      },
+    });
+    return this.wrap(payload, 'Análisis de lubricante actualizado');
+  }
+
+  async deleteAnalisisLubricante(id: string) {
+    const row = await this.findOneOrFail(this.analisisLubricanteRepo, {
+      id,
+      is_deleted: false,
+    });
+    row.is_deleted = true;
+    await this.analisisLubricanteRepo.save(row);
+    await this.softDeleteRows(this.analisisLubricanteDetRepo, {
+      analisis_id: row.id,
+      is_deleted: false,
+    });
+    return this.wrap(true, 'Análisis de lubricante eliminado');
+  }
+
+  async listCronogramasSemanales() {
+    const rows = await this.cronogramaSemanalRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_inicio: 'DESC', created_at: 'DESC' },
+    });
+    return this.wrap(
+      await Promise.all(rows.map((row) => this.buildCronogramaSemanalPayload(row))),
+      'Cronogramas semanales listados',
+    );
+  }
+
+  async getCronogramaSemanal(id: string) {
+    const row = await this.findOneOrFail(this.cronogramaSemanalRepo, {
+      id,
+      is_deleted: false,
+    });
+    return this.wrap(
+      await this.buildCronogramaSemanalPayload(row),
+      'Cronograma semanal obtenido',
+    );
+  }
+
+  async createCronogramaSemanal(dto: CreateCronogramaSemanalDto) {
+    const savedId = await this.dataSource.transaction(async (manager) => {
+      const cronogramaRepo = manager.getRepository(CronogramaSemanalEntity);
+      const detalleRepo = manager.getRepository(CronogramaSemanalDetalleEntity);
+      const row = cronogramaRepo.create();
+      Object.assign(row, {
+        codigo: dto.codigo,
+        fecha_inicio: dto.fecha_inicio.slice(0, 10),
+        fecha_fin: dto.fecha_fin.slice(0, 10),
+        locacion: dto.locacion ?? null,
+        referencia_orden: dto.referencia_orden ?? null,
+        documento_origen: dto.documento_origen ?? null,
+        resumen: dto.resumen ?? null,
+        payload_json: dto.payload_json ?? {},
+      });
+      await cronogramaRepo.save(row);
+
+      if (dto.detalles?.length) {
+        await detalleRepo.save(
+          dto.detalles.map((detalle, index) =>
+            detalleRepo.create({
+              cronograma_id: row.id,
+              dia_semana: detalle.dia_semana,
+              fecha_actividad: this.toDateOnlyString(detalle.fecha_actividad),
+              hora_inicio: this.toTimeOnlyString(detalle.hora_inicio),
+              hora_fin: this.toTimeOnlyString(detalle.hora_fin),
+              tipo_proceso: detalle.tipo_proceso ?? null,
+              actividad: detalle.actividad,
+              responsable_area: detalle.responsable_area ?? null,
+              equipo_codigo: detalle.equipo_codigo ?? null,
+              observacion: detalle.observacion ?? null,
+              orden: detalle.orden ?? index + 1,
+            }),
+          ),
+        );
+      }
+
+      return row.id;
+    });
+
+    const saved = await this.findOneOrFail(this.cronogramaSemanalRepo, {
+      id: savedId,
+      is_deleted: false,
+    });
+    const payload = await this.buildCronogramaSemanalPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'CRONOGRAMA_SEMANAL',
+      accion: 'CREATED',
+      referencia_tabla: 'tb_cronograma_semanal',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Nuevo cronograma semanal',
+      body: `${saved.codigo} (${saved.fecha_inicio} - ${saved.fecha_fin})`,
+      payload_kpi: {
+        actividades: payload.detalles.length,
+      },
+    });
+    return this.wrap(payload, 'Cronograma semanal creado');
+  }
+
+  async updateCronogramaSemanal(id: string, dto: UpdateCronogramaSemanalDto) {
+    await this.findOneOrFail(this.cronogramaSemanalRepo, { id, is_deleted: false });
+
+    await this.dataSource.transaction(async (manager) => {
+      const cronogramaRepo = manager.getRepository(CronogramaSemanalEntity);
+      const detalleRepo = manager.getRepository(CronogramaSemanalDetalleEntity);
+      const row = await cronogramaRepo.findOne({ where: { id, is_deleted: false } });
+      if (!row) throw new NotFoundException('Cronograma semanal no encontrado');
+
+      Object.assign(row, {
+        codigo: dto.codigo ?? row.codigo,
+        fecha_inicio: dto.fecha_inicio ? this.toDateOnlyString(dto.fecha_inicio) : row.fecha_inicio,
+        fecha_fin: dto.fecha_fin ? this.toDateOnlyString(dto.fecha_fin) : row.fecha_fin,
+        locacion: dto.locacion ?? row.locacion ?? null,
+        referencia_orden: dto.referencia_orden ?? row.referencia_orden ?? null,
+        documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
+        resumen: dto.resumen ?? row.resumen ?? null,
+        payload_json: dto.payload_json ?? row.payload_json ?? {},
+      });
+      await cronogramaRepo.save(row);
+
+      if (dto.detalles) {
+        const current = await detalleRepo.find({
+          where: { cronograma_id: row.id, is_deleted: false },
+        });
+        for (const item of current) item.is_deleted = true;
+        if (current.length) await detalleRepo.save(current);
+
+        if (dto.detalles.length) {
+          await detalleRepo.save(
+            dto.detalles.map((detalle, index) =>
+              detalleRepo.create({
+                cronograma_id: row.id,
+                dia_semana: detalle.dia_semana,
+                fecha_actividad: this.toDateOnlyString(detalle.fecha_actividad),
+                hora_inicio: this.toTimeOnlyString(detalle.hora_inicio),
+                hora_fin: this.toTimeOnlyString(detalle.hora_fin),
+                tipo_proceso: detalle.tipo_proceso ?? null,
+                actividad: detalle.actividad,
+                responsable_area: detalle.responsable_area ?? null,
+                equipo_codigo: detalle.equipo_codigo ?? null,
+                observacion: detalle.observacion ?? null,
+                orden: detalle.orden ?? index + 1,
+              }),
+            ),
+          );
+        }
+      }
+    });
+
+    const saved = await this.findOneOrFail(this.cronogramaSemanalRepo, { id, is_deleted: false });
+    const payload = await this.buildCronogramaSemanalPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'CRONOGRAMA_SEMANAL',
+      accion: 'UPDATED',
+      referencia_tabla: 'tb_cronograma_semanal',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Cronograma semanal actualizado',
+      body: `${saved.codigo} (${saved.fecha_inicio} - ${saved.fecha_fin})`,
+      payload_kpi: {
+        actividades: payload.detalles.length,
+      },
+    });
+    return this.wrap(payload, 'Cronograma semanal actualizado');
+  }
+
+  async deleteCronogramaSemanal(id: string) {
+    const row = await this.findOneOrFail(this.cronogramaSemanalRepo, {
+      id,
+      is_deleted: false,
+    });
+    row.is_deleted = true;
+    await this.cronogramaSemanalRepo.save(row);
+    await this.softDeleteRows(this.cronogramaSemanalDetRepo, {
+      cronograma_id: row.id,
+      is_deleted: false,
+    });
+    return this.wrap(true, 'Cronograma semanal eliminado');
+  }
+
+  async listReportesOperacionDiaria() {
+    const rows = await this.reporteDiarioRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_reporte: 'DESC', created_at: 'DESC' },
+    });
+    return this.wrap(
+      await Promise.all(rows.map((row) => this.buildReporteDiarioPayload(row))),
+      'Reportes de operación diaria listados',
+    );
+  }
+
+  async getReporteOperacionDiaria(id: string) {
+    const row = await this.findOneOrFail(this.reporteDiarioRepo, {
+      id,
+      is_deleted: false,
+    });
+    return this.wrap(
+      await this.buildReporteDiarioPayload(row),
+      'Reporte de operación diaria obtenido',
+    );
+  }
+
+  async createReporteOperacionDiaria(dto: CreateReporteOperacionDiariaDto) {
+    const savedId = await this.dataSource.transaction(async (manager) => {
+      const reporteRepo = manager.getRepository(ReporteOperacionDiariaEntity);
+      const unidadRepo = manager.getRepository(ReporteOperacionDiariaUnidadEntity);
+      const combustibleRepo = manager.getRepository(ReporteCombustibleEntity);
+      const componenteRepo = manager.getRepository(ControlComponenteEntity);
+
+      const row = reporteRepo.create();
+      Object.assign(row, {
+        codigo: dto.codigo,
+        fecha_reporte: dto.fecha_reporte.slice(0, 10),
+        locacion: dto.locacion ?? null,
+        turno: dto.turno ?? null,
+        documento_origen: dto.documento_origen ?? null,
+        resumen: dto.resumen ?? null,
+        payload_json: dto.payload_json ?? {},
+      });
+      await reporteRepo.save(row);
+
+      if (dto.unidades?.length) {
+        await unidadRepo.save(
+          dto.unidades.map((unidad) =>
+            unidadRepo.create({
+              reporte_id: row.id,
+              equipo_id: unidad.equipo_id ?? null,
+              equipo_codigo: unidad.equipo_codigo,
+              fabricante: unidad.fabricante ?? null,
+              modo_operacion: unidad.modo_operacion ?? null,
+              carga_kw: unidad.carga_kw ?? null,
+              horometro_actual: unidad.horometro_actual ?? null,
+              horometro_inicio: unidad.horometro_inicio ?? null,
+              horas_operacion: unidad.horas_operacion ?? null,
+              mpg_actual: unidad.mpg_actual ?? null,
+              proximo_mpg: unidad.proximo_mpg ?? null,
+              horas_faltantes: unidad.horas_faltantes ?? null,
+              dias_faltantes: unidad.dias_faltantes ?? null,
+              fecha_proxima: this.toDateOnlyString(unidad.fecha_proxima),
+              nota: unidad.nota ?? null,
+            }),
+          ),
+        );
+      }
+
+      if (dto.combustibles?.length) {
+        await combustibleRepo.save(
+          dto.combustibles.map((combustible) =>
+            combustibleRepo.create({
+              reporte_id: row.id,
+              tanque: combustible.tanque,
+              tipo_lectura: combustible.tipo_lectura ?? 'STOCK',
+              fecha_lectura: combustible.fecha_lectura
+                ? new Date(combustible.fecha_lectura)
+                : new Date(),
+              medida_cm: combustible.medida_cm ?? null,
+              medida_ft: combustible.medida_ft ?? null,
+              medida_in: combustible.medida_in ?? null,
+              galones: combustible.galones ?? null,
+              stock_anterior: combustible.stock_anterior ?? null,
+              stock_actual: combustible.stock_actual ?? null,
+              stock_minimo: combustible.stock_minimo ?? null,
+              stock_maximo: combustible.stock_maximo ?? null,
+              consumo_galones: combustible.consumo_galones ?? null,
+              guia_remision: combustible.guia_remision ?? null,
+              observacion: combustible.observacion ?? null,
+            }),
+          ),
+        );
+      }
+
+      if (dto.componentes?.length) {
+        await componenteRepo.save(
+          dto.componentes.map((componente) =>
+            componenteRepo.create({
+              reporte_id: row.id,
+              equipo_id: componente.equipo_id ?? null,
+              equipo_codigo: componente.equipo_codigo,
+              tipo_componente: componente.tipo_componente,
+              posicion: componente.posicion ?? null,
+              serie: componente.serie ?? null,
+              estado: componente.estado ?? null,
+              fecha_instalacion: this.toDateOnlyString(componente.fecha_instalacion),
+              fecha_retiro: this.toDateOnlyString(componente.fecha_retiro),
+              horometro_instalacion: componente.horometro_instalacion ?? null,
+              horometro_retiro: componente.horometro_retiro ?? null,
+              horas_uso: componente.horas_uso ?? null,
+              motivo: componente.motivo ?? null,
+              responsable: componente.responsable ?? null,
+              documento_origen: componente.documento_origen ?? null,
+              meta: componente.meta ?? {},
+            }),
+          ),
+        );
+      }
+
+      return row.id;
+    });
+
+    const saved = await this.findOneOrFail(this.reporteDiarioRepo, {
+      id: savedId,
+      is_deleted: false,
+    });
+    const payload = await this.buildReporteDiarioPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'REPORTE_OPERACION_DIARIA',
+      accion: 'CREATED',
+      referencia_tabla: 'tb_reporte_operacion_diaria',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Nuevo reporte de operación diaria',
+      body: `${saved.codigo} · ${saved.fecha_reporte}`,
+      payload_kpi: {
+        unidades: payload.unidades.length,
+        combustibles: payload.combustibles.length,
+        componentes: payload.componentes.length,
+      },
+    });
+    return this.wrap(payload, 'Reporte de operación diaria creado');
+  }
+
+  async updateReporteOperacionDiaria(id: string, dto: UpdateReporteOperacionDiariaDto) {
+    await this.findOneOrFail(this.reporteDiarioRepo, { id, is_deleted: false });
+
+    await this.dataSource.transaction(async (manager) => {
+      const reporteRepo = manager.getRepository(ReporteOperacionDiariaEntity);
+      const unidadRepo = manager.getRepository(ReporteOperacionDiariaUnidadEntity);
+      const combustibleRepo = manager.getRepository(ReporteCombustibleEntity);
+      const componenteRepo = manager.getRepository(ControlComponenteEntity);
+      const row = await reporteRepo.findOne({ where: { id, is_deleted: false } });
+      if (!row) throw new NotFoundException('Reporte de operación diaria no encontrado');
+
+      Object.assign(row, {
+        codigo: dto.codigo ?? row.codigo,
+        fecha_reporte: dto.fecha_reporte
+          ? this.toDateOnlyString(dto.fecha_reporte)
+          : row.fecha_reporte,
+        locacion: dto.locacion ?? row.locacion ?? null,
+        turno: dto.turno ?? row.turno ?? null,
+        documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
+        resumen: dto.resumen ?? row.resumen ?? null,
+        payload_json: dto.payload_json ?? row.payload_json ?? {},
+      });
+      await reporteRepo.save(row);
+
+      if (dto.unidades) {
+        const current = await unidadRepo.find({
+          where: { reporte_id: row.id, is_deleted: false },
+        });
+        for (const item of current) item.is_deleted = true;
+        if (current.length) await unidadRepo.save(current);
+        if (dto.unidades.length) {
+          await unidadRepo.save(
+            dto.unidades.map((unidad) =>
+              unidadRepo.create({
+                reporte_id: row.id,
+                equipo_id: unidad.equipo_id ?? null,
+                equipo_codigo: unidad.equipo_codigo,
+                fabricante: unidad.fabricante ?? null,
+                modo_operacion: unidad.modo_operacion ?? null,
+                carga_kw: unidad.carga_kw ?? null,
+                horometro_actual: unidad.horometro_actual ?? null,
+                horometro_inicio: unidad.horometro_inicio ?? null,
+                horas_operacion: unidad.horas_operacion ?? null,
+                mpg_actual: unidad.mpg_actual ?? null,
+                proximo_mpg: unidad.proximo_mpg ?? null,
+                horas_faltantes: unidad.horas_faltantes ?? null,
+                dias_faltantes: unidad.dias_faltantes ?? null,
+                fecha_proxima: this.toDateOnlyString(unidad.fecha_proxima),
+                nota: unidad.nota ?? null,
+              }),
+            ),
+          );
+        }
+      }
+
+      if (dto.combustibles) {
+        const current = await combustibleRepo.find({
+          where: { reporte_id: row.id, is_deleted: false },
+        });
+        for (const item of current) item.is_deleted = true;
+        if (current.length) await combustibleRepo.save(current);
+        if (dto.combustibles.length) {
+          await combustibleRepo.save(
+            dto.combustibles.map((combustible) =>
+              combustibleRepo.create({
+                reporte_id: row.id,
+                tanque: combustible.tanque,
+                tipo_lectura: combustible.tipo_lectura ?? 'STOCK',
+                fecha_lectura: combustible.fecha_lectura
+                  ? new Date(combustible.fecha_lectura)
+                  : new Date(),
+                medida_cm: combustible.medida_cm ?? null,
+                medida_ft: combustible.medida_ft ?? null,
+                medida_in: combustible.medida_in ?? null,
+                galones: combustible.galones ?? null,
+                stock_anterior: combustible.stock_anterior ?? null,
+                stock_actual: combustible.stock_actual ?? null,
+                stock_minimo: combustible.stock_minimo ?? null,
+                stock_maximo: combustible.stock_maximo ?? null,
+                consumo_galones: combustible.consumo_galones ?? null,
+                guia_remision: combustible.guia_remision ?? null,
+                observacion: combustible.observacion ?? null,
+              }),
+            ),
+          );
+        }
+      }
+
+      if (dto.componentes) {
+        const current = await componenteRepo.find({
+          where: { reporte_id: row.id, is_deleted: false },
+        });
+        for (const item of current) item.is_deleted = true;
+        if (current.length) await componenteRepo.save(current);
+        if (dto.componentes.length) {
+          await componenteRepo.save(
+            dto.componentes.map((componente) =>
+              componenteRepo.create({
+                reporte_id: row.id,
+                equipo_id: componente.equipo_id ?? null,
+                equipo_codigo: componente.equipo_codigo,
+                tipo_componente: componente.tipo_componente,
+                posicion: componente.posicion ?? null,
+                serie: componente.serie ?? null,
+                estado: componente.estado ?? null,
+                fecha_instalacion: this.toDateOnlyString(componente.fecha_instalacion),
+                fecha_retiro: this.toDateOnlyString(componente.fecha_retiro),
+                horometro_instalacion: componente.horometro_instalacion ?? null,
+                horometro_retiro: componente.horometro_retiro ?? null,
+                horas_uso: componente.horas_uso ?? null,
+                motivo: componente.motivo ?? null,
+                responsable: componente.responsable ?? null,
+                documento_origen: componente.documento_origen ?? null,
+                meta: componente.meta ?? {},
+              }),
+            ),
+          );
+        }
+      }
+    });
+
+    const saved = await this.findOneOrFail(this.reporteDiarioRepo, { id, is_deleted: false });
+    const payload = await this.buildReporteDiarioPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'REPORTE_OPERACION_DIARIA',
+      accion: 'UPDATED',
+      referencia_tabla: 'tb_reporte_operacion_diaria',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Reporte de operación diaria actualizado',
+      body: `${saved.codigo} · ${saved.fecha_reporte}`,
+      payload_kpi: {
+        unidades: payload.unidades.length,
+        combustibles: payload.combustibles.length,
+        componentes: payload.componentes.length,
+      },
+    });
+    return this.wrap(payload, 'Reporte de operación diaria actualizado');
+  }
+
+  async deleteReporteOperacionDiaria(id: string) {
+    const row = await this.findOneOrFail(this.reporteDiarioRepo, {
+      id,
+      is_deleted: false,
+    });
+    row.is_deleted = true;
+    await this.reporteDiarioRepo.save(row);
+    await Promise.all([
+      this.softDeleteRows(this.reporteDiarioUnidadRepo, {
+        reporte_id: row.id,
+        is_deleted: false,
+      }),
+      this.softDeleteRows(this.reporteCombustibleRepo, {
+        reporte_id: row.id,
+        is_deleted: false,
+      }),
+      this.softDeleteRows(this.controlComponenteRepo, {
+        reporte_id: row.id,
+        is_deleted: false,
+      }),
+    ]);
+    return this.wrap(true, 'Reporte de operación diaria eliminado');
+  }
+
+  async listEventosProceso(query: EventoProcesoQueryDto) {
+    const where: FindOptionsWhere<EventoProcesoEntity> = { is_deleted: false };
+    if (query.tipo_proceso) where.tipo_proceso = query.tipo_proceso;
+    const rows = await this.eventoProcesoRepo.find({
+      where,
+      order: { fecha_evento: 'DESC', created_at: 'DESC' },
+      take: Math.min(Math.max(query.limit ?? 20, 1), 100),
+    });
+    return this.wrap(rows, 'Eventos de proceso listados');
+  }
+
+  async getIntelligenceSummary() {
+    const [
+      procedimientos,
+      analisisTotal,
+      cronogramasTotal,
+      reportesTotal,
+      eventosTotal,
+      analisisRows,
+      cronogramas,
+      reportes,
+      eventos,
+      overdueProgramaciones,
+      pendingWorkOrders,
+      componentesTotal,
+      componentesRecientes,
+    ] = await Promise.all([
+      this.procedimientoRepo.count({ where: { is_deleted: false } }),
+      this.analisisLubricanteRepo.count({ where: { is_deleted: false } }),
+      this.cronogramaSemanalRepo.count({ where: { is_deleted: false } }),
+      this.reporteDiarioRepo.count({ where: { is_deleted: false } }),
+      this.eventoProcesoRepo.count({ where: { is_deleted: false } }),
+      this.analisisLubricanteRepo.find({
+        where: { is_deleted: false },
+        order: { fecha_reporte: 'DESC', created_at: 'DESC' },
+        take: 10,
+      }),
+      this.cronogramaSemanalRepo.find({
+        where: { is_deleted: false },
+        order: { fecha_inicio: 'DESC', created_at: 'DESC' },
+        take: 10,
+      }),
+      this.reporteDiarioRepo.find({
+        where: { is_deleted: false },
+        order: { fecha_reporte: 'DESC', created_at: 'DESC' },
+        take: 10,
+      }),
+      this.eventoProcesoRepo.find({
+        where: { is_deleted: false },
+        order: { fecha_evento: 'DESC', created_at: 'DESC' },
+        take: 20,
+      }),
+      this.programacionRepo.find({ where: { is_deleted: false, activo: true } }),
+      this.woRepo.count({
+        where: { is_deleted: false, status_workflow: In(['PLANNED', 'IN_PROGRESS']) },
+      }),
+      this.controlComponenteRepo.count({ where: { is_deleted: false } }),
+      this.controlComponenteRepo.find({
+        where: { is_deleted: false },
+        order: { updated_at: 'DESC', created_at: 'DESC' },
+        take: 10,
+      }),
+    ]);
+
+    const programaciones = await Promise.all(
+      overdueProgramaciones.map((row) =>
+        this.recalculateProgramacionFields(row, { persist: false }),
+      ),
+    );
+    const vencidas = programaciones.filter(
+      (row: any) => String(row.estado_programacion || '').toUpperCase() === 'VENCIDA',
+    );
+
+    const breakdown = eventos.reduce<Record<string, number>>((acc, event) => {
+      const key = String(event.tipo_proceso || 'SIN_TIPO');
+      acc[key] = (acc[key] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    return this.wrap(
+      {
+        generated_at: new Date().toISOString(),
+        kpis: {
+          procedimientos,
+          analisis_lubricante: analisisTotal,
+          cronogramas_semanales: cronogramasTotal,
+          reportes_diarios: reportesTotal,
+          eventos_proceso: eventosTotal,
+          programaciones_vencidas: vencidas.length,
+          work_orders_pendientes: pendingWorkOrders,
+          componentes_monitoreados: componentesTotal,
+        },
+        process_breakdown: Object.entries(breakdown).map(([tipo_proceso, total]) => ({
+          tipo_proceso,
+          total,
+        })),
+        recent_events: eventos.slice(0, 8),
+        recent_analyses: analisisRows.slice(0, 5),
+        recent_weekly_schedules: cronogramas.slice(0, 5),
+        recent_daily_reports: reportes.slice(0, 5),
+        component_highlights: componentesRecientes.slice(0, 5),
+      },
+      'Resumen de inteligencia operativa generado',
+    );
   }
 
   async listAlertas(q: AlertaQueryDto) {
@@ -1613,6 +2762,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       description: `[WO:${created.id}] Creación de OT ${created.code}${resolution.codeWasReassigned ? ` (reemplazó ${resolution.requestedCode ?? 'sin código'})` : ''}`,
       typeLog: 'WORK_ORDER',
     });
+    await this.registerProcessEvent({
+      tipo_proceso: 'WORK_ORDER',
+      accion: 'CREATED',
+      referencia_tabla: 'tb_work_order',
+      referencia_id: created.id,
+      referencia_codigo: created.code,
+      equipo_id: created.equipment_id ?? null,
+      title: 'Orden de trabajo creada',
+      body: `${enriched.code} - ${enriched.title}`,
+      payload_kpi: {
+        status_workflow: created.status_workflow,
+        maintenance_kind: created.maintenance_kind,
+      },
+    });
     return this.wrap(responsePayload, 'Work order creada');
   }
 
@@ -1649,6 +2812,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.writeSecurityLog({
       description: `[WO:${saved.id}] Actualización de OT ${saved.code} (${previousStatus} -> ${saved.status_workflow})`,
       typeLog: 'WORK_ORDER',
+    });
+    await this.registerProcessEvent({
+      tipo_proceso: 'WORK_ORDER',
+      accion: previousStatus !== saved.status_workflow ? 'STATUS_CHANGED' : 'UPDATED',
+      referencia_tabla: 'tb_work_order',
+      referencia_id: saved.id,
+      referencia_codigo: saved.code,
+      equipo_id: saved.equipment_id ?? null,
+      title:
+        previousStatus !== saved.status_workflow
+          ? 'Estado de OT actualizado'
+          : 'Orden de trabajo actualizada',
+      body:
+        previousStatus !== saved.status_workflow
+          ? `${saved.code}: ${previousStatus} -> ${saved.status_workflow}`
+          : `${saved.code} - ${enriched.title}`,
+      payload_kpi: {
+        status_workflow: saved.status_workflow,
+        maintenance_kind: saved.maintenance_kind,
+      },
     });
     return this.wrap(enriched, 'Work order actualizada');
   }

@@ -20,27 +20,34 @@ import {
 import { KpiMaintenanceService } from '../services/kpi-maintenance.service';
 import {
   AlertaQueryDto,
+  CreateAnalisisLubricanteDto,
   ChangeEstadoDto,
   CreateBitacoraDto,
   CreateConsumoDto,
+  CreateCronogramaSemanalDto,
   CreateEquipoDto,
   CreateEventoDto,
   CreateFallaCatalogoDto,
   CreateLecturaEquipoDto,
   CreateLubricacionPuntoDto,
   CreateComponenteDto,
+  CreateProcedimientoPlantillaDto,
   ComponenteQueryDto,
   CreatePlanDto,
   CreatePlanTareaDto,
   CreateProgramacionDto,
+  CreateReporteOperacionDiariaDto,
   DateRangeDto,
   EquipoQueryDto,
   IssueMaterialsDto,
+  EventoProcesoQueryDto,
+  UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
   UpdateEquipoDto,
   UpdatePlanDto,
   UpdatePlanTareaDto,
   UpdateProgramacionDto,
+  UpdateCronogramaSemanalDto,
   WorkOrderQueryDto,
   CreateEquipoTipoDto,
   CreateWorkOrderDto,
@@ -50,6 +57,8 @@ import {
   UpdateFallaCatalogoDto,
   UpdateLecturaEquipoDto,
   UpdateLubricacionPuntoDto,
+  UpdateProcedimientoPlantillaDto,
+  UpdateReporteOperacionDiariaDto,
   UpdateWorkOrderDto,
   UpdateWorkOrderTareaDto,
   UploadWorkOrderAdjuntoDto,
@@ -702,6 +711,172 @@ export class KpiMaintenanceController {
   @Delete('lubricaciones/:id')
   deleteLubricacion(@Param('id') id: string) {
     return this.service.deleteLubricacion(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Listar plantillas de procedimientos documentales' })
+  @Get('inteligencia/procedimientos')
+  listProcedimientosPlantilla() {
+    return this.service.listProcedimientosPlantilla();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener plantilla de procedimiento por ID' })
+  @Get('inteligencia/procedimientos/:id')
+  getProcedimientoPlantilla(@Param('id') id: string) {
+    return this.service.getProcedimientoPlantilla(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Crear plantilla de procedimiento documental' })
+  @Post('inteligencia/procedimientos')
+  createProcedimientoPlantilla(@Body() dto: CreateProcedimientoPlantillaDto) {
+    return this.service.createProcedimientoPlantilla(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Actualizar plantilla de procedimiento por ID' })
+  @Patch('inteligencia/procedimientos/:id')
+  updateProcedimientoPlantilla(
+    @Param('id') id: string,
+    @Body() dto: UpdateProcedimientoPlantillaDto,
+  ) {
+    return this.service.updateProcedimientoPlantilla(id, dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar plantilla de procedimiento por ID' })
+  @Delete('inteligencia/procedimientos/:id')
+  deleteProcedimientoPlantilla(@Param('id') id: string) {
+    return this.service.deleteProcedimientoPlantilla(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Listar análisis de lubricante' })
+  @Get('inteligencia/analisis-lubricante')
+  listAnalisisLubricante() {
+    return this.service.listAnalisisLubricante();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener análisis de lubricante por ID' })
+  @Get('inteligencia/analisis-lubricante/:id')
+  getAnalisisLubricante(@Param('id') id: string) {
+    return this.service.getAnalisisLubricante(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Crear análisis de lubricante' })
+  @Post('inteligencia/analisis-lubricante')
+  createAnalisisLubricante(@Body() dto: CreateAnalisisLubricanteDto) {
+    return this.service.createAnalisisLubricante(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Actualizar análisis de lubricante por ID' })
+  @Patch('inteligencia/analisis-lubricante/:id')
+  updateAnalisisLubricante(
+    @Param('id') id: string,
+    @Body() dto: UpdateAnalisisLubricanteDto,
+  ) {
+    return this.service.updateAnalisisLubricante(id, dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar análisis de lubricante por ID' })
+  @Delete('inteligencia/analisis-lubricante/:id')
+  deleteAnalisisLubricante(@Param('id') id: string) {
+    return this.service.deleteAnalisisLubricante(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Listar cronogramas semanales' })
+  @Get('inteligencia/cronogramas-semanales')
+  listCronogramasSemanales() {
+    return this.service.listCronogramasSemanales();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener cronograma semanal por ID' })
+  @Get('inteligencia/cronogramas-semanales/:id')
+  getCronogramaSemanal(@Param('id') id: string) {
+    return this.service.getCronogramaSemanal(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Crear cronograma semanal' })
+  @Post('inteligencia/cronogramas-semanales')
+  createCronogramaSemanal(@Body() dto: CreateCronogramaSemanalDto) {
+    return this.service.createCronogramaSemanal(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Actualizar cronograma semanal por ID' })
+  @Patch('inteligencia/cronogramas-semanales/:id')
+  updateCronogramaSemanal(
+    @Param('id') id: string,
+    @Body() dto: UpdateCronogramaSemanalDto,
+  ) {
+    return this.service.updateCronogramaSemanal(id, dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar cronograma semanal por ID' })
+  @Delete('inteligencia/cronogramas-semanales/:id')
+  deleteCronogramaSemanal(@Param('id') id: string) {
+    return this.service.deleteCronogramaSemanal(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Listar reportes de operación diaria' })
+  @Get('inteligencia/reportes-diarios')
+  listReportesOperacionDiaria() {
+    return this.service.listReportesOperacionDiaria();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener reporte de operación diaria por ID' })
+  @Get('inteligencia/reportes-diarios/:id')
+  getReporteOperacionDiaria(@Param('id') id: string) {
+    return this.service.getReporteOperacionDiaria(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Crear reporte de operación diaria' })
+  @Post('inteligencia/reportes-diarios')
+  createReporteOperacionDiaria(@Body() dto: CreateReporteOperacionDiariaDto) {
+    return this.service.createReporteOperacionDiaria(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Actualizar reporte de operación diaria por ID' })
+  @Patch('inteligencia/reportes-diarios/:id')
+  updateReporteOperacionDiaria(
+    @Param('id') id: string,
+    @Body() dto: UpdateReporteOperacionDiariaDto,
+  ) {
+    return this.service.updateReporteOperacionDiaria(id, dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar reporte de operación diaria por ID' })
+  @Delete('inteligencia/reportes-diarios/:id')
+  deleteReporteOperacionDiaria(@Param('id') id: string) {
+    return this.service.deleteReporteOperacionDiaria(id);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Listar eventos de proceso' })
+  @Get('inteligencia/eventos')
+  listEventosProceso(@Query() query: EventoProcesoQueryDto) {
+    return this.service.listEventosProceso(query);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener resumen KPI documental y operativo' })
+  @Get('inteligencia/summary')
+  getIntelligenceSummary() {
+    return this.service.getIntelligenceSummary();
   }
 
   @ApiTags('Work Orders')

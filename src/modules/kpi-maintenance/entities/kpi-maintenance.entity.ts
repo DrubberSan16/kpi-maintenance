@@ -295,6 +295,291 @@ export class WorkOrderAdjuntoEntity {
   @Column({ default: false }) is_deleted: boolean;
 }
 
+@Entity({ schema: 'kpi_maintenance', name: 'tb_procedimiento_plantilla' })
+export class ProcedimientoPlantillaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column() nombre: string;
+  @Column() tipo_proceso: string;
+  @Column({ type: 'text', nullable: true }) documento_referencia?: string | null;
+  @Column({ type: 'text', nullable: true }) version?: string | null;
+  @Column({ type: 'text', nullable: true }) clase_mantenimiento?: string | null;
+  @Column({ type: 'integer', nullable: true }) frecuencia_horas?: number | null;
+  @Column({ type: 'text', nullable: true }) objetivo?: string | null;
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) precauciones: string[];
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) herramientas: string[];
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) materiales: string[];
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) responsabilidades: string[];
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_procedimiento_actividad' })
+export class ProcedimientoActividadEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) procedimiento_id: string;
+  @Column({ default: 1 }) orden: number;
+  @Column({ type: 'text', nullable: true }) fase?: string | null;
+  @Column() actividad: string;
+  @Column({ type: 'text', nullable: true }) detalle?: string | null;
+  @Column({ default: false }) requiere_permiso: boolean;
+  @Column({ default: false }) requiere_epp: boolean;
+  @Column({ default: false }) requiere_bloqueo: boolean;
+  @Column({ default: false }) requiere_evidencia: boolean;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) meta: Record<
+    string,
+    unknown
+  >;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_analisis_lubricante' })
+export class AnalisisLubricanteEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column({ type: 'text', nullable: true }) cliente?: string | null;
+  @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
+  @Column({ type: 'text', nullable: true }) equipo_codigo?: string | null;
+  @Column({ type: 'text', nullable: true }) equipo_nombre?: string | null;
+  @Column({ type: 'text', nullable: true }) compartimento_principal?: string | null;
+  @Column({ type: 'date', nullable: true }) fecha_muestra?: string | null;
+  @Column({ type: 'date', nullable: true }) fecha_reporte?: string | null;
+  @Column({ type: 'text', nullable: true }) diagnostico?: string | null;
+  @Column({ default: 'NORMAL' }) estado_diagnostico: string;
+  @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_analisis_lubricante_det' })
+export class AnalisisLubricanteDetalleEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) analisis_id: string;
+  @Column() compartimento: string;
+  @Column({ type: 'text', nullable: true }) numero_muestra?: string | null;
+  @Column() parametro: string;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  resultado_numerico?: number | null;
+  @Column({ type: 'text', nullable: true }) resultado_texto?: string | null;
+  @Column({ type: 'text', nullable: true }) unidad?: string | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  linea_base?: number | null;
+  @Column({ default: 'NORMAL' }) nivel_alerta: string;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  tendencia?: number | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 1 }) orden: number;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_cronograma_semanal' })
+export class CronogramaSemanalEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column({ type: 'date' }) fecha_inicio: string;
+  @Column({ type: 'date' }) fecha_fin: string;
+  @Column({ type: 'text', nullable: true }) locacion?: string | null;
+  @Column({ type: 'text', nullable: true }) referencia_orden?: string | null;
+  @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
+  @Column({ type: 'text', nullable: true }) resumen?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_cronograma_semanal_det' })
+export class CronogramaSemanalDetalleEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) cronograma_id: string;
+  @Column() dia_semana: string;
+  @Column({ type: 'date', nullable: true }) fecha_actividad?: string | null;
+  @Column({ type: 'time without time zone', nullable: true }) hora_inicio?:
+    | string
+    | null;
+  @Column({ type: 'time without time zone', nullable: true }) hora_fin?:
+    | string
+    | null;
+  @Column({ type: 'text', nullable: true }) tipo_proceso?: string | null;
+  @Column() actividad: string;
+  @Column({ type: 'text', nullable: true }) responsable_area?: string | null;
+  @Column({ type: 'text', nullable: true }) equipo_codigo?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 1 }) orden: number;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_reporte_operacion_diaria' })
+export class ReporteOperacionDiariaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column({ type: 'date' }) fecha_reporte: string;
+  @Column({ type: 'text', nullable: true }) locacion?: string | null;
+  @Column({ type: 'text', nullable: true }) turno?: string | null;
+  @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
+  @Column({ type: 'text', nullable: true }) resumen?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_reporte_operacion_diaria_unidad' })
+export class ReporteOperacionDiariaUnidadEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) reporte_id: string;
+  @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
+  @Column() equipo_codigo: string;
+  @Column({ type: 'text', nullable: true }) fabricante?: string | null;
+  @Column({ type: 'text', nullable: true }) modo_operacion?: string | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  carga_kw?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horometro_actual?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horometro_inicio?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horas_operacion?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  mpg_actual?: number | null;
+  @Column({ type: 'text', nullable: true }) proximo_mpg?: string | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horas_faltantes?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  dias_faltantes?: number | null;
+  @Column({ type: 'date', nullable: true }) fecha_proxima?: string | null;
+  @Column({ type: 'text', nullable: true }) nota?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_reporte_combustible' })
+export class ReporteCombustibleEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid', nullable: true }) reporte_id?: string | null;
+  @Column() tanque: string;
+  @Column({ default: 'STOCK' }) tipo_lectura: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  fecha_lectura: Date;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  medida_cm?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  medida_ft?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  medida_in?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  galones?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  stock_anterior?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  stock_actual?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  stock_minimo?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  stock_maximo?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  consumo_galones?: number | null;
+  @Column({ type: 'text', nullable: true }) guia_remision?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_control_componente' })
+export class ControlComponenteEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid', nullable: true }) reporte_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
+  @Column() equipo_codigo: string;
+  @Column() tipo_componente: string;
+  @Column({ type: 'text', nullable: true }) posicion?: string | null;
+  @Column({ type: 'text', nullable: true }) serie?: string | null;
+  @Column({ type: 'text', nullable: true }) estado?: string | null;
+  @Column({ type: 'date', nullable: true }) fecha_instalacion?: string | null;
+  @Column({ type: 'date', nullable: true }) fecha_retiro?: string | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horometro_instalacion?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horometro_retiro?: number | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horas_uso?: number | null;
+  @Column({ type: 'text', nullable: true }) motivo?: string | null;
+  @Column({ type: 'text', nullable: true }) responsable?: string | null;
+  @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) meta: Record<
+    string,
+    unknown
+  >;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_evento_proceso' })
+export class EventoProcesoEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() tipo_proceso: string;
+  @Column() accion: string;
+  @Column() referencia_tabla: string;
+  @Column({ type: 'uuid', nullable: true }) referencia_id?: string | null;
+  @Column({ type: 'text', nullable: true }) referencia_codigo?: string | null;
+  @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  fecha_evento: Date;
+  @Column({ default: 'COMPLETED' }) estado: string;
+  @Column({ default: false }) notificacion_enviada: boolean;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_notificacion: Record<
+    string,
+    unknown
+  >;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_kpi: Record<
+    string,
+    unknown
+  >;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
 @Entity({ schema: 'kpi_process', name: 'tb_work_order' })
 export class WorkOrderEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
