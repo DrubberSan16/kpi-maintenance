@@ -564,10 +564,16 @@ export class KpiMaintenanceController {
     return this.service.listAlertas(query);
   }
   @ApiTags('Alertas')
+  @ApiOperation({ summary: 'Obtener resumen consolidado de alertas' })
+  @Get('alertas/summary')
+  getAlertSummary() {
+    return this.service.getAlertasSummary();
+  }
+  @ApiTags('Alertas')
   @ApiOperation({ summary: 'Recalcular alertas del sistema' })
   @Post('alertas/recalcular')
   recalculate() {
-    return this.service.triggerAlertRecalculation();
+    return this.service.recalculateAlertasNow();
   }
 
   @ApiTags('Componentes')

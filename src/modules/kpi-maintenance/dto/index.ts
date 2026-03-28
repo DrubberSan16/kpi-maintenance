@@ -537,6 +537,18 @@ export class AlertaQueryDto {
   @IsOptional()
   @IsString()
   estado?: string;
+  @ApiPropertyOptional({ description: 'Nivel de la alerta' })
+  @IsOptional()
+  @IsString()
+  nivel?: string;
+  @ApiPropertyOptional({ description: 'Categoria de la alerta' })
+  @IsOptional()
+  @IsString()
+  categoria?: string;
+  @ApiPropertyOptional({ description: 'Origen de la alerta' })
+  @IsOptional()
+  @IsString()
+  origen?: string;
   @ApiPropertyOptional({ description: 'Tipo de alerta' })
   @IsOptional()
   @IsString()
@@ -545,6 +557,10 @@ export class AlertaQueryDto {
   @IsOptional()
   @IsUUID()
   equipo_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la OT vinculada', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  work_order_id?: string;
 }
 
 export class WorkOrderQueryDto {

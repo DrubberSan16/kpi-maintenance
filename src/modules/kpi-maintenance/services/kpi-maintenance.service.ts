@@ -114,6 +114,35 @@ import {
   WorkOrderQueryDto,
 } from '../dto';
 
+type AlertLevel = 'INFO' | 'WARNING' | 'CRITICAL';
+type AlertCategory =
+  | 'MANTENIMIENTO'
+  | 'OPERACION'
+  | 'LUBRICANTE'
+  | 'COMBUSTIBLE'
+  | 'INVENTARIO'
+  | 'DATOS';
+type AlertOrigin =
+  | 'SYSTEM'
+  | 'PROGRAMACION'
+  | 'REPORTE_DIARIO'
+  | 'ANALISIS_LUBRICANTE'
+  | 'COMBUSTIBLE'
+  | 'INVENTARIO'
+  | 'BITACORA';
+
+type AlertCandidate = {
+  equipo_id?: string | null;
+  tipo_alerta: string;
+  categoria: AlertCategory;
+  nivel: AlertLevel;
+  origen: AlertOrigin;
+  referencia_tipo?: string | null;
+  referencia?: string | null;
+  detalle: string;
+  payload_json: Record<string, unknown>;
+};
+
 @Injectable()
 export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KpiMaintenanceService.name);
@@ -385,8 +414,87 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async recalculateAlertasNow(source = 'manual') {
+    if (this.recalculationRunning) {
+      return this.wrap(
+        { accepted: false, source },
+        'Recalculo de alertas ya se encuentra en ejecución',
+      );
+    }
+
+    this.recalculationRunning = true;
+    try {
+      return await this.recalculateAlertas(source);
+    } finally {
+      this.recalculationRunning = false;
+    }
+  }
+
   private wrap(data: unknown, message = 'OK', meta?: unknown) {
     return { data, meta, message };
+  }
+
+  private normalizeAlertLevel(value: unknown): AlertLevel {
+    const raw = String(value || '').trim().toUpperCase();
+    if (
+      ['CRITICAL', 'CRITICA', 'CRITICO', 'ALTO', 'HIGH', 'ROJO'].includes(raw)
+    ) {
+      return 'CRITICAL';
+    }
+    if (
+      ['WARNING', 'WARN', 'ALERTA', 'MEDIO', 'MEDIA', 'AMARILLO'].includes(raw)
+    ) {
+      return 'WARNING';
+    }
+    return 'INFO';
+  }
+
+  private normalizeAlertState(value: unknown) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (['CERRADA', 'CLOSED'].includes(raw)) return 'CERRADA';
+    if (['RESUELTA', 'RESOLVED'].includes(raw)) return 'RESUELTA';
+    if (
+      ['EN_PROCESO', 'EN PROCESO', 'IN_PROGRESS', 'IN PROGRESS'].includes(raw)
+    ) {
+      return 'EN_PROCESO';
+    }
+    return 'ABIERTA';
+  }
+
+  private alertStateRank(value: unknown) {
+    const state = this.normalizeAlertState(value);
+    if (state === 'ABIERTA') return 0;
+    if (state === 'EN_PROCESO') return 1;
+    if (state === 'RESUELTA') return 2;
+    return 3;
+  }
+
+  private alertLevelRank(value: unknown) {
+    const level = this.normalizeAlertLevel(value);
+    if (level === 'CRITICAL') return 0;
+    if (level === 'WARNING') return 1;
+    return 2;
+  }
+
+  private buildAlertIdentity(input: {
+    equipo_id?: string | null;
+    tipo_alerta: string;
+    referencia?: string | null;
+    origen?: string | null;
+  }) {
+    return [
+      String(input.origen || 'SYSTEM').trim().toUpperCase(),
+      String(input.equipo_id || 'GLOBAL').trim() || 'GLOBAL',
+      String(input.tipo_alerta || '').trim().toUpperCase(),
+      String(input.referencia || '').trim() || 'SIN_REFERENCIA',
+    ].join('::');
+  }
+
+  private maxAlertLevel(...values: unknown[]) {
+    const levels = values.map((value) => this.normalizeAlertLevel(value));
+    if (levels.includes('CRITICAL')) return 'CRITICAL' as AlertLevel;
+    if (levels.includes('WARNING')) return 'WARNING' as AlertLevel;
+    return 'INFO' as AlertLevel;
   }
 
 
@@ -884,6 +992,705 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private pickLatestRowsByKey<T>(
+    rows: T[],
+    resolveKey: (row: T) => string,
+    resolveTimestamp: (row: T) => number,
+  ) {
+    const latest = new Map<string, T>();
+    for (const row of rows) {
+      const key = resolveKey(row);
+      if (!key) continue;
+      const current = latest.get(key);
+      if (!current || resolveTimestamp(row) >= resolveTimestamp(current)) {
+        latest.set(key, row);
+      }
+    }
+    return [...latest.values()];
+  }
+
+  private async buildProgramacionAlertCandidates(): Promise<AlertCandidate[]> {
+    const rows = await this.programacionRepo.find({
+      where: { is_deleted: false, activo: true },
+    });
+    const programaciones = await Promise.all(
+      rows.map((row) =>
+        this.recalculateProgramacionFields(row, { persist: false }),
+      ),
+    );
+
+    return programaciones.flatMap((row: any) => {
+      const estado = String(row.estado_programacion || '').toUpperCase();
+      if (!['VENCIDA', 'PROXIMA'].includes(estado)) return [];
+
+      const hoursRemaining =
+        row.horas_restantes == null ? null : this.toNumeric(row.horas_restantes);
+      const daysRemaining =
+        row.dias_restantes == null ? null : this.toNumeric(row.dias_restantes);
+      const equipoLabel =
+        row.equipo_codigo || row.equipo_nombre || row.equipo_id || 'Equipo';
+      const planLabel =
+        row.procedimiento_nombre ||
+        row.plan_nombre ||
+        row.plan_codigo ||
+        row.plan_id ||
+        'Plan';
+
+      const timing: string[] = [];
+      if (hoursRemaining != null) {
+        timing.push(
+          estado === 'VENCIDA'
+            ? `atrasada ${Math.abs(hoursRemaining).toFixed(2)} h`
+            : `vence en ${hoursRemaining.toFixed(2)} h`,
+        );
+      }
+      if (daysRemaining != null) {
+        timing.push(
+          estado === 'VENCIDA'
+            ? `atrasada ${Math.abs(daysRemaining)} d`
+            : `vence en ${daysRemaining} d`,
+        );
+      }
+
+      return [
+        {
+          equipo_id: row.equipo_id ?? null,
+          tipo_alerta:
+            estado === 'VENCIDA'
+              ? 'MANTENIMIENTO_VENCIDO'
+              : 'MANTENIMIENTO_PROXIMO',
+          categoria: 'MANTENIMIENTO' as AlertCategory,
+          nivel: estado === 'VENCIDA' ? 'CRITICAL' : 'WARNING',
+          origen: 'PROGRAMACION' as AlertOrigin,
+          referencia_tipo: 'PROGRAMACION',
+          referencia: `PROGRAMACION:${row.id}`,
+          detalle: `${equipoLabel} · ${planLabel}${
+            timing.length ? ` · ${timing.join(' / ')}` : ''
+          }`,
+          payload_json: {
+            programacion_id: row.id,
+            plan_id: row.plan_id,
+            plan_codigo: row.plan_codigo ?? null,
+            plan_nombre: row.plan_nombre ?? null,
+            procedimiento_id: row.procedimiento_id ?? null,
+            procedimiento_codigo: row.procedimiento_codigo ?? null,
+            procedimiento_nombre: row.procedimiento_nombre ?? null,
+            equipo_id: row.equipo_id ?? null,
+            equipo_codigo: row.equipo_codigo ?? null,
+            equipo_nombre: row.equipo_nombre ?? null,
+            estado_programacion: estado,
+            horometro_actual: row.horometro_actual ?? null,
+            horas_restantes: hoursRemaining,
+            dias_restantes: daysRemaining,
+            proxima_horas: row.proxima_horas ?? null,
+            proxima_fecha: row.proxima_fecha ?? null,
+          },
+        },
+      ];
+    });
+  }
+
+  private async buildReporteDiarioAlertCandidates(): Promise<AlertCandidate[]> {
+    const unidades = await this.reporteDiarioUnidadRepo.find({
+      where: { is_deleted: false },
+      order: { created_at: 'DESC', id: 'DESC' },
+    });
+    const latestUnits = this.pickLatestRowsByKey(
+      unidades,
+      (row) => String(row.equipo_id || row.equipo_codigo || row.id || '').trim(),
+      (row) =>
+        new Date(row.updated_at ?? row.created_at ?? 0).getTime() ||
+        new Date(row.created_at ?? 0).getTime(),
+    );
+
+    const reportIds = [
+      ...new Set(latestUnits.map((row) => row.reporte_id).filter(Boolean)),
+    ] as string[];
+    const reportes = reportIds.length
+      ? await this.reporteDiarioRepo.find({
+          where: { id: In(reportIds), is_deleted: false },
+        })
+      : [];
+    const reportMap = new Map(reportes.map((row) => [row.id, row]));
+
+    return latestUnits.flatMap((row) => {
+      const hoursRemaining =
+        row.horas_faltantes == null ? null : this.toNumeric(row.horas_faltantes);
+      const daysRemaining =
+        row.dias_faltantes == null ? null : this.toNumeric(row.dias_faltantes);
+      const dueNow =
+        (hoursRemaining != null && hoursRemaining <= 0) ||
+        (daysRemaining != null && daysRemaining <= 0);
+      const dueSoon =
+        !dueNow &&
+        ((hoursRemaining != null && hoursRemaining <= 50) ||
+          (daysRemaining != null && daysRemaining <= 3));
+
+      if (!dueNow && !dueSoon) return [];
+
+      const reporte = row.reporte_id ? reportMap.get(row.reporte_id) : null;
+      const equipoLabel = row.equipo_codigo || row.equipo_id || 'Unidad';
+      const mpgLabel = row.proximo_mpg ? ` · ${row.proximo_mpg}` : '';
+      const timing: string[] = [];
+      if (hoursRemaining != null) {
+        timing.push(
+          dueNow
+            ? `horas faltantes ${hoursRemaining.toFixed(2)}`
+            : `faltan ${hoursRemaining.toFixed(2)} h`,
+        );
+      }
+      if (daysRemaining != null) {
+        timing.push(
+          dueNow
+            ? `días faltantes ${daysRemaining}`
+            : `faltan ${daysRemaining} d`,
+        );
+      }
+
+      return [
+        {
+          equipo_id: row.equipo_id ?? null,
+          tipo_alerta: dueNow
+            ? 'REPORTE_DIARIO_VENCIDO'
+            : 'REPORTE_DIARIO_PROXIMO',
+          categoria: 'OPERACION' as AlertCategory,
+          nivel: dueNow ? 'CRITICAL' : 'WARNING',
+          origen: 'REPORTE_DIARIO' as AlertOrigin,
+          referencia_tipo: 'REPORTE_DIARIO',
+          referencia: `REPORTE_UNIDAD:${row.id}`,
+          detalle: `${equipoLabel}${mpgLabel}${
+            timing.length ? ` · ${timing.join(' / ')}` : ''
+          }`,
+          payload_json: {
+            reporte_id: row.reporte_id ?? null,
+            reporte_codigo: reporte?.codigo ?? null,
+            fecha_reporte: reporte?.fecha_reporte ?? null,
+            locacion: reporte?.locacion ?? null,
+            turno: reporte?.turno ?? null,
+            unidad_id: row.id,
+            equipo_id: row.equipo_id ?? null,
+            equipo_codigo: row.equipo_codigo,
+            proximo_mpg: row.proximo_mpg ?? null,
+            horometro_actual: row.horometro_actual ?? null,
+            horas_faltantes: hoursRemaining,
+            dias_faltantes: daysRemaining,
+            fecha_proxima: row.fecha_proxima ?? null,
+            nota: row.nota ?? null,
+          },
+        },
+      ];
+    });
+  }
+
+  private async buildLubricanteAlertCandidates(): Promise<AlertCandidate[]> {
+    const analisis = await this.analisisLubricanteRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_reporte: 'DESC', created_at: 'DESC' },
+    });
+    const latestRows = this.pickLatestRowsByKey(
+      analisis,
+      (row) =>
+        [
+          row.equipo_id || row.equipo_codigo || row.codigo,
+          row.compartimento_principal || 'GENERAL',
+        ]
+          .map((value) => String(value || '').trim())
+          .join('::'),
+      (row) =>
+        new Date(row.fecha_reporte || row.created_at || 0).getTime() ||
+        new Date(row.created_at || 0).getTime(),
+    );
+
+    const analisisIds = latestRows.map((row) => row.id);
+    const detalles = analisisIds.length
+      ? await this.analisisLubricanteDetRepo.find({
+          where: { analisis_id: In(analisisIds), is_deleted: false },
+          order: { orden: 'ASC', created_at: 'ASC' },
+        })
+      : [];
+    const detailsMap = new Map<string, AnalisisLubricanteDetalleEntity[]>();
+    for (const detalle of detalles) {
+      const group = detailsMap.get(detalle.analisis_id) ?? [];
+      group.push(detalle);
+      detailsMap.set(detalle.analisis_id, group);
+    }
+
+    return latestRows.flatMap((row) => {
+      const rowDetails = detailsMap.get(row.id) ?? [];
+      const abnormalDetails = rowDetails.filter(
+        (detalle) => this.normalizeAlertLevel(detalle.nivel_alerta) !== 'INFO',
+      );
+      const level = this.maxAlertLevel(
+        row.estado_diagnostico,
+        ...abnormalDetails.map((detalle) => detalle.nivel_alerta),
+      );
+      if (level === 'INFO') return [];
+
+      const highlights = abnormalDetails
+        .slice(0, 3)
+        .map((detalle) => {
+          const result =
+            detalle.resultado_texto ??
+            (detalle.resultado_numerico != null
+              ? `${detalle.resultado_numerico}${detalle.unidad ? ` ${detalle.unidad}` : ''}`
+              : detalle.nivel_alerta);
+          return `${detalle.parametro}: ${result}`;
+        })
+        .join(', ');
+
+      return [
+        {
+          equipo_id: row.equipo_id ?? null,
+          tipo_alerta:
+            level === 'CRITICAL' ? 'LUBRICANTE_CRITICO' : 'LUBRICANTE_ALERTA',
+          categoria: 'LUBRICANTE' as AlertCategory,
+          nivel: level,
+          origen: 'ANALISIS_LUBRICANTE' as AlertOrigin,
+          referencia_tipo: 'ANALISIS_LUBRICANTE',
+          referencia: `ANALISIS:${row.id}`,
+          detalle: `${row.equipo_codigo || row.equipo_nombre || row.codigo} · ${
+            row.compartimento_principal || 'Compartimento'
+          }${
+            highlights
+              ? ` · ${highlights}`
+              : row.diagnostico
+                ? ` · ${row.diagnostico}`
+                : ''
+          }`,
+          payload_json: {
+            analisis_id: row.id,
+            codigo: row.codigo,
+            equipo_id: row.equipo_id ?? null,
+            equipo_codigo: row.equipo_codigo ?? null,
+            equipo_nombre: row.equipo_nombre ?? null,
+            compartimento_principal: row.compartimento_principal ?? null,
+            fecha_muestra: row.fecha_muestra ?? null,
+            fecha_reporte: row.fecha_reporte ?? null,
+            estado_diagnostico: row.estado_diagnostico,
+            diagnostico: row.diagnostico ?? null,
+            documento_origen: row.documento_origen ?? null,
+            parametros_alerta: abnormalDetails.map((detalle) => ({
+              parametro: detalle.parametro,
+              nivel_alerta: detalle.nivel_alerta,
+              resultado_numerico: detalle.resultado_numerico ?? null,
+              resultado_texto: detalle.resultado_texto ?? null,
+              observacion: detalle.observacion ?? null,
+            })),
+          },
+        },
+      ];
+    });
+  }
+
+  private async buildFuelAlertCandidates(): Promise<AlertCandidate[]> {
+    const rows = await this.reporteCombustibleRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_lectura: 'DESC', created_at: 'DESC' },
+    });
+    const latestRows = this.pickLatestRowsByKey(
+      rows,
+      (row) => String(row.tanque || row.id || '').trim(),
+      (row) =>
+        new Date(row.fecha_lectura || row.updated_at || row.created_at || 0).getTime(),
+    );
+
+    const reportIds = [
+      ...new Set(latestRows.map((row) => row.reporte_id).filter(Boolean)),
+    ] as string[];
+    const reportes = reportIds.length
+      ? await this.reporteDiarioRepo.find({
+          where: { id: In(reportIds), is_deleted: false },
+        })
+      : [];
+    const reportMap = new Map(reportes.map((row) => [row.id, row]));
+
+    return latestRows.flatMap((row) => {
+      const stockActual =
+        row.stock_actual != null
+          ? this.toNumeric(row.stock_actual)
+          : row.galones != null
+            ? this.toNumeric(row.galones)
+            : null;
+      const stockMinimo =
+        row.stock_minimo == null ? null : this.toNumeric(row.stock_minimo);
+      if (stockActual == null || stockMinimo == null || stockMinimo <= 0) return [];
+
+      const isCritical = stockActual <= stockMinimo;
+      const isWarning = !isCritical && stockActual <= stockMinimo * 1.1;
+      if (!isCritical && !isWarning) return [];
+
+      const reporte = row.reporte_id ? reportMap.get(row.reporte_id) : null;
+      return [
+        {
+          equipo_id: null,
+          tipo_alerta: isCritical
+            ? 'COMBUSTIBLE_BAJO'
+            : 'COMBUSTIBLE_PROXIMO_MINIMO',
+          categoria: 'COMBUSTIBLE' as AlertCategory,
+          nivel: isCritical ? 'CRITICAL' : 'WARNING',
+          origen: 'COMBUSTIBLE' as AlertOrigin,
+          referencia_tipo: 'COMBUSTIBLE',
+          referencia: `COMBUSTIBLE:${row.id}`,
+          detalle: `Tanque ${row.tanque} · stock ${stockActual.toFixed(
+            2,
+          )} gal · mínimo ${stockMinimo.toFixed(2)} gal`,
+          payload_json: {
+            combustible_id: row.id,
+            reporte_id: row.reporte_id ?? null,
+            reporte_codigo: reporte?.codigo ?? null,
+            fecha_reporte: reporte?.fecha_reporte ?? null,
+            tanque: row.tanque,
+            fecha_lectura: row.fecha_lectura,
+            stock_actual: stockActual,
+            stock_minimo: stockMinimo,
+            stock_maximo:
+              row.stock_maximo == null ? null : this.toNumeric(row.stock_maximo),
+            consumo_galones:
+              row.consumo_galones == null
+                ? null
+                : this.toNumeric(row.consumo_galones),
+            observacion: row.observacion ?? null,
+          },
+        },
+      ];
+    });
+  }
+
+  private async buildInventoryAlertCandidates(): Promise<AlertCandidate[]> {
+    const rows = await this.stockRepo.find();
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      rows.map((row) => row.producto_id),
+      rows.map((row) => row.bodega_id),
+    );
+
+    return rows.flatMap((row) => {
+      const stockActual = this.toNumeric(row.stock_actual);
+      const stockMinimo = this.toNumeric(row.stock_min_bodega);
+      if (stockMinimo <= 0 || stockActual > stockMinimo) return [];
+
+      const producto = productMap.get(row.producto_id);
+      const bodega = warehouseMap.get(row.bodega_id);
+      const productoLabel = this.buildProductoLabel(producto) ?? row.producto_id;
+      const bodegaLabel = this.buildBodegaLabel(bodega) ?? row.bodega_id;
+      const isCritical = stockActual <= 0;
+
+      return [
+        {
+          equipo_id: null,
+          tipo_alerta: isCritical ? 'SIN_STOCK' : 'STOCK_BAJO_BODEGA',
+          categoria: 'INVENTARIO' as AlertCategory,
+          nivel: isCritical ? 'CRITICAL' : 'WARNING',
+          origen: 'INVENTARIO' as AlertOrigin,
+          referencia_tipo: 'STOCK_BODEGA',
+          referencia: `STOCK_BODEGA:${row.id}`,
+          detalle: `${productoLabel} · ${bodegaLabel} · stock ${stockActual.toFixed(
+            2,
+          )} / mínimo ${stockMinimo.toFixed(2)}`,
+          payload_json: {
+            stock_id: row.id,
+            producto_id: row.producto_id,
+            producto_codigo: producto?.codigo ?? null,
+            producto_nombre: producto?.nombre ?? null,
+            producto_label: productoLabel,
+            bodega_id: row.bodega_id,
+            bodega_codigo: bodega?.codigo ?? null,
+            bodega_nombre: bodega?.nombre ?? null,
+            bodega_label: bodegaLabel,
+            stock_actual: stockActual,
+            stock_min_bodega: stockMinimo,
+            stock_max_bodega: this.toNumeric(row.stock_max_bodega),
+            costo_promedio_bodega: this.toNumeric(row.costo_promedio_bodega),
+          },
+        },
+      ];
+    });
+  }
+
+  private async buildAlertCandidates() {
+    const [programaciones, reportesDiarios, lubricantes, combustibles, inventario] =
+      await Promise.all([
+        this.buildProgramacionAlertCandidates(),
+        this.buildReporteDiarioAlertCandidates(),
+        this.buildLubricanteAlertCandidates(),
+        this.buildFuelAlertCandidates(),
+        this.buildInventoryAlertCandidates(),
+      ]);
+
+    return [
+      ...programaciones,
+      ...reportesDiarios,
+      ...lubricantes,
+      ...combustibles,
+      ...inventario,
+    ];
+  }
+
+  private async syncAlertCandidates(candidates: AlertCandidate[]) {
+    const managedOrigins: AlertOrigin[] = [
+      'SYSTEM',
+      'PROGRAMACION',
+      'REPORTE_DIARIO',
+      'ANALISIS_LUBRICANTE',
+      'COMBUSTIBLE',
+      'INVENTARIO',
+    ];
+    const activeRows = await this.alertaRepo.find({
+      where: {
+        is_deleted: false,
+        estado: In(['ABIERTA', 'EN_PROCESO']),
+        origen: In(managedOrigins),
+      },
+      order: { fecha_generada: 'DESC', id: 'DESC' },
+    });
+
+    const activeMap = new Map<string, AlertaMantenimientoEntity>();
+    const duplicateRows: AlertaMantenimientoEntity[] = [];
+    for (const row of activeRows) {
+      const key = this.buildAlertIdentity(row);
+      if (!activeMap.has(key)) {
+        activeMap.set(key, row);
+      } else {
+        duplicateRows.push(row);
+      }
+    }
+
+    const now = new Date();
+    const seen = new Set<string>();
+    let created = 0;
+    let updated = 0;
+    let resolved = 0;
+
+    for (const candidate of candidates) {
+      const key = this.buildAlertIdentity(candidate);
+      seen.add(key);
+      const existing = activeMap.get(key);
+      if (existing) {
+        const nextDetalle = String(candidate.detalle || '').trim() || null;
+        const nextPayload = candidate.payload_json ?? {};
+        const changed =
+          existing.categoria !== candidate.categoria ||
+          existing.nivel !== candidate.nivel ||
+          existing.origen !== candidate.origen ||
+          (existing.referencia_tipo ?? null) !==
+            (candidate.referencia_tipo ?? null) ||
+          (existing.referencia ?? null) !== (candidate.referencia ?? null) ||
+          (existing.detalle ?? null) !== nextDetalle ||
+          JSON.stringify(existing.payload_json ?? {}) !==
+            JSON.stringify(nextPayload);
+
+        existing.categoria = candidate.categoria;
+        existing.nivel = candidate.nivel;
+        existing.origen = candidate.origen;
+        existing.referencia_tipo = candidate.referencia_tipo ?? null;
+        existing.referencia = candidate.referencia ?? null;
+        existing.detalle = nextDetalle;
+        existing.payload_json = nextPayload;
+        existing.ultima_evaluacion_at = now;
+        existing.resolved_at = null;
+        if (changed) {
+          await this.alertaRepo.save(existing);
+          updated += 1;
+        }
+        continue;
+      }
+
+      await this.alertaRepo.save(
+        this.alertaRepo.create({
+          equipo_id: candidate.equipo_id ?? null,
+          tipo_alerta: candidate.tipo_alerta,
+          categoria: candidate.categoria,
+          nivel: candidate.nivel,
+          origen: candidate.origen,
+          referencia_tipo: candidate.referencia_tipo ?? null,
+          referencia: candidate.referencia ?? null,
+          detalle: candidate.detalle,
+          payload_json: candidate.payload_json ?? {},
+          fecha_generada: now,
+          ultima_evaluacion_at: now,
+          resolved_at: null,
+          estado: 'ABIERTA',
+        }),
+      );
+      created += 1;
+    }
+
+    const staleRows = [...activeMap.entries()]
+      .filter(([key]) => !seen.has(key))
+      .map(([, row]) => row)
+      .concat(duplicateRows)
+      .filter((row) => !row.work_order_id);
+
+    for (const row of staleRows) {
+      row.estado = 'RESUELTA';
+      row.resolved_at = now;
+      row.ultima_evaluacion_at = now;
+      await this.alertaRepo.save(row);
+      resolved += 1;
+    }
+
+    return {
+      total: candidates.length,
+      created,
+      updated,
+      resolved,
+      open: candidates.length,
+    };
+  }
+
+  private async enrichAlertRows(rows: AlertaMantenimientoEntity[]) {
+    const equipoIds = [...new Set(rows.map((row) => row.equipo_id).filter(Boolean))] as string[];
+    const workOrderIds = [
+      ...new Set(rows.map((row) => row.work_order_id).filter(Boolean)),
+    ] as string[];
+
+    const [equipos, workOrders] = await Promise.all([
+      equipoIds.length
+        ? this.equipoRepo.find({ where: { id: In(equipoIds), is_deleted: false } })
+        : Promise.resolve([] as EquipoEntity[]),
+      workOrderIds.length
+        ? this.woRepo.find({ where: { id: In(workOrderIds), is_deleted: false } })
+        : Promise.resolve([] as WorkOrderEntity[]),
+    ]);
+
+    const equipoMap = new Map(equipos.map((row) => [row.id, row]));
+    const workOrderMap = new Map(workOrders.map((row) => [row.id, row]));
+
+    return [...rows]
+      .map((row) => {
+        const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+        const equipo = row.equipo_id ? equipoMap.get(row.equipo_id) : null;
+        const workOrder = row.work_order_id
+          ? workOrderMap.get(row.work_order_id)
+          : null;
+        const equipoCodigoFallback =
+          String(payload.equipo_codigo || payload.equipo_id || '').trim() || null;
+        const equipoNombreFallback =
+          String(payload.equipo_nombre || payload.equipo_codigo || '').trim() ||
+          null;
+        const equipoCodigo = equipo?.codigo ?? equipoCodigoFallback;
+        const equipoNombre = equipo?.nombre ?? equipoNombreFallback;
+        const equipoLabel = [equipoCodigo, equipoNombre]
+          .filter(Boolean)
+          .join(' - ');
+        const workOrderLabel = workOrder
+          ? `${workOrder.code} · ${workOrder.title}`
+          : null;
+
+        let referenciaResuelta =
+          String(row.referencia || '').trim() || String(row.referencia_tipo || '').trim() || 'Sin referencia';
+        if (row.referencia_tipo === 'PROGRAMACION') {
+          referenciaResuelta =
+            String(payload.procedimiento_nombre || payload.plan_nombre || payload.plan_codigo || referenciaResuelta);
+        } else if (row.referencia_tipo === 'REPORTE_DIARIO') {
+          referenciaResuelta =
+            String(payload.reporte_codigo || payload.fecha_reporte || referenciaResuelta);
+        } else if (row.referencia_tipo === 'ANALISIS_LUBRICANTE') {
+          referenciaResuelta = String(payload.codigo || referenciaResuelta);
+        } else if (row.referencia_tipo === 'COMBUSTIBLE') {
+          referenciaResuelta = `Tanque ${String(payload.tanque || referenciaResuelta)}`;
+        } else if (row.referencia_tipo === 'STOCK_BODEGA') {
+          referenciaResuelta = [
+            String(payload.producto_label || '').trim(),
+            String(payload.bodega_label || '').trim(),
+          ]
+            .filter(Boolean)
+            .join(' · ') || referenciaResuelta;
+        }
+
+        let title = `${row.tipo_alerta}${equipoLabel ? ` · ${equipoLabel}` : ''}`;
+        let subtitle = String(row.detalle || '').trim();
+        let accionSugerida = 'Revisar la condición y programar la acción correctiva.';
+
+        if (row.origen === 'PROGRAMACION') {
+          const planLabel =
+            String(
+              payload.procedimiento_nombre ||
+                payload.plan_nombre ||
+                payload.plan_codigo ||
+                'Mantenimiento',
+            ).trim();
+          title = `${planLabel}${equipoLabel ? ` · ${equipoLabel}` : ''}`;
+          accionSugerida =
+            row.tipo_alerta === 'MANTENIMIENTO_VENCIDO'
+              ? 'Generar o priorizar la OT del mantenimiento vencido.'
+              : 'Preparar recursos y abrir la OT preventiva antes del vencimiento.';
+        } else if (row.origen === 'REPORTE_DIARIO') {
+          const mpg = String(payload.proximo_mpg || '').trim();
+          title = `${mpg || 'Seguimiento MPG'}${
+            equipoLabel ? ` · ${equipoLabel}` : ''
+          }`;
+          accionSugerida =
+            row.tipo_alerta === 'REPORTE_DIARIO_VENCIDO'
+              ? 'Validar el reporte diario y abrir la intervención correspondiente.'
+              : 'Coordinar la atención antes de que el equipo quede vencido.';
+        } else if (row.origen === 'ANALISIS_LUBRICANTE') {
+          const compartimento = String(
+            payload.compartimento_principal || 'Compartimento',
+          ).trim();
+          title = `Análisis de lubricante · ${compartimento}${
+            equipoLabel ? ` · ${equipoLabel}` : ''
+          }`;
+          accionSugerida =
+            'Revisar diagnóstico, tendencias y tomar muestra o intervención correctiva.';
+        } else if (row.origen === 'COMBUSTIBLE') {
+          title = `Combustible · ${String(payload.tanque || 'Tanque').trim()}`;
+          accionSugerida =
+            'Coordinar abastecimiento y confirmar que el tanque regrese sobre el mínimo.';
+        } else if (row.origen === 'INVENTARIO') {
+          title = [
+            'Inventario',
+            String(payload.producto_label || '').trim(),
+            String(payload.bodega_label || '').trim(),
+          ]
+            .filter(Boolean)
+            .join(' · ');
+          accionSugerida =
+            row.tipo_alerta === 'SIN_STOCK'
+              ? 'Gestionar reposición inmediata o traslado entre bodegas.'
+              : 'Revisar reabastecimiento antes de afectar mantenimiento u operación.';
+        } else if (row.origen === 'BITACORA') {
+          title = `Anomalía de datos${equipoLabel ? ` · ${equipoLabel}` : ''}`;
+          accionSugerida =
+            'Validar la bitácora y corregir la lectura antes de continuar.';
+        }
+
+        if (!subtitle) {
+          subtitle = title;
+        }
+        if (workOrderLabel) {
+          subtitle = `${subtitle} · OT ${workOrderLabel}`;
+        }
+
+        return {
+          ...row,
+          estado: this.normalizeAlertState(row.estado),
+          nivel: this.normalizeAlertLevel(row.nivel),
+          equipo_codigo: equipoCodigo,
+          equipo_nombre: equipoNombre,
+          equipo_label: equipoLabel || null,
+          work_order_code: workOrder?.code ?? null,
+          work_order_title: workOrderLabel,
+          work_order_status: workOrder
+            ? this.normalizeWorkflowStatus(workOrder.status_workflow)
+            : null,
+          referencia_resuelta: referenciaResuelta,
+          title,
+          subtitle,
+          accion_sugerida: accionSugerida,
+        };
+      })
+      .sort((a, b) => {
+        const stateDiff = this.alertStateRank(a.estado) - this.alertStateRank(b.estado);
+        if (stateDiff !== 0) return stateDiff;
+        const levelDiff = this.alertLevelRank(a.nivel) - this.alertLevelRank(b.nivel);
+        if (levelDiff !== 0) return levelDiff;
+        return (
+          new Date(b.fecha_generada || 0).getTime() -
+          new Date(a.fecha_generada || 0).getTime()
+        );
+      });
+  }
+
   private async appendWorkOrderHistory(
     workOrderId: string,
     toStatus: string,
@@ -1261,6 +2068,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         this.alertaRepo.create({
           equipo_id: equipoId,
           tipo_alerta: 'ANOMALIA_HOROMETRO',
+          categoria: 'DATOS',
+          nivel: 'CRITICAL',
+          origen: 'BITACORA',
+          referencia_tipo: 'BITACORA',
+          referencia: `BITACORA:${equipoId}:${dto.fecha}`,
+          payload_json: {
+            equipo_id: equipoId,
+            fecha: dto.fecha,
+            nuevo_horometro: this.toNumeric(dto.horometro),
+            ultimo_horometro: this.toNumeric(last.horometro),
+          },
           detalle: `Horómetro ${dto.horometro} menor al último ${last.horometro}`,
         }),
       );
@@ -2040,6 +2858,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         estado: saved.estado_diagnostico,
       },
     });
+    await this.triggerAlertRecalculation('analisis-lubricante-create');
     return this.wrap(payload, 'Análisis de lubricante creado');
   }
 
@@ -2123,6 +2942,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         estado: saved.estado_diagnostico,
       },
     });
+    await this.triggerAlertRecalculation('analisis-lubricante-update');
     return this.wrap(payload, 'Análisis de lubricante actualizado');
   }
 
@@ -2137,6 +2957,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       analisis_id: row.id,
       is_deleted: false,
     });
+    await this.triggerAlertRecalculation('analisis-lubricante-delete');
     return this.wrap(true, 'Análisis de lubricante eliminado');
   }
 
@@ -2441,6 +3262,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         componentes: payload.componentes.length,
       },
     });
+    await this.triggerAlertRecalculation('reporte-diario-create');
     return this.wrap(payload, 'Reporte de operación diaria creado');
   }
 
@@ -2581,6 +3403,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         componentes: payload.componentes.length,
       },
     });
+    await this.triggerAlertRecalculation('reporte-diario-update');
     return this.wrap(payload, 'Reporte de operación diaria actualizado');
   }
 
@@ -2605,6 +3428,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         is_deleted: false,
       }),
     ]);
+    await this.triggerAlertRecalculation('reporte-diario-delete');
     return this.wrap(true, 'Reporte de operación diaria eliminado');
   }
 
@@ -2747,42 +3571,83 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const where: FindOptionsWhere<AlertaMantenimientoEntity> = {
       is_deleted: false,
     };
-    if (q.estado) where.estado = q.estado;
+    if (q.estado) where.estado = this.normalizeAlertState(q.estado);
+    if (q.nivel) where.nivel = this.normalizeAlertLevel(q.nivel);
+    if (q.categoria) where.categoria = String(q.categoria).trim().toUpperCase();
+    if (q.origen) where.origen = String(q.origen).trim().toUpperCase();
     if (q.tipo_alerta) where.tipo_alerta = q.tipo_alerta;
     if (q.equipo_id) where.equipo_id = q.equipo_id;
-    return this.wrap(await this.alertaRepo.find({ where }), 'Alertas listadas');
+    if (q.work_order_id) where.work_order_id = q.work_order_id;
+    const rows = await this.alertaRepo.find({
+      where,
+      order: { fecha_generada: 'DESC', id: 'DESC' },
+    });
+    return this.wrap(await this.enrichAlertRows(rows), 'Alertas listadas');
   }
 
-  async recalculateAlertas() {
-    let upserts = 0;
-    let skipped = 0;
-    let offset = 0;
-    let omittedErrors = 0;
-    const errors: string[] = [];
+  async getAlertasSummary() {
+    const rows = await this.alertaRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_generada: 'DESC', id: 'DESC' },
+    });
 
-    while (true) {
-      const programaciones = await this.programacionRepo.find({
-        where: { is_deleted: false, activo: true },
-        skip: offset,
-        take: this.RECALCULATION_BATCH_SIZE,
-      });
-      if (!programaciones.length) break;
+    const totals = {
+      total: rows.length,
+      abiertas: 0,
+      en_proceso: 0,
+      resueltas: 0,
+      cerradas: 0,
+      critical: 0,
+      warning: 0,
+      info: 0,
+    };
+    const byCategory: Record<string, number> = {};
+    const byOrigin: Record<string, number> = {};
 
-      const batchStats =
-        await this.processProgramacionesInWorkers(programaciones);
-      upserts += batchStats.upserts;
-      skipped += batchStats.skipped;
+    for (const row of rows) {
+      const estado = this.normalizeAlertState(row.estado);
+      const nivel = this.normalizeAlertLevel(row.nivel);
+      const categoria = String(row.categoria || 'SIN_CATEGORIA')
+        .trim()
+        .toUpperCase();
+      const origen = String(row.origen || 'SYSTEM').trim().toUpperCase();
 
-      for (const error of batchStats.errors) {
-        if (errors.length < this.MAX_STORED_ERRORS) errors.push(error);
-        else omittedErrors++;
-      }
+      if (estado === 'ABIERTA') totals.abiertas += 1;
+      else if (estado === 'EN_PROCESO') totals.en_proceso += 1;
+      else if (estado === 'RESUELTA') totals.resueltas += 1;
+      else if (estado === 'CERRADA') totals.cerradas += 1;
 
-      offset += programaciones.length;
+      if (nivel === 'CRITICAL') totals.critical += 1;
+      else if (nivel === 'WARNING') totals.warning += 1;
+      else totals.info += 1;
+
+      byCategory[categoria] = (byCategory[categoria] ?? 0) + 1;
+      byOrigin[origen] = (byOrigin[origen] ?? 0) + 1;
     }
 
     return this.wrap(
-      { total: upserts, skipped, errors, omitted_errors: omittedErrors },
+      {
+        generated_at: new Date().toISOString(),
+        totals,
+        by_category: Object.entries(byCategory)
+          .map(([categoria, total]) => ({ categoria, total }))
+          .sort((a, b) => b.total - a.total),
+        by_origin: Object.entries(byOrigin)
+          .map(([origen, total]) => ({ origen, total }))
+          .sort((a, b) => b.total - a.total),
+      },
+      'Resumen de alertas generado',
+    );
+  }
+
+  async recalculateAlertas(source = 'manual') {
+    const candidates = await this.buildAlertCandidates();
+    const stats = await this.syncAlertCandidates(candidates);
+    return this.wrap(
+      {
+        source,
+        ...stats,
+      },
       'Alertas recalculadas',
     );
   }

@@ -234,13 +234,25 @@ export class ProgramacionPlanEntity {
 @Entity({ schema: 'kpi_maintenance', name: 'tb_alerta_mantenimiento' })
 export class AlertaMantenimientoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column({ type: 'uuid' }) equipo_id: string;
+  @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
   @Column() tipo_alerta: string;
+  @Column({ default: 'MANTENIMIENTO' }) categoria: string;
+  @Column({ default: 'WARNING' }) nivel: string;
+  @Column({ default: 'SYSTEM' }) origen: string;
+  @Column({ type: 'text', nullable: true }) referencia_tipo?: string | null;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' })
   fecha_generada: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  ultima_evaluacion_at: Date;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  resolved_at?: Date | null;
   @Column({ default: 'ABIERTA' }) estado: string;
   @Column({ type: 'text', nullable: true }) detalle?: string | null;
   @Column({ type: 'text', nullable: true }) referencia?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
   @Column({ type: 'uuid', nullable: true }) work_order_id?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
@@ -636,6 +648,16 @@ export class StockBodegaEntity {
   @Column({ type: 'uuid' }) producto_id: string;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_actual: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_min_bodega: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_max_bodega: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_min_global: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_contenedores: number;
+  @Column('numeric', { precision: 14, scale: 4, default: 0 })
+  costo_promedio_bodega: number;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_reserva_stock' })
