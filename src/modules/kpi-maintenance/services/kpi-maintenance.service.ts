@@ -43,6 +43,7 @@ import {
   KardexEntity,
   LecturaEquipoEntity,
   LocationEntity,
+  MarcaEntity,
   LubricacionPuntoEntity,
   MovimientoInventarioDetEntity,
   MovimientoInventarioEntity,
@@ -495,6 +496,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly equipoComponenteRepo: Repository<EquipoComponenteEntity>,
     @InjectRepository(LocationEntity)
     private readonly locationRepo: Repository<LocationEntity>,
+    @InjectRepository(MarcaEntity)
+    private readonly marcaRepo: Repository<MarcaEntity>,
     @InjectRepository(BitacoraDiariaEntity)
     private readonly bitacoraRepo: Repository<BitacoraDiariaEntity>,
     @InjectRepository(AlertaMantenimientoEntity)
@@ -769,12 +772,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private normalizeAlertLevel(value: unknown): AlertLevel {
     const raw = String(value || '').trim().toUpperCase();
     if (
-      ['CRITICAL', 'CRITICA', 'CRITICO', 'ALTO', 'HIGH', 'ROJO'].includes(raw)
+      [
+        'CRITICAL',
+        'CRITICA',
+        'CRITICO',
+        'ALTO',
+        'HIGH',
+        'ROJO',
+        'ANORMAL',
+      ].includes(raw)
     ) {
       return 'CRITICAL';
     }
     if (
-      ['WARNING', 'WARN', 'ALERTA', 'MEDIO', 'MEDIA', 'AMARILLO'].includes(raw)
+      [
+        'WARNING',
+        'WARN',
+        'ALERTA',
+        'MEDIO',
+        'MEDIA',
+        'AMARILLO',
+        'PRECAUCION',
+      ].includes(raw)
     ) {
       return 'WARNING';
     }
@@ -1798,13 +1817,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private normalizeLubricantDetailLevel(value: unknown) {
-    const raw = String(value ?? '').trim().toUpperCase();
+    const raw = this.normalizeSearchToken(value);
     if (
       ['ALERTA', 'ANORMAL', 'CRITICO', 'CRÍTICO', 'CRITICAL', 'ROJO'].includes(
         raw,
       )
     ) {
-      return 'ALERTA';
+      return 'ANORMAL';
     }
     if (
       [
@@ -1817,13 +1836,106 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'AMARILLO',
       ].includes(raw)
     ) {
-      return 'OBSERVACION';
+      return 'PRECAUCION';
+    }
+    if (['N/D', 'ND', 'NO DISPONIBLE', 'SIN DATO', 'SIN DATOS'].includes(raw)) {
+      return 'N/D';
     }
     return 'NORMAL';
   }
 
   private normalizeLubricantCondition(value: unknown) {
-    return this.normalizeLubricantDetailLevel(value);
+    const raw = this.normalizeSearchToken(value);
+    if (['ANORMAL', 'ALERTA', 'CRITICO', 'CRITICO', 'CRITICAL'].includes(raw)) {
+      return 'ANORMAL';
+    }
+    if (
+      ['PRECAUCION', 'OBSERVACION', 'WARNING', 'WARN'].includes(raw)
+    ) {
+      return 'PRECAUCION';
+    }
+    if (['N/D', 'ND', 'NO DISPONIBLE', 'SIN EVALUACION'].includes(raw)) {
+      return 'N/D';
+    }
+    return 'NORMAL';
+  }
+
+  private lubricantMetricUsesTextResult(
+    definition?: LubricantMetricDefinition | null,
+  ) {
+    return ['HUMEDAD', 'COMBUSTIBLE'].includes(String(definition?.key || ''));
+  }
+
+  private hasLubricantDetailValue(
+    detalle: Partial<AnalisisLubricanteDetalleEntity> | null | undefined,
+  ) {
+    if (!detalle) return false;
+    if (
+      detalle.resultado_numerico != null &&
+      Number.isFinite(Number(detalle.resultado_numerico))
+    ) {
+      return true;
+    }
+    return String(detalle.resultado_texto ?? '').trim() !== '';
+  }
+
+  private buildLubricantEvaluationLabel(value: unknown) {
+    const normalized = this.normalizeLubricantCondition(value);
+    if (normalized === 'ANORMAL') return 'PARAMETROS ANORMALES';
+    if (normalized === 'PRECAUCION') return 'PRECAUCION';
+    if (normalized === 'N/D') return 'SIN EVALUACION';
+    return 'PARAMETROS NORMALES';
+  }
+
+  private buildLubricantDiagnosticText(
+    detalles: Partial<AnalisisLubricanteDetalleEntity>[],
+    condition?: string | null,
+  ) {
+    const normalizedCondition = this.normalizeLubricantCondition(condition);
+    const hasValues = detalles.some((detalle) => this.hasLubricantDetailValue(detalle));
+    if (!hasValues && normalizedCondition === 'N/D') {
+      return 'SIN EVALUACION';
+    }
+    return this.buildLubricantEvaluationLabel(normalizedCondition);
+  }
+
+  private async resolveAnalisisEquipmentContext(equipoId?: string | null) {
+    if (!equipoId) {
+      return {
+        equipo: null as EquipoEntity | null,
+        marcaNombre: null as string | null,
+      };
+    }
+
+    const equipo = await this.equipoRepo.findOne({
+      where: { id: equipoId, is_deleted: false },
+    });
+    if (!equipo) {
+      throw new NotFoundException('Equipo no encontrado');
+    }
+
+    const marca = equipo.marca_id
+      ? await this.marcaRepo.findOne({
+          where: { id: equipo.marca_id, is_deleted: false },
+        })
+      : null;
+
+    return {
+      equipo,
+      marcaNombre: marca?.nombre?.trim() || null,
+    };
+  }
+
+  private mergeLubricantSampleInfo(
+    payload: Record<string, unknown>,
+    sampleInfo: Record<string, unknown>,
+  ) {
+    const nextPayload = { ...payload };
+    nextPayload.sample_info = {
+      ...(((payload.sample_info ?? payload.muestra) || {}) as Record<string, unknown>),
+      ...sampleInfo,
+    };
+    return nextPayload;
   }
 
   private resolveLubricantIdentity(
@@ -1897,9 +2009,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horas_lubricante: toNullableNumber(
         info.horas_lubricante ?? payload.horas_lubricante,
       ),
-      condicion: this.normalizeLubricantCondition(
-        info.condicion ?? payload.condicion,
-      ),
+      condicion:
+        String(info.condicion ?? payload.condicion ?? '').trim() !== ''
+          ? this.normalizeLubricantCondition(info.condicion ?? payload.condicion)
+          : 'N/D',
       equipo_marca:
         String(info.equipo_marca ?? payload.equipo_marca ?? '').trim() || null,
       equipo_serie:
@@ -1921,6 +2034,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const definition = this.getLubricantMetricDefinition(detalle.parametro);
     const textValue = String(detalle.resultado_texto ?? '').trim();
+    if (this.lubricantMetricUsesTextResult(definition)) {
+      if (!textValue) return 'N/D';
+      if (String(definition?.key || '') === 'HUMEDAD') {
+        const normalized = this.normalizeSearchToken(textValue);
+        if (['POSITIVO', 'POSITIVE'].includes(normalized)) return 'ANORMAL';
+        if (['NEGATIVO', 'NEGATIVE'].includes(normalized)) return 'NORMAL';
+        return 'N/D';
+      }
+    }
     if (definition) {
       const normalizedText = this.normalizeSearchToken(textValue);
       if (
@@ -1929,7 +2051,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           (item) => this.normalizeSearchToken(item) === normalizedText,
         )
       ) {
-        return 'ALERTA';
+        return 'ANORMAL';
       }
       if (
         normalizedText &&
@@ -1937,7 +2059,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           (item) => this.normalizeSearchToken(item) === normalizedText,
         )
       ) {
-        return 'OBSERVACION';
+        return 'PRECAUCION';
       }
     }
 
@@ -1946,20 +2068,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ? null
         : Number(detalle.resultado_numerico);
     if (currentValue == null || !Number.isFinite(currentValue)) {
-      return 'NORMAL';
+      return 'N/D';
     }
 
     if (
       definition?.numericAlertMin != null &&
       currentValue >= definition.numericAlertMin
     ) {
-      return 'ALERTA';
+      return 'ANORMAL';
     }
     if (
       definition?.numericWarningMin != null &&
       currentValue >= definition.numericWarningMin
     ) {
-      return 'OBSERVACION';
+      return 'PRECAUCION';
     }
 
     const baseline =
@@ -1969,29 +2091,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         definition?.lowerAlertMultiplier != null &&
         currentValue <= baseline * definition.lowerAlertMultiplier
       ) {
-        return 'ALERTA';
+        return 'ANORMAL';
       }
       if (
         definition?.upperAlertMultiplier != null &&
         currentValue >= baseline * definition.upperAlertMultiplier
       ) {
-        return 'ALERTA';
+        return 'ANORMAL';
       }
       if (
         definition?.lowerWarnMultiplier != null &&
         currentValue <= baseline * definition.lowerWarnMultiplier
       ) {
-        return 'OBSERVACION';
+        return 'PRECAUCION';
       }
       if (
         definition?.upperWarnMultiplier != null &&
         currentValue >= baseline * definition.upperWarnMultiplier
       ) {
-        return 'OBSERVACION';
+        return 'PRECAUCION';
       }
 
-      if (currentValue >= baseline * 2) return 'ALERTA';
-      if (currentValue >= baseline * 1.25) return 'OBSERVACION';
+      if (currentValue >= baseline * 2) return 'ANORMAL';
+      if (currentValue >= baseline * 1.25) return 'PRECAUCION';
     }
 
     return 'NORMAL';
@@ -2004,9 +2126,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const levels = detalles.map((item) =>
       this.normalizeLubricantDetailLevel(item.nivel_alerta),
     );
-    if (levels.includes('ALERTA')) return 'ALERTA';
-    if (levels.includes('OBSERVACION')) return 'OBSERVACION';
-    return this.normalizeLubricantCondition(fallback);
+    if (levels.includes('ANORMAL')) return 'ANORMAL';
+    if (levels.includes('PRECAUCION')) return 'PRECAUCION';
+    const fallbackProvided = String(fallback ?? '').trim() !== '';
+    if (fallbackProvided) {
+      return this.normalizeLubricantCondition(fallback);
+    }
+    if (levels.some((item) => item === 'NORMAL')) return 'NORMAL';
+    return 'N/D';
   }
 
   private async buildPreviousLubricantDetailMap(options: {
@@ -2075,6 +2202,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         previousMap.get(
           definition?.key || this.normalizeSearchToken(detalle.parametro),
         ) ?? null;
+      const rawText = String(detalle.resultado_texto ?? '').trim();
+      let normalizedText = rawText || null;
+
+      if (String(definition?.key || '') === 'HUMEDAD') {
+        const humidityToken = this.normalizeSearchToken(rawText);
+        if (rawText && !['NEGATIVO', 'POSITIVO'].includes(humidityToken)) {
+          throw new BadRequestException(
+            'El parametro Humedad solo permite NEGATIVO o POSITIVO.',
+          );
+        }
+        normalizedText = rawText ? humidityToken : normalizedText;
+      } else if (normalizedText) {
+        normalizedText = normalizedText.toUpperCase();
+      }
 
       const baselineValue =
         detalle.linea_base ??
@@ -2082,7 +2223,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         previous?.resultado_numerico ??
         null;
       const currentNumeric =
-        detalle.resultado_numerico == null
+        this.lubricantMetricUsesTextResult(definition)
+          ? null
+          : detalle.resultado_numerico == null
           ? null
           : Number(detalle.resultado_numerico);
       const previousNumeric =
@@ -2106,12 +2249,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           detalle.compartimento || options.compartimento || 'GENERAL',
         parametro: definition?.label || detalle.parametro,
         unidad: detalle.unidad ?? previous?.unidad ?? definition?.unit ?? null,
+        resultado_numerico:
+          currentNumeric != null && Number.isFinite(currentNumeric)
+            ? this.toNumeric(currentNumeric, 0)
+            : null,
+        resultado_texto: normalizedText,
         linea_base:
           baselineValue == null || !Number.isFinite(Number(baselineValue))
             ? null
             : this.toNumeric(baselineValue, 0),
         tendencia: trendValue,
-        nivel_alerta: this.evaluateLubricantDetailLevel(detalle, baselineValue),
+        nivel_alerta: this.evaluateLubricantDetailLevel(
+          {
+            ...detalle,
+            resultado_numerico: currentNumeric,
+            resultado_texto: normalizedText,
+          },
+          baselineValue,
+        ),
         orden: detalle.orden ?? definition?.order ?? previous?.orden ?? index + 1,
       };
     });
@@ -2205,15 +2360,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }))
       .sort((a, b) => a.order - b.order);
 
+    const resolvedCondition = this.inferAnalisisStateFromDetails(
+      enrichedDetails,
+      row.estado_diagnostico || sampleInfo.condicion,
+    );
+    const generatedDiagnostic = this.buildLubricantDiagnosticText(
+      enrichedDetails,
+      resolvedCondition,
+    );
     const totals = enrichedDetails.reduce(
       (acc, detalle) => {
         const level = this.normalizeLubricantDetailLevel(detalle.nivel_alerta);
-        if (level === 'ALERTA') acc.alerta += 1;
-        else if (level === 'OBSERVACION') acc.observacion += 1;
+        if (level === 'ANORMAL') acc.anormal += 1;
+        else if (level === 'PRECAUCION') acc.precaucion += 1;
+        else if (level === 'N/D') acc.nd += 1;
         else acc.normal += 1;
         return acc;
       },
-      { alerta: 0, observacion: 0, normal: 0 },
+      { anormal: 0, precaucion: 0, normal: 0, nd: 0 },
     );
 
     return {
@@ -2223,10 +2387,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       lubricante_codigo: identity.lubricante_codigo,
       lubricante_label: identity.lubricante_label || identity.lubricante,
       sample_info: sampleInfo,
-      estado_diagnostico: this.inferAnalisisStateFromDetails(
-        enrichedDetails,
-        row.estado_diagnostico || sampleInfo.condicion,
+      estado_diagnostico: resolvedCondition,
+      evaluacion_ultima_muestra: this.buildLubricantEvaluationLabel(
+        resolvedCondition,
       ),
+      diagnostico: String(row.diagnostico || '').trim() || generatedDiagnostic,
       detalles: enrichedDetails,
       detalle_grupos: groupedDetails,
       resumen_detalles: {
@@ -4488,15 +4653,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               .map((item) => item.compartimento_principal)
               .filter(Boolean),
           ).size,
-          alertas: sortedAnalyses.filter(
+          anormales: sortedAnalyses.filter(
             (item) =>
               this.normalizeLubricantCondition(item.estado_diagnostico) ===
-              'ALERTA',
+              'ANORMAL',
           ).length,
-          observaciones: sortedAnalyses.filter(
+          precauciones: sortedAnalyses.filter(
             (item) =>
               this.normalizeLubricantCondition(item.estado_diagnostico) ===
-              'OBSERVACION',
+              'PRECAUCION',
+          ).length,
+          sin_dato: sortedAnalyses.filter(
+            (item) =>
+              this.normalizeLubricantCondition(item.estado_diagnostico) ===
+              'N/D',
           ).length,
         },
         timeline: sampleHistory,
@@ -4514,12 +4684,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.codigo,
     );
     let savedId: string | null = null;
+    const equipmentContext = await this.resolveAnalisisEquipmentContext(
+      dto.equipo_id ?? null,
+    );
+    const basePayload = { ...((dto.payload_json ?? {}) as Record<string, unknown>) };
+    const baseSampleInfo = this.extractAnalysisSampleInfo(basePayload);
+    const payloadJson = this.mergeLubricantSampleInfo(basePayload, {
+      ...baseSampleInfo,
+      condicion: baseSampleInfo.condicion,
+      equipo_marca: equipmentContext.marcaNombre ?? baseSampleInfo.equipo_marca,
+    });
     const lubricanteIdentity = this.resolveLubricantIdentity({
       lubricante: dto.lubricante ?? null,
       marca_lubricante: dto.marca_lubricante ?? null,
-      equipo_codigo: dto.equipo_codigo ?? null,
-      equipo_nombre: dto.equipo_nombre ?? null,
-      payload_json: dto.payload_json ?? {},
+      equipo_codigo: equipmentContext.equipo?.codigo ?? dto.equipo_codigo ?? null,
+      equipo_nombre: equipmentContext.equipo?.nombre ?? dto.equipo_nombre ?? null,
+      payload_json: payloadJson,
     });
     const preparedDetalles = await this.prepareAnalisisDetallesForSave({
       lubricante: lubricanteIdentity.lubricante,
@@ -4528,14 +4708,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     const inferredState = this.inferAnalisisStateFromDetails(
       preparedDetalles,
-      dto.estado_diagnostico ??
-        ((dto.payload_json ?? {}) as Record<string, unknown>).condicion?.toString(),
+      dto.estado_diagnostico ?? baseSampleInfo.condicion,
     );
-    const payloadJson = {
-      ...(dto.payload_json ?? {}),
+    const finalPayloadJson = this.mergeLubricantSampleInfo(payloadJson, {
+      ...baseSampleInfo,
+      condicion: dto.estado_diagnostico
+        ? this.normalizeLubricantCondition(dto.estado_diagnostico)
+        : baseSampleInfo.condicion,
+      equipo_marca: equipmentContext.marcaNombre ?? baseSampleInfo.equipo_marca,
+    });
+    Object.assign(finalPayloadJson, {
       lubricante: lubricanteIdentity.lubricante,
       marca_lubricante: lubricanteIdentity.marca_lubricante,
-    };
+    });
+    const resolvedDiagnostic =
+      String(dto.diagnostico ?? '').trim() ||
+      this.buildLubricantDiagnosticText(preparedDetalles, inferredState);
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -4551,15 +4739,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               equipo_id: dto.equipo_id ?? null,
               lubricante: lubricanteIdentity.lubricante,
               marca_lubricante: lubricanteIdentity.marca_lubricante,
-              equipo_codigo: dto.equipo_codigo ?? null,
-              equipo_nombre: dto.equipo_nombre ?? null,
+              equipo_codigo: equipmentContext.equipo?.codigo ?? dto.equipo_codigo ?? null,
+              equipo_nombre: equipmentContext.equipo?.nombre ?? dto.equipo_nombre ?? null,
               compartimento_principal: dto.compartimento_principal ?? null,
               fecha_muestra: this.toDateOnlyString(dto.fecha_muestra),
               fecha_reporte: this.toDateOnlyString(dto.fecha_reporte),
-              diagnostico: dto.diagnostico ?? null,
+              diagnostico: resolvedDiagnostic,
               estado_diagnostico: inferredState,
               documento_origen: dto.documento_origen ?? null,
-              payload_json: payloadJson,
+              payload_json: finalPayloadJson,
             }),
           );
 
@@ -4625,7 +4813,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         lubricanteIdentity.lubricante ? ` · ${lubricanteIdentity.lubricante}` : ''
       }`,
       level:
-        String(saved.estado_diagnostico || 'NORMAL').toUpperCase() === 'ALERTA'
+        ['ANORMAL', 'PRECAUCION'].includes(
+          this.normalizeLubricantCondition(saved.estado_diagnostico),
+        )
           ? 'warning'
           : 'info',
       payload_kpi: {
@@ -4657,12 +4847,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ...((row.payload_json ?? {}) as Record<string, unknown>),
         ...((dto.payload_json ?? {}) as Record<string, unknown>),
       };
+      const equipmentContext = await this.resolveAnalisisEquipmentContext(
+        dto.equipo_id ?? row.equipo_id ?? null,
+      );
+      const mergedSampleInfo = this.extractAnalysisSampleInfo(mergedPayload);
+      const payloadWithSampleInfo = this.mergeLubricantSampleInfo(mergedPayload, {
+        ...mergedSampleInfo,
+        equipo_marca: equipmentContext.marcaNombre ?? mergedSampleInfo.equipo_marca,
+      });
       const lubricanteIdentity = this.resolveLubricantIdentity({
         lubricante: dto.lubricante ?? row.lubricante ?? null,
         marca_lubricante: dto.marca_lubricante ?? row.marca_lubricante ?? null,
-        equipo_codigo: dto.equipo_codigo ?? row.equipo_codigo ?? null,
-        equipo_nombre: dto.equipo_nombre ?? row.equipo_nombre ?? null,
-        payload_json: mergedPayload,
+        equipo_codigo: equipmentContext.equipo?.codigo ?? dto.equipo_codigo ?? row.equipo_codigo ?? null,
+        equipo_nombre: equipmentContext.equipo?.nombre ?? dto.equipo_nombre ?? row.equipo_nombre ?? null,
+        payload_json: payloadWithSampleInfo,
       });
       const preparedDetalles = dto.detalles
         ? await this.prepareAnalisisDetallesForSave({
@@ -4674,14 +4872,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           })
         : null;
 
+      const resolvedState =
+        dto.estado_diagnostico ??
+        (preparedDetalles
+          ? this.inferAnalisisStateFromDetails(
+              preparedDetalles,
+              mergedSampleInfo.condicion ?? row.estado_diagnostico,
+            )
+          : this.normalizeLubricantCondition(
+              mergedSampleInfo.condicion ?? row.estado_diagnostico,
+            ));
+      const finalPayloadJson = this.mergeLubricantSampleInfo(payloadWithSampleInfo, {
+        ...mergedSampleInfo,
+        condicion: dto.estado_diagnostico
+          ? this.normalizeLubricantCondition(dto.estado_diagnostico)
+          : mergedSampleInfo.condicion,
+        equipo_marca: equipmentContext.marcaNombre ?? mergedSampleInfo.equipo_marca,
+      });
+
       Object.assign(row, {
         codigo: row.codigo,
         cliente: dto.cliente ?? row.cliente ?? null,
         equipo_id: dto.equipo_id ?? row.equipo_id ?? null,
         lubricante: lubricanteIdentity.lubricante,
         marca_lubricante: lubricanteIdentity.marca_lubricante,
-        equipo_codigo: dto.equipo_codigo ?? row.equipo_codigo ?? null,
-        equipo_nombre: dto.equipo_nombre ?? row.equipo_nombre ?? null,
+        equipo_codigo:
+          equipmentContext.equipo?.codigo ?? dto.equipo_codigo ?? row.equipo_codigo ?? null,
+        equipo_nombre:
+          equipmentContext.equipo?.nombre ?? dto.equipo_nombre ?? row.equipo_nombre ?? null,
         compartimento_principal:
           dto.compartimento_principal ?? row.compartimento_principal ?? null,
         fecha_muestra: dto.fecha_muestra
@@ -4690,21 +4908,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         fecha_reporte: dto.fecha_reporte
           ? this.toDateOnlyString(dto.fecha_reporte)
           : row.fecha_reporte ?? null,
-        diagnostico: dto.diagnostico ?? row.diagnostico ?? null,
-        estado_diagnostico:
-          dto.estado_diagnostico ??
-          (preparedDetalles
-            ? this.inferAnalisisStateFromDetails(
-                preparedDetalles,
-                row.estado_diagnostico,
-              )
-            : row.estado_diagnostico),
+        diagnostico:
+          String(dto.diagnostico ?? '').trim() ||
+          this.buildLubricantDiagnosticText(
+            preparedDetalles ?? [],
+            resolvedState,
+          ),
+        estado_diagnostico: resolvedState,
         documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
-        payload_json: {
-          ...mergedPayload,
+        payload_json: Object.assign(finalPayloadJson, {
           lubricante: lubricanteIdentity.lubricante,
           marca_lubricante: lubricanteIdentity.marca_lubricante,
-        },
+        }),
       });
       await analisisRepo.save(row);
 
@@ -4750,7 +4965,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       title: 'Análisis de lubricante actualizado',
       body: `${saved.codigo}${saved.lubricante ? ` · ${saved.lubricante}` : ''}`,
       level:
-        String(saved.estado_diagnostico || 'NORMAL').toUpperCase() === 'ALERTA'
+        ['ANORMAL', 'PRECAUCION'].includes(
+          this.normalizeLubricantCondition(saved.estado_diagnostico),
+        )
           ? 'warning'
           : 'info',
       payload_kpi: {
