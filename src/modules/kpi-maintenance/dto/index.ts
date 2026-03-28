@@ -11,6 +11,7 @@ import {
   IsString,
   IsUUID,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -66,7 +67,7 @@ export class CreateEquipoDto {
   @ApiProperty({ description: 'Código único del equipo' })
   @IsString()
   @IsNotEmpty()
-  codigo: string;
+  codigo?: string;
   @ApiProperty({ description: 'Nombre del equipo' })
   @IsString()
   @IsNotEmpty()
@@ -103,7 +104,7 @@ export class CreateEquipoTipoDto {
   @ApiProperty({ description: 'Código único del Tipo de Equipo' })
   @IsString()
   @IsNotEmpty()
-  codigo: string;
+  codigo?: string;
   @ApiProperty({ description: 'Nombre del Tipo de Equipo' })
   @IsString()
   @IsNotEmpty()
@@ -1014,6 +1015,10 @@ export class AnalisisLubricanteDetalleDto {
 }
 
 export class CreateAnalisisLubricanteDto {
+  @ValidateIf(
+    (_obj, value) =>
+      value !== undefined && value !== null && String(value).trim() !== '',
+  )
   @ApiProperty({ description: 'Código del análisis' })
   @IsString()
   @IsNotEmpty()

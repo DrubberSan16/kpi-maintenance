@@ -496,6 +496,177 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return 'INFO' as AlertLevel;
   }
 
+  private normalizeMaterialIdArray(values: unknown) {
+    if (!Array.isArray(values)) return [];
+    return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+  }
+
+  private normalizePlanTaskFieldType(value: unknown) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (['BOOLEAN', 'BOOL', 'CHECKBOX', 'SI_NO', 'SI/NO'].includes(raw)) {
+      return 'BOOLEAN';
+    }
+    if (['NUMBER', 'NUMERIC', 'DECIMAL', 'INTEGER', 'NUMERO'].includes(raw)) {
+      return 'NUMBER';
+    }
+    if (['JSON', 'OBJECT', 'OBJETO', 'EVIDENCIA'].includes(raw)) {
+      return 'JSON';
+    }
+    if (['TEXT', 'TEXTO', 'STRING'].includes(raw)) {
+      return 'TEXT';
+    }
+    return null;
+  }
+
+  private resolvePlanTaskFieldTypeFromActividad(
+    actividad: ProcedimientoActividadEntity,
+  ) {
+    const explicit = this.normalizePlanTaskFieldType(
+      (actividad.meta as Record<string, unknown> | undefined)?.field_type,
+    );
+    if (explicit) return explicit;
+    return actividad.requiere_evidencia ? 'JSON' : 'BOOLEAN';
+  }
+
+  private resolvePlanTaskRequiredFromActividad(
+    actividad: ProcedimientoActividadEntity,
+  ) {
+    const explicit = (actividad.meta as Record<string, unknown> | undefined)
+      ?.required;
+    if (typeof explicit === 'boolean') return explicit;
+    return true;
+  }
+
+  private extractAlertWorkOrderSnapshots(
+    row: Pick<AlertaMantenimientoEntity, 'payload_json' | 'work_order_id'>,
+  ) {
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const rawItems = Array.isArray(payload.work_orders) ? payload.work_orders : [];
+    const snapshots = rawItems
+      .map((item) =>
+        item && typeof item === 'object'
+          ? {
+              id: String((item as Record<string, unknown>).id || '').trim(),
+              code: String((item as Record<string, unknown>).code || '').trim() || null,
+              title:
+                String((item as Record<string, unknown>).title || '').trim() || null,
+              status_workflow:
+                String(
+                  (item as Record<string, unknown>).status_workflow || '',
+                ).trim() || null,
+            }
+          : null,
+      )
+      .filter((item): item is {
+        id: string;
+        code: string | null;
+        title: string | null;
+        status_workflow: string | null;
+      } => Boolean(item?.id));
+
+    if (
+      row.work_order_id &&
+      !snapshots.some((item) => item.id === row.work_order_id)
+    ) {
+      snapshots.push({
+        id: row.work_order_id,
+        code: null,
+        title: null,
+        status_workflow: null,
+      });
+    }
+
+    return snapshots;
+  }
+
+  private buildAlertWorkOrderSnapshot(workOrder: Partial<WorkOrderEntity>) {
+    return {
+      id: String(workOrder.id || '').trim(),
+      code: String(workOrder.code || '').trim() || null,
+      title: String(workOrder.title || '').trim() || null,
+      status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
+    };
+  }
+
+  private hasLinkedWorkOrders(
+    row: Pick<AlertaMantenimientoEntity, 'payload_json' | 'work_order_id'>,
+  ) {
+    return this.extractAlertWorkOrderSnapshots(row).length > 0;
+  }
+
+  private resolveAlertStateFromLinkedWorkOrders(
+    snapshots: Array<{ status_workflow: string | null }>,
+    fallbackState: string,
+  ) {
+    if (!snapshots.length) return fallbackState;
+    const normalizedStatuses = snapshots.map((item) =>
+      this.normalizeWorkflowStatus(item.status_workflow),
+    );
+    if (normalizedStatuses.some((status) => status !== 'CLOSED')) {
+      return 'EN_PROCESO';
+    }
+    return 'CERRADA';
+  }
+
+  private async syncAlertWorkOrderLink(
+    alertaId: string,
+    workOrder: WorkOrderEntity,
+    nextAlertState?: string,
+  ) {
+    const alerta = await this.findOneOrFail(this.alertaRepo, {
+      id: alertaId,
+      is_deleted: false,
+    });
+    const payload = {
+      ...((alerta.payload_json ?? {}) as Record<string, unknown>),
+    };
+    const nextSnapshot = this.buildAlertWorkOrderSnapshot(workOrder);
+    const snapshots = this.extractAlertWorkOrderSnapshots(alerta).filter(
+      (item) => item.id !== nextSnapshot.id,
+    );
+    snapshots.push(nextSnapshot);
+
+    payload.work_orders = snapshots;
+    alerta.payload_json = payload;
+    alerta.work_order_id = workOrder.id;
+    alerta.estado =
+      nextAlertState ??
+      this.resolveAlertStateFromLinkedWorkOrders(snapshots, alerta.estado);
+    return this.alertaRepo.save(alerta);
+  }
+
+  private async syncAlertsForWorkOrder(workOrder: WorkOrderEntity) {
+    const alertas = await this.alertaRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_generada: 'DESC', id: 'DESC' },
+    });
+
+    const linked = alertas.filter((alerta) =>
+      this.extractAlertWorkOrderSnapshots(alerta).some(
+        (item) => item.id === workOrder.id,
+      ),
+    );
+
+    if (!linked.length) return;
+
+    for (const alerta of linked) {
+      const payload = {
+        ...((alerta.payload_json ?? {}) as Record<string, unknown>),
+      };
+      const snapshots = this.extractAlertWorkOrderSnapshots(alerta).map((item) =>
+        item.id === workOrder.id ? this.buildAlertWorkOrderSnapshot(workOrder) : item,
+      );
+      payload.work_orders = snapshots;
+      alerta.payload_json = payload;
+      alerta.work_order_id = snapshots[snapshots.length - 1]?.id ?? null;
+      alerta.estado = this.resolveAlertStateFromLinkedWorkOrders(
+        snapshots,
+        alerta.estado,
+      );
+      await this.alertaRepo.save(alerta);
+    }
+  }
+
 
   private readonly notificationServiceUrl = (
     process.env.NOTIFICATION_SERVICE_URL || process.env.KPI_NOTIFICATION_URL || ''
@@ -548,6 +719,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return (letter.charCodeAt(0) - 64) * 100000 + number;
   }
 
+  private computeNextAlphaNumericCode(prefix: string, lastCode: string | null) {
+    if (!lastCode) return `${prefix}-A00001`;
+    const pattern = new RegExp(`^${prefix}-([A-Z])(\\d{5})$`, 'i');
+    const match = pattern.exec(String(lastCode).trim());
+    if (!match) return `${prefix}-A00001`;
+    const currentLetter = (match[1] ?? 'A').toUpperCase();
+    const currentNumber = Number(match[2] ?? '0');
+    if (currentNumber >= 99999) {
+      return `${prefix}-${this.incrementWorkOrderPrefix(currentLetter)}00001`;
+    }
+    return `${prefix}-${currentLetter}${String(currentNumber + 1).padStart(5, '0')}`;
+  }
+
+  private getAlphaNumericCodeRank(prefix: string, code: string) {
+    const pattern = new RegExp(`^${prefix}-([A-Z])(\\d{5})$`, 'i');
+    const match = pattern.exec(String(code || '').trim());
+    if (!match) return -1;
+    const letter = (match[1] ?? 'A').toUpperCase();
+    const number = Number(match[2] ?? '0');
+    return (letter.charCodeAt(0) - 64) * 100000 + number;
+  }
+
   private async generateNextWorkOrderCode() {
     const rows = await this.woRepo.find({
       select: { code: true, id: true },
@@ -557,6 +750,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .filter(Boolean)
       .sort((a, b) => this.getWorkOrderCodeRank(b) - this.getWorkOrderCodeRank(a));
     return this.computeNextWorkOrderCode(codes[0] ?? null);
+  }
+
+  private async generateNextAnalisisLubricanteCode() {
+    const rows = await this.analisisLubricanteRepo.find({
+      select: { codigo: true, id: true },
+    });
+    const codes = rows
+      .map((row) => String(row.codigo || '').trim())
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          this.getAlphaNumericCodeRank('AL', b) -
+          this.getAlphaNumericCodeRank('AL', a),
+      );
+    return this.computeNextAlphaNumericCode('AL', codes[0] ?? null);
   }
 
   async getNextWorkOrderCode() {
@@ -719,9 +927,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     procedimiento: ProcedimientoPlantillaEntity,
     actividad: ProcedimientoActividadEntity,
   ) {
-    const evidencias = Array.isArray(actividad.meta?.evidencias_requeridas)
-      ? actividad.meta.evidencias_requeridas
+    const actividadMeta =
+      (actividad.meta as Record<string, unknown> | undefined) ?? {};
+    const evidencias = Array.isArray(actividadMeta.evidencias_requeridas)
+      ? actividadMeta.evidencias_requeridas
       : [];
+    const fieldType = this.resolvePlanTaskFieldTypeFromActividad(actividad);
+    const required = this.resolvePlanTaskRequiredFromActividad(actividad);
 
     return {
       fuente: 'PROCEDIMIENTO_MPG',
@@ -736,6 +948,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       requiere_bloqueo: actividad.requiere_bloqueo ?? false,
       requiere_evidencia: actividad.requiere_evidencia ?? false,
       evidencias_requeridas: evidencias,
+      field_type: fieldType,
+      required,
       documento_referencia: procedimiento.documento_referencia ?? null,
       version: procedimiento.version ?? null,
     };
@@ -816,6 +1030,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         procedimiento,
         actividad,
       );
+      const fieldType = this.resolvePlanTaskFieldTypeFromActividad(actividad);
+      const required = this.resolvePlanTaskRequiredFromActividad(actividad);
       const existingTask =
         existingByActividadId.get(String(actividad.id)) ??
         existingByOrder.get(actividad.orden ?? index + 1);
@@ -823,8 +1039,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (existingTask) {
         existingTask.orden = actividad.orden ?? index + 1;
         existingTask.actividad = actividad.actividad;
-        existingTask.field_type = actividad.requiere_evidencia ? 'JSON' : 'BOOLEAN';
-        existingTask.required = true;
+        existingTask.field_type = fieldType;
+        existingTask.required = required;
         existingTask.meta = meta;
         existingTask.status = 'ACTIVE';
         existingTask.is_deleted = false;
@@ -838,8 +1054,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           plan_id: plan.id,
           orden: actividad.orden ?? index + 1,
           actividad: actividad.actividad,
-          field_type: actividad.requiere_evidencia ? 'JSON' : 'BOOLEAN',
-          required: true,
+          field_type: fieldType,
+          required,
           meta,
         }),
       );
@@ -935,14 +1151,169 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async buildProcedimientoPayload(row: ProcedimientoPlantillaEntity) {
-    const actividades = await this.procedimientoActividadRepo.find({
-      where: { procedimiento_id: row.id, is_deleted: false },
-      order: { orden: 'ASC', created_at: 'ASC' },
-    });
+    const planCode = this.buildProcedimientoPlanCode(row);
+    const materialIds = this.normalizeMaterialIdArray(row.materiales);
+    const [actividades, plan, materialesCatalogo] = await Promise.all([
+      this.procedimientoActividadRepo.find({
+        where: { procedimiento_id: row.id, is_deleted: false },
+        order: { orden: 'ASC', created_at: 'ASC' },
+      }),
+      this.planRepo.findOne({
+        where: { codigo: planCode, is_deleted: false },
+      }),
+      materialIds.length
+        ? this.productoRepo.find({
+            where: { id: In(materialIds) },
+          })
+        : Promise.resolve([] as ProductoEntity[]),
+    ]);
+
+    const planTareas = plan
+      ? await this.planTareaRepo.find({
+          where: { plan_id: plan.id, is_deleted: false },
+          order: { orden: 'ASC' },
+        })
+      : [];
+
+    const materialesMap = new Map(
+      materialesCatalogo.map((material) => [material.id, material]),
+    );
+
     return {
       ...row,
       actividades,
+      plan_id: plan?.id ?? null,
+      plan_codigo: plan?.codigo ?? null,
+      plan_nombre: plan?.nombre ?? null,
+      plan_tareas: planTareas,
+      materiales_detalle: materialIds
+        .map((materialId) => materialesMap.get(materialId))
+        .filter((material): material is ProductoEntity => Boolean(material))
+        .map((material) => ({
+          id: material.id,
+          codigo: material.codigo ?? null,
+          nombre: material.nombre ?? null,
+          label: this.buildProductoLabel(material) ?? material.id,
+        })),
     };
+  }
+
+  private trimNullableText(value: unknown) {
+    const trimmed = String(value ?? '').trim();
+    return trimmed || null;
+  }
+
+  private normalizeWorkOrderTaskPayload(
+    definition: Pick<PlanTareaEntity, 'actividad' | 'field_type' | 'required'>,
+    dto: Pick<
+      CreateWorkOrderTareaDto | UpdateWorkOrderTareaDto,
+      'valor_boolean' | 'valor_numeric' | 'valor_text' | 'valor_json' | 'observacion'
+    >,
+  ) {
+    const fieldType =
+      this.normalizePlanTaskFieldType(definition.field_type) ?? 'BOOLEAN';
+    const required = Boolean(definition.required);
+
+    let valor_boolean: boolean | null = null;
+    let valor_numeric: number | null = null;
+    let valor_text: string | null = null;
+    let valor_json: Record<string, unknown> | null = null;
+
+    if (fieldType === 'BOOLEAN') {
+      if (dto.valor_boolean === true || dto.valor_boolean === false) {
+        valor_boolean = dto.valor_boolean;
+      }
+      if (required && valor_boolean === null) {
+        throw new BadRequestException(
+          `La tarea ${definition.actividad} requiere una captura booleana.`,
+        );
+      }
+    } else if (fieldType === 'NUMBER') {
+      if (dto.valor_numeric !== undefined && dto.valor_numeric !== null) {
+        const numericValue = Number(dto.valor_numeric);
+        if (!Number.isFinite(numericValue)) {
+          throw new BadRequestException(
+            `La tarea ${definition.actividad} requiere un valor numérico válido.`,
+          );
+        }
+        valor_numeric = numericValue;
+      }
+      if (required && valor_numeric === null) {
+        throw new BadRequestException(
+          `La tarea ${definition.actividad} requiere un valor numérico.`,
+        );
+      }
+    } else if (fieldType === 'TEXT') {
+      valor_text = this.trimNullableText(dto.valor_text);
+      if (required && !valor_text) {
+        throw new BadRequestException(
+          `La tarea ${definition.actividad} requiere un texto.`,
+        );
+      }
+    } else {
+      if (dto.valor_json !== undefined && dto.valor_json !== null) {
+        if (
+          Array.isArray(dto.valor_json) ||
+          typeof dto.valor_json !== 'object'
+        ) {
+          throw new BadRequestException(
+            `La tarea ${definition.actividad} requiere un objeto JSON válido.`,
+          );
+        }
+        valor_json = dto.valor_json;
+      }
+      if (required && !valor_json) {
+        throw new BadRequestException(
+          `La tarea ${definition.actividad} requiere una captura JSON.`,
+        );
+      }
+    }
+
+    return {
+      valor_boolean,
+      valor_numeric,
+      valor_text,
+      valor_json,
+      observacion: this.trimNullableText(dto.observacion),
+      field_type: fieldType,
+      required,
+    };
+  }
+
+  private async enrichWorkOrderTareas(rows: WorkOrderTareaEntity[]) {
+    if (!rows.length) return [];
+
+    const definitionIds = [
+      ...new Set(rows.map((row) => row.tarea_id).filter(Boolean)),
+    ] as string[];
+    const definitions = definitionIds.length
+      ? await this.planTareaRepo.find({
+          where: { id: In(definitionIds), is_deleted: false },
+        })
+      : [];
+    const definitionMap = new Map(definitions.map((row) => [row.id, row]));
+
+    return [...rows]
+      .map((row) => {
+        const definition = definitionMap.get(row.tarea_id);
+        return {
+          ...row,
+          orden: definition?.orden ?? null,
+          actividad: definition?.actividad ?? null,
+          field_type:
+            definition?.field_type ??
+            (definition
+              ? this.normalizePlanTaskFieldType(definition.field_type)
+              : null),
+          required: definition?.required ?? false,
+          task_meta: definition?.meta ?? {},
+        };
+      })
+      .sort((a, b) => {
+        const orderDiff = Number(a.orden ?? 999999) - Number(b.orden ?? 999999);
+        if (orderDiff !== 0) return orderDiff;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
   }
 
   private async buildAnalisisLubricantePayload(row: AnalisisLubricanteEntity) {
@@ -1465,7 +1836,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const existing = activeMap.get(key);
       if (existing) {
         const nextDetalle = String(candidate.detalle || '').trim() || null;
-        const nextPayload = candidate.payload_json ?? {};
+        const preservedWorkOrders = this.extractAlertWorkOrderSnapshots(existing);
+        const nextPayload = {
+          ...(candidate.payload_json ?? {}),
+          ...(preservedWorkOrders.length
+            ? { work_orders: preservedWorkOrders }
+            : {}),
+        };
         const changed =
           existing.categoria !== candidate.categoria ||
           existing.nivel !== candidate.nivel ||
@@ -1517,7 +1894,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .filter(([key]) => !seen.has(key))
       .map(([, row]) => row)
       .concat(duplicateRows)
-      .filter((row) => !row.work_order_id);
+      .filter((row) => !this.hasLinkedWorkOrders(row));
 
     for (const row of staleRows) {
       row.estado = 'RESUELTA';
@@ -1539,7 +1916,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async enrichAlertRows(rows: AlertaMantenimientoEntity[]) {
     const equipoIds = [...new Set(rows.map((row) => row.equipo_id).filter(Boolean))] as string[];
     const workOrderIds = [
-      ...new Set(rows.map((row) => row.work_order_id).filter(Boolean)),
+      ...new Set(
+        rows.flatMap((row) =>
+          this.extractAlertWorkOrderSnapshots(row).map((item) => item.id),
+        ),
+      ),
     ] as string[];
 
     const [equipos, workOrders] = await Promise.all([
@@ -1558,9 +1939,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .map((row) => {
         const payload = (row.payload_json ?? {}) as Record<string, unknown>;
         const equipo = row.equipo_id ? equipoMap.get(row.equipo_id) : null;
-        const workOrder = row.work_order_id
-          ? workOrderMap.get(row.work_order_id)
-          : null;
+        const linkedWorkOrders = this.extractAlertWorkOrderSnapshots(row)
+          .map((snapshot) => {
+            const persisted = workOrderMap.get(snapshot.id);
+            if (!persisted) {
+              return {
+                ...snapshot,
+                status_workflow: snapshot.status_workflow
+                  ? this.normalizeWorkflowStatus(snapshot.status_workflow)
+                  : null,
+                label:
+                  [snapshot.code, snapshot.title].filter(Boolean).join(' · ') ||
+                  snapshot.id,
+              };
+            }
+
+            const nextSnapshot = this.buildAlertWorkOrderSnapshot(persisted);
+            return {
+              ...nextSnapshot,
+              label:
+                `${persisted.code} · ${persisted.title}`.trim() || persisted.id,
+            };
+          })
+          .filter((item) => item.id);
+        const primaryWorkOrder =
+          linkedWorkOrders[linkedWorkOrders.length - 1] ?? null;
+        const workOrder = primaryWorkOrder;
         const equipoCodigoFallback =
           String(payload.equipo_codigo || payload.equipo_id || '').trim() || null;
         const equipoNombreFallback =
@@ -1672,6 +2076,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           work_order_status: workOrder
             ? this.normalizeWorkflowStatus(workOrder.status_workflow)
             : null,
+          work_order_count: linkedWorkOrders.length,
+          work_orders: linkedWorkOrders,
+          work_order_titles: linkedWorkOrders.map((item) => item.label),
           referencia_resuelta: referenciaResuelta,
           title,
           subtitle,
@@ -2625,7 +3032,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           objetivo: dto.objetivo ?? null,
           precauciones: this.normalizeStringArray(dto.precauciones),
           herramientas: this.normalizeStringArray(dto.herramientas),
-          materiales: this.normalizeStringArray(dto.materiales),
+          materiales: this.normalizeMaterialIdArray(dto.materiales),
           responsabilidades: this.normalizeStringArray(dto.responsabilidades),
         }),
       );
@@ -2656,8 +3063,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: savedId,
       is_deleted: false,
     });
-    const payload = await this.buildProcedimientoPayload(saved);
     await this.syncPlanFromProcedimiento(saved.id);
+    const payload = await this.buildProcedimientoPayload(saved);
     await this.registerProcessEvent({
       tipo_proceso: 'PROCEDIMIENTO_PLANTILLA',
       accion: 'CREATED',
@@ -2701,7 +3108,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? this.normalizeStringArray(dto.herramientas)
           : row.herramientas,
         materiales: dto.materiales
-          ? this.normalizeStringArray(dto.materiales)
+          ? this.normalizeMaterialIdArray(dto.materiales)
           : row.materiales,
         responsabilidades: dto.responsabilidades
           ? this.normalizeStringArray(dto.responsabilidades)
@@ -2738,8 +3145,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
 
     const saved = await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
-    const payload = await this.buildProcedimientoPayload(saved);
     await this.syncPlanFromProcedimiento(saved.id);
+    const payload = await this.buildProcedimientoPayload(saved);
     await this.registerProcessEvent({
       tipo_proceso: 'PROCEDIMIENTO_PLANTILLA',
       accion: 'UPDATED',
@@ -2790,12 +3197,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createAnalisisLubricante(dto: CreateAnalisisLubricanteDto) {
+    const resolvedCode =
+      String(dto.codigo || '').trim() || (await this.generateNextAnalisisLubricanteCode());
     const savedId = await this.dataSource.transaction(async (manager) => {
       const analisisRepo = manager.getRepository(AnalisisLubricanteEntity);
       const detalleRepo = manager.getRepository(AnalisisLubricanteDetalleEntity);
       const row = await analisisRepo.save(
         analisisRepo.create({
-          codigo: dto.codigo,
+          codigo: resolvedCode,
           cliente: dto.cliente ?? null,
           equipo_id: dto.equipo_id ?? null,
           equipo_codigo: dto.equipo_codigo ?? null,
@@ -3576,12 +3985,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (q.origen) where.origen = String(q.origen).trim().toUpperCase();
     if (q.tipo_alerta) where.tipo_alerta = q.tipo_alerta;
     if (q.equipo_id) where.equipo_id = q.equipo_id;
-    if (q.work_order_id) where.work_order_id = q.work_order_id;
     const rows = await this.alertaRepo.find({
       where,
       order: { fecha_generada: 'DESC', id: 'DESC' },
     });
-    return this.wrap(await this.enrichAlertRows(rows), 'Alertas listadas');
+    const enriched = await this.enrichAlertRows(rows);
+    const filtered = q.work_order_id
+      ? enriched.filter((row: any) =>
+          Array.isArray(row.work_orders)
+            ? row.work_orders.some(
+                (item: any) => String(item?.id || '') === String(q.work_order_id),
+              )
+            : String(row.work_order_id || '') === String(q.work_order_id),
+        )
+      : enriched;
+    return this.wrap(filtered, 'Alertas listadas');
   }
 
   async getAlertasSummary() {
@@ -3876,13 +4294,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     await this.appendWorkOrderHistory(created.id, normalizedStatus, 'Orden de trabajo creada');
     if (dto.alerta_id) {
-      const alerta = await this.findOneOrFail(this.alertaRepo, {
-        id: dto.alerta_id,
-        is_deleted: false,
-      });
-      alerta.work_order_id = created.id;
-      alerta.estado = normalizedStatus === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO';
-      await this.alertaRepo.save(alerta);
+      await this.syncAlertWorkOrderLink(
+        dto.alerta_id,
+        created,
+        normalizedStatus === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO',
+      );
     }
     const enriched = await this.enrichWorkOrder(created);
     const responsePayload = {
@@ -3952,12 +4368,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     } else {
       await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus });
     }
-    const alertas = await this.alertaRepo.find({ where: { work_order_id: saved.id, is_deleted: false } });
-    if (alertas.length) {
-      const nextAlertStatus = saved.status_workflow === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO';
-      for (const alerta of alertas) alerta.estado = nextAlertStatus;
-      await this.alertaRepo.save(alertas);
-    }
+    await this.syncAlertsForWorkOrder(saved);
     const enriched = await this.enrichWorkOrder(saved);
     await this.publishInAppNotification({
       title: previousStatus !== saved.status_workflow ? 'Estado de orden de trabajo actualizado' : 'Orden de trabajo actualizada',
@@ -4015,9 +4426,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     return this.wrap(
-      await this.woTareaRepo.find({
-        where: { work_order_id: workOrderId, is_deleted: false },
-      }),
+      await this.enrichWorkOrderTareas(
+        await this.woTareaRepo.find({
+          where: { work_order_id: workOrderId, is_deleted: false },
+        }),
+      ),
       'Tareas de OT listadas',
     );
   }
@@ -4034,16 +4447,51 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: dto.plan_id,
       is_deleted: false,
     });
-    await this.findOneOrFail(this.planTareaRepo, {
+    const taskDefinition = await this.findOneOrFail(this.planTareaRepo, {
       id: dto.tarea_id,
       plan_id: dto.plan_id,
       is_deleted: false,
     });
+    if (workOrder.plan_id && workOrder.plan_id !== dto.plan_id) {
+      throw new BadRequestException(
+        'La tarea seleccionada no pertenece al plan operativo de la OT.',
+      );
+    }
+
+    const normalized = this.normalizeWorkOrderTaskPayload(taskDefinition, dto);
+    const existing = await this.woTareaRepo.findOne({
+      where: {
+        work_order_id: workOrderId,
+        plan_id: dto.plan_id,
+        tarea_id: dto.tarea_id,
+        is_deleted: false,
+      },
+    });
     const created = await this.woTareaRepo.save(
-      this.woTareaRepo.create({ ...dto, work_order_id: workOrderId }),
+      this.woTareaRepo.create({
+        ...(existing ?? {}),
+        work_order_id: workOrderId,
+        plan_id: dto.plan_id,
+        tarea_id: dto.tarea_id,
+        valor_boolean: normalized.valor_boolean,
+        valor_numeric: normalized.valor_numeric,
+        valor_text: normalized.valor_text,
+        valor_json: normalized.valor_json,
+        observacion: normalized.observacion,
+      }),
     );
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea registrada: ${dto.tarea_id}`, { fromStatus: workOrder.status_workflow });
-    return this.wrap(created, 'Tarea de OT creada');
+    await this.appendWorkOrderHistory(
+      workOrderId,
+      this.normalizeWorkflowStatus(workOrder.status_workflow),
+      existing
+        ? `Tarea sincronizada: ${taskDefinition.actividad}`
+        : `Tarea registrada: ${taskDefinition.actividad}`,
+      { fromStatus: workOrder.status_workflow },
+    );
+    return this.wrap(
+      (await this.enrichWorkOrderTareas([created]))[0] ?? created,
+      existing ? 'Tarea de OT sincronizada' : 'Tarea de OT creada',
+    );
   }
 
   async updateWorkOrderTarea(id: string, dto: UpdateWorkOrderTareaDto) {
@@ -4051,12 +4499,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
-    Object.assign(tarea, dto);
+    const definition = await this.findOneOrFail(this.planTareaRepo, {
+      id: tarea.tarea_id,
+      plan_id: tarea.plan_id,
+      is_deleted: false,
+    });
+    const normalized = this.normalizeWorkOrderTaskPayload(definition, dto);
+    Object.assign(tarea, {
+      valor_boolean: normalized.valor_boolean,
+      valor_numeric: normalized.valor_numeric,
+      valor_text: normalized.valor_text,
+      valor_json: normalized.valor_json,
+      observacion: normalized.observacion,
+      status: dto.status ?? tarea.status,
+    });
     const saved = await this.woTareaRepo.save(tarea);
-    const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
-    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea actualizada: ${tarea.tarea_id}`, { fromStatus: workOrder.status_workflow });
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: tarea.work_order_id,
+      is_deleted: false,
+    });
+    await this.appendWorkOrderHistory(
+      tarea.work_order_id,
+      this.normalizeWorkflowStatus(workOrder.status_workflow),
+      `Tarea actualizada: ${definition.actividad}`,
+      { fromStatus: workOrder.status_workflow },
+    );
     return this.wrap(
-      saved,
+      (await this.enrichWorkOrderTareas([saved]))[0] ?? saved,
       'Tarea de OT actualizada',
     );
   }
