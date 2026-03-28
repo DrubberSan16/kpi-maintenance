@@ -2160,6 +2160,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         if (['NEGATIVO', 'NEGATIVE'].includes(normalized)) return 'NORMAL';
         return 'N/D';
       }
+      if (String(definition?.key || '') === 'COMBUSTIBLE') {
+        const normalized = this.normalizeSearchToken(textValue);
+        if (['POSITIVO', 'POSITIVE', 'PRESENTE', 'PRESENCE'].includes(normalized))
+          return 'ANORMAL';
+        if (['NEGATIVO', 'NEGATIVE', 'AUSENTE', 'ABSENT'].includes(normalized))
+          return 'NORMAL';
+        return 'N/D';
+      }
     }
     if (definition) {
       const normalizedText = this.normalizeSearchToken(textValue);
@@ -2323,11 +2331,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const rawText = String(detalle.resultado_texto ?? '').trim();
       let normalizedText = rawText || null;
 
-      if (String(definition?.key || '') === 'HUMEDAD') {
+      if (['HUMEDAD', 'COMBUSTIBLE'].includes(String(definition?.key || ''))) {
         const humidityToken = this.normalizeSearchToken(rawText);
         if (rawText && !['NEGATIVO', 'POSITIVO'].includes(humidityToken)) {
           throw new BadRequestException(
-            'El parametro Humedad solo permite NEGATIVO o POSITIVO.',
+            `El parametro ${definition?.label || detalle.parametro} solo permite NEGATIVO o POSITIVO.`,
           );
         }
         normalizedText = rawText ? humidityToken : normalizedText;
@@ -2896,7 +2904,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             const numericValue = this.getWorkbookCellNumber(sheet, item.row, column);
             const usesText = this.lubricantMetricUsesTextResult(definition);
             const normalizedText =
-              String(definition?.key || '') === 'HUMEDAD'
+              ['HUMEDAD', 'COMBUSTIBLE'].includes(
+                String(definition?.key || ''),
+              )
                 ? this.normalizeSearchToken(textValue)
                 : textValue || null;
 
@@ -3143,7 +3153,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               );
               const usesText = this.lubricantMetricUsesTextResult(definition);
               const normalizedText =
-                String(definition?.key || '') === 'HUMEDAD'
+                ['HUMEDAD', 'COMBUSTIBLE'].includes(
+                  String(definition?.key || ''),
+                )
                   ? this.normalizeSearchToken(textValue)
                   : textValue || null;
 
