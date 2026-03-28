@@ -864,6 +864,24 @@ export class KpiMaintenanceController {
 
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({
+    summary: 'Descargar formato válido de carga para análisis de lubricante',
+  })
+  @Get('inteligencia/analisis-lubricante/import/template')
+  downloadAnalisisLubricanteTemplate(@Res() res: Response) {
+    const template = this.service.getAnalisisLubricanteImportTemplate();
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${template.filename}"`,
+    );
+    res.send(template.buffer);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
     summary: 'Consultar estado, progreso y logs de una importación de lubricante',
   })
   @Get('inteligencia/analisis-lubricante/import/:jobId')

@@ -2789,7 +2789,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           (name) => this.normalizeWorkbookToken(name) === 'MOTOR',
         ) || ''
       ];
-    const byHeader = this.getWorkbookCellText(motorSheet, 3, 20);
+    const motorHeaderRow = this.getLubricantSheetHeaderRows(motorSheet)[0] ?? 2;
+    const motorLabelColumn = this.getLubricantSheetLabelColumn(
+      motorSheet,
+      motorHeaderRow,
+    );
+    const motorValueColumn = this.getLubricantSheetValueColumn(
+      motorSheet,
+      motorHeaderRow,
+      motorLabelColumn,
+    );
+    const byHeader =
+      this.getWorkbookCellText(motorSheet, motorHeaderRow + 1, motorValueColumn) ||
+      this.getWorkbookCellText(motorSheet, 3, 20);
     if (byHeader) return byHeader;
 
     const dataSheet = workbook.Sheets.Datos;
@@ -2903,32 +2915,116 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private isMeaningfulWorkbookHeaderValue(value: unknown) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return false;
+    const normalized = this.slugifyWorkbookToken(raw);
+    if (!normalized) return false;
+    return ![
+      'COMPARTIMENTO',
+      'EQUIPO',
+      'MARCA',
+      'SERIE',
+      'MODELO',
+      'LUBRICANTE',
+      'MARCADELLUBRICANTE',
+      'NOMBREDELCLIENTE',
+    ].includes(normalized);
+  }
+
+  private getLubricantSheetLabelColumn(
+    sheet: XLSX.WorkSheet | undefined,
+    headerRow: number,
+  ) {
+    if (!sheet) return 8;
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const targets = [
+      { offset: 0, token: 'COMPARTIMENTO' },
+      { offset: 1, token: 'EQUIPO' },
+      { offset: 5, token: 'LUBRICANTE' },
+      { offset: 6, token: 'MARCADELLUBRICANTE' },
+    ];
+    let bestColumn = 8;
+    let bestScore = -1;
+
+    for (let column = 1; column <= range.e.c + 1; column += 1) {
+      let score = 0;
+      for (const target of targets) {
+        const value = this.slugifyWorkbookToken(
+          this.getWorkbookCellText(sheet, headerRow + target.offset, column),
+        );
+        if (value === target.token) {
+          score += 1;
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestColumn = column;
+      }
+    }
+
+    return bestColumn;
+  }
+
+  private getLubricantSheetValueColumn(
+    sheet: XLSX.WorkSheet | undefined,
+    headerRow: number,
+    labelColumn: number,
+  ) {
+    if (!sheet) return 20;
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    let bestColumn = 20;
+    let bestScore = -1;
+
+    for (let column = labelColumn + 1; column <= range.e.c + 1; column += 1) {
+      let score = 0;
+      for (const rowOffset of [0, 1, 2, 3, 4, 5, 6]) {
+        if (
+          this.isMeaningfulWorkbookHeaderValue(
+            this.getWorkbookCellValue(sheet, headerRow + rowOffset, column),
+          )
+        ) {
+          score += 1;
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestColumn = column;
+      }
+    }
+
+    return bestScore > 0 ? bestColumn : 20;
+  }
+
   private getLubricantSheetHeaderRows(sheet: XLSX.WorkSheet | undefined) {
     if (!sheet) return [];
     const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
     const starts: number[] = [];
 
     for (let row = 1; row <= range.e.r + 1; row += 1) {
-      const compartimentoLabel = this.slugifyWorkbookToken(
-        this.getWorkbookCellText(sheet, row, 8),
-      );
-      const equipoLabel = this.slugifyWorkbookToken(
-        this.getWorkbookCellText(sheet, row + 1, 8),
-      );
-      const lubricanteLabel = this.slugifyWorkbookToken(
-        this.getWorkbookCellText(sheet, row + 5, 8),
-      );
-      const marcaLubricanteLabel = this.slugifyWorkbookToken(
-        this.getWorkbookCellText(sheet, row + 6, 8),
-      );
+      for (let column = 1; column <= range.e.c + 1; column += 1) {
+        const compartimentoLabel = this.slugifyWorkbookToken(
+          this.getWorkbookCellText(sheet, row, column),
+        );
+        const equipoLabel = this.slugifyWorkbookToken(
+          this.getWorkbookCellText(sheet, row + 1, column),
+        );
+        const lubricanteLabel = this.slugifyWorkbookToken(
+          this.getWorkbookCellText(sheet, row + 5, column),
+        );
+        const marcaLubricanteLabel = this.slugifyWorkbookToken(
+          this.getWorkbookCellText(sheet, row + 6, column),
+        );
 
-      if (
-        compartimentoLabel === 'COMPARTIMENTO' &&
-        equipoLabel === 'EQUIPO' &&
-        lubricanteLabel === 'LUBRICANTE' &&
-        marcaLubricanteLabel === 'MARCADELLUBRICANTE'
-      ) {
-        starts.push(row);
+        if (
+          compartimentoLabel === 'COMPARTIMENTO' &&
+          equipoLabel === 'EQUIPO' &&
+          lubricanteLabel === 'LUBRICANTE' &&
+          marcaLubricanteLabel === 'MARCADELLUBRICANTE'
+        ) {
+          starts.push(row);
+          break;
+        }
       }
     }
 
@@ -3150,10 +3246,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         for (let blockIndex = 0; blockIndex < headerRows.length; blockIndex += 1) {
           const headerRow = headerRows[blockIndex];
           const rowOffset = headerRow - 2;
+          const labelColumn = this.getLubricantSheetLabelColumn(
+            sheet,
+            headerRow,
+          );
+          const valueColumn = this.getLubricantSheetValueColumn(
+            sheet,
+            headerRow,
+            labelColumn,
+          );
           const compartimento = this.normalizeImportedCompartment(
-            this.getWorkbookCellText(sheet, headerRow, 20) || sheetName,
+            this.getWorkbookCellText(sheet, headerRow, valueColumn) ||
+              this.getWorkbookCellText(sheet, headerRow, 20) ||
+              sheetName,
           );
           const equipmentHint =
+            this.getWorkbookCellText(sheet, headerRow + 1, valueColumn) ||
             this.getWorkbookCellText(sheet, headerRow + 1, 20) ||
             workbookEquipmentHint;
           const equipmentContext = equipmentHint
@@ -3161,19 +3269,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             : workbookEquipment;
           const cliente =
             this.getWorkbookCellText(sheet, headerRow + 2, 3) ||
+            this.getWorkbookCellText(sheet, headerRow + 2, valueColumn) ||
             'JUSTICE COMPANY';
-          const lubricante = this.getWorkbookCellText(sheet, headerRow + 5, 20);
+          const lubricante =
+            this.getWorkbookCellText(sheet, headerRow + 5, valueColumn) ||
+            this.getWorkbookCellText(sheet, headerRow + 5, 20);
           const marcaLubricante = this.getWorkbookCellText(
+            sheet,
+            headerRow + 6,
+            valueColumn,
+          ) || this.getWorkbookCellText(
             sheet,
             headerRow + 6,
             20,
           );
           const serie =
-            this.getWorkbookCellText(sheet, headerRow + 3, 20) || null;
+            this.getWorkbookCellText(sheet, headerRow + 3, valueColumn) ||
+            this.getWorkbookCellText(sheet, headerRow + 3, 20) ||
+            null;
           const modelo =
-            this.getWorkbookCellText(sheet, headerRow + 4, 20) || null;
+            this.getWorkbookCellText(sheet, headerRow + 4, valueColumn) ||
+            this.getWorkbookCellText(sheet, headerRow + 4, 20) ||
+            null;
           const marcaEquipo =
             equipmentContext.marcaNombre ||
+            this.getWorkbookCellText(sheet, headerRow + 2, valueColumn) ||
             this.getWorkbookCellText(sheet, headerRow + 2, 20) ||
             null;
 
@@ -3361,6 +3481,98 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         sheets: validSheets,
       };
     })();
+  }
+
+  getAnalisisLubricanteImportTemplate() {
+    const workbook = XLSX.utils.book_new();
+    const rows: (string | number | null)[][] = Array.from(
+      { length: 70 },
+      () => Array.from({ length: 15 }, () => null),
+    );
+    const setCell = (row: number, column: number, value: string | number | null) => {
+      rows[row - 1][column - 1] = value;
+    };
+
+    setCell(1, 1, 'REPORTE DE ANÁLISIS DE LUBRICANTE');
+    setCell(2, 3, 'NOMBRE DEL CLIENTE:');
+    setCell(2, 8, 'Compartimento:');
+    setCell(2, 12, 'MOTOR');
+    setCell(3, 8, 'Equipo:');
+    setCell(3, 12, 'UG 00');
+    setCell(4, 3, 'JUSTICE COMPANY');
+    setCell(4, 8, 'Marca:');
+    setCell(4, 12, 'MARCA EQUIPO');
+    setCell(5, 8, 'Serie:');
+    setCell(5, 12, 'SERIE');
+    setCell(6, 8, 'Modelo:');
+    setCell(6, 12, 'MODELO');
+    setCell(7, 8, 'Lubricante:');
+    setCell(7, 12, '15W40');
+    setCell(8, 8, 'Marca del Lubricante:');
+    setCell(8, 12, 'GULF');
+    setCell(10, 2, 'INFORMACIÓN DE LA MUESTRA');
+    setCell(12, 2, 'Numeración de Muestra');
+    setCell(12, 3, 'MUESTRA-001');
+    setCell(13, 2, 'Fecha de Muestreo');
+    setCell(13, 3, '2026-03-28');
+    setCell(14, 2, 'Fecha de Ingreso');
+    setCell(14, 3, '2026-03-29');
+    setCell(15, 2, 'Fecha de Informe');
+    setCell(15, 3, '2026-03-30');
+    setCell(16, 2, 'Equipo Hrs/ Km');
+    setCell(16, 3, 12000);
+    setCell(17, 2, 'Aceite Hrs/ Km');
+    setCell(17, 3, 320);
+    setCell(18, 2, 'Condición');
+    setCell(18, 3, 'NORMAL');
+    setCell(20, 2, 'ESTADO DEL LUBRICANTE');
+    setCell(30, 2, 'DEGRADACIÓN QUÍMICA');
+    setCell(37, 2, 'CONTAMINACIÓN DEL LUBRICANTE - PPM (mg/kg)');
+    setCell(44, 2, 'DESGASTE DEL EQUIPO - PPM (mg/kg)');
+    setCell(53, 2, 'OTROS ELEMENTOS');
+    setCell(61, 2, 'PRESENCIA DE ADITIVOS');
+
+    for (const item of LUBRICANT_IMPORT_PARAMETER_ROWS) {
+      const definition = this.getLubricantMetricDefinition(item.label);
+      setCell(item.row, 2, definition?.label ?? item.label);
+      if (String(definition?.key || '') === 'HUMEDAD') {
+        setCell(item.row, 3, 'NEGATIVO');
+      } else if (String(definition?.key || '') === 'COMBUSTIBLE') {
+        setCell(item.row, 3, 'NEGATIVO');
+      } else if (this.lubricantMetricUsesTextResult(definition)) {
+        setCell(item.row, 3, 'N/D');
+      } else {
+        setCell(item.row, 3, 0);
+      }
+    }
+
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet['!cols'] = Array.from({ length: 15 }, (_, index) => ({
+      wch: index === 1 ? 28 : index === 11 ? 22 : 16,
+    }));
+    XLSX.utils.book_append_sheet(workbook, sheet, 'MOTOR');
+
+    const instructivoSheet = XLSX.utils.aoa_to_sheet([
+      ['INSTRUCTIVO'],
+      ['1. Complete la cabecera del análisis en la columna L o en la columna equivalente de valores.'],
+      ['2. Cada columna desde la C representa un análisis independiente.'],
+      ['3. Cada análisis debe tener al menos una fecha válida en Muestreo, Ingreso o Informe.'],
+      ['4. Humedad y Combustible solo aceptan NEGATIVO o POSITIVO.'],
+      ['5. Condición solo acepta NORMAL, ANORMAL, PRECAUCION o N/D.'],
+      ['6. Puede dejar parámetros vacíos si el laboratorio no reportó valor.'],
+    ]);
+    instructivoSheet['!cols'] = [{ wch: 100 }];
+    XLSX.utils.book_append_sheet(workbook, instructivoSheet, 'Instructivo');
+
+    const buffer = XLSX.write(workbook, {
+      type: 'buffer',
+      bookType: 'xlsx',
+    }) as Buffer;
+
+    return {
+      filename: 'FORMATO_CARGA_ANALISIS_LUBRICANTE.xlsx',
+      buffer,
+    };
   }
 
   private resolveDashboardDateRange(
