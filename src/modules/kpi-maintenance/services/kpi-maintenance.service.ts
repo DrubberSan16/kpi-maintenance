@@ -2725,7 +2725,79 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private parseLubricantWorkbook(
+  private isMeaningfulWorkbookSampleId(value: unknown) {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    if (!normalized) return false;
+    return !['0', '0.0', 'N/D', 'ND', 'NULL', 'NONE'].includes(normalized);
+  }
+
+  private hasLubricantSampleData(
+    sheet: XLSX.WorkSheet | undefined,
+    headerRow: number,
+    columnNumber: number,
+  ) {
+    const numeroMuestra = this.getWorkbookCellValue(
+      sheet,
+      headerRow + 10,
+      columnNumber,
+    );
+    if (this.isMeaningfulWorkbookSampleId(numeroMuestra)) return true;
+
+    if (this.getWorkbookCellDate(sheet, headerRow + 11, columnNumber)) return true;
+    if (this.getWorkbookCellDate(sheet, headerRow + 12, columnNumber)) return true;
+    if (this.getWorkbookCellDate(sheet, headerRow + 13, columnNumber)) return true;
+    if (this.getWorkbookCellNumber(sheet, headerRow + 14, columnNumber) != null)
+      return true;
+    if (this.getWorkbookCellNumber(sheet, headerRow + 15, columnNumber) != null)
+      return true;
+
+    const condicion = this.getWorkbookCellText(sheet, headerRow + 16, columnNumber);
+    if (condicion) return true;
+
+    const parameterRowOffset = headerRow - 2;
+    return LUBRICANT_IMPORT_PARAMETER_ROWS.some((item) => {
+      const value = this.getWorkbookCellValue(
+        sheet,
+        item.row + parameterRowOffset,
+        columnNumber,
+      );
+      return value != null && String(value).trim() !== '';
+    });
+  }
+
+  private getLubricantSheetHeaderRows(sheet: XLSX.WorkSheet | undefined) {
+    if (!sheet) return [];
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const starts: number[] = [];
+
+    for (let row = 1; row <= range.e.r + 1; row += 1) {
+      const compartimentoLabel = this.slugifyWorkbookToken(
+        this.getWorkbookCellText(sheet, row, 8),
+      );
+      const equipoLabel = this.slugifyWorkbookToken(
+        this.getWorkbookCellText(sheet, row + 1, 8),
+      );
+      const lubricanteLabel = this.slugifyWorkbookToken(
+        this.getWorkbookCellText(sheet, row + 5, 8),
+      );
+      const marcaLubricanteLabel = this.slugifyWorkbookToken(
+        this.getWorkbookCellText(sheet, row + 6, 8),
+      );
+
+      if (
+        compartimentoLabel === 'COMPARTIMENTO' &&
+        equipoLabel === 'EQUIPO' &&
+        lubricanteLabel === 'LUBRICANTE' &&
+        marcaLubricanteLabel === 'MARCADELLUBRICANTE'
+      ) {
+        starts.push(row);
+      }
+    }
+
+    return [...new Set(starts)];
+  }
+
+  private parseLubricantWorkbookLegacy(
     buffer: Buffer,
     fileName: string,
   ): Promise<ParsedLubricantWorkbook> {
@@ -2878,6 +2950,257 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             },
             detalles,
           });
+        }
+      }
+
+      return {
+        analyses,
+        warnings,
+        sheets: validSheets,
+      };
+    })();
+  }
+
+  private parseLubricantWorkbook(
+    buffer: Buffer,
+    fileName: string,
+  ): Promise<ParsedLubricantWorkbook> {
+    return (async () => {
+      const workbook = XLSX.read(buffer, {
+        type: 'buffer',
+        cellDates: true,
+      });
+      const warnings: string[] = [];
+      const validSheets = workbook.SheetNames.filter((sheetName) =>
+        LUBRICANT_IMPORT_SHEETS.some(
+          (item) =>
+            this.normalizeWorkbookToken(item) ===
+            this.normalizeWorkbookToken(sheetName),
+        ),
+      );
+
+      if (!validSheets.length) {
+        throw new BadRequestException(
+          'El archivo no contiene hojas válidas de análisis de lubricante.',
+        );
+      }
+
+      const workbookEquipmentHint = this.resolveWorkbookEquipmentHint(
+        workbook,
+        fileName,
+      );
+      const workbookEquipment = await this.resolveLubricantImportEquipment(
+        workbookEquipmentHint,
+      );
+      const analyses: CreateAnalisisLubricanteDto[] = [];
+
+      for (const sheetName of validSheets) {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) continue;
+
+        const detectedHeaderRows = this.getLubricantSheetHeaderRows(sheet);
+        const headerRows = detectedHeaderRows.length ? detectedHeaderRows : [2];
+
+        if (detectedHeaderRows.length > 1) {
+          warnings.push(
+            `La hoja ${sheetName} contiene ${detectedHeaderRows.length} cabeceras de análisis. Se procesarán como bloques independientes.`,
+          );
+        }
+
+        for (let blockIndex = 0; blockIndex < headerRows.length; blockIndex += 1) {
+          const headerRow = headerRows[blockIndex];
+          const rowOffset = headerRow - 2;
+          const compartimento = this.normalizeImportedCompartment(
+            this.getWorkbookCellText(sheet, headerRow, 20) || sheetName,
+          );
+          const equipmentHint =
+            this.getWorkbookCellText(sheet, headerRow + 1, 20) ||
+            workbookEquipmentHint;
+          const equipmentContext = equipmentHint
+            ? await this.resolveLubricantImportEquipment(equipmentHint)
+            : workbookEquipment;
+          const cliente =
+            this.getWorkbookCellText(sheet, headerRow + 2, 3) ||
+            'JUSTICE COMPANY';
+          const lubricante = this.getWorkbookCellText(sheet, headerRow + 5, 20);
+          const marcaLubricante = this.getWorkbookCellText(
+            sheet,
+            headerRow + 6,
+            20,
+          );
+          const serie =
+            this.getWorkbookCellText(sheet, headerRow + 3, 20) || null;
+          const modelo =
+            this.getWorkbookCellText(sheet, headerRow + 4, 20) || null;
+          const marcaEquipo =
+            equipmentContext.marcaNombre ||
+            this.getWorkbookCellText(sheet, headerRow + 2, 20) ||
+            null;
+
+          const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+          const sampleColumns: number[] = [];
+          for (let column = 3; column <= range.e.c + 1; column += 1) {
+            if (this.hasLubricantSampleData(sheet, headerRow, column)) {
+              sampleColumns.push(column);
+            }
+          }
+
+          if (
+            !lubricante &&
+            !marcaLubricante &&
+            !equipmentHint &&
+            !sampleColumns.length
+          ) {
+            continue;
+          }
+
+          const blockLabel =
+            headerRows.length > 1 ? ` (bloque ${blockIndex + 1})` : '';
+
+          if (!lubricante) {
+            warnings.push(
+              `La hoja ${sheetName}${blockLabel} no contiene valor en la cabecera de Lubricante.`,
+            );
+          }
+          if (!marcaLubricante) {
+            warnings.push(
+              `La hoja ${sheetName}${blockLabel} no contiene valor en la cabecera de Marca del Lubricante.`,
+            );
+          }
+          if (!equipmentHint) {
+            warnings.push(
+              `La hoja ${sheetName}${blockLabel} no contiene valor en la cabecera de Equipo.`,
+            );
+          }
+          if (!sampleColumns.length) {
+            warnings.push(
+              `La hoja ${sheetName}${blockLabel} no contiene muestras válidas debajo de la cabecera.`,
+            );
+          }
+
+          if (!lubricante || !marcaLubricante || !sampleColumns.length) {
+            continue;
+          }
+
+          for (const column of sampleColumns) {
+            const numeroMuestraRaw = this.getWorkbookCellValue(
+              sheet,
+              headerRow + 10,
+              column,
+            );
+            const numeroMuestra = this.isMeaningfulWorkbookSampleId(numeroMuestraRaw)
+              ? String(numeroMuestraRaw ?? '').trim()
+              : '';
+            const fechaMuestra = this.getWorkbookCellDate(
+              sheet,
+              headerRow + 11,
+              column,
+            );
+            const fechaIngreso = this.getWorkbookCellDate(
+              sheet,
+              headerRow + 12,
+              column,
+            );
+            const fechaInforme = this.getWorkbookCellDate(
+              sheet,
+              headerRow + 13,
+              column,
+            );
+            const horasEquipo = this.getWorkbookCellNumber(
+              sheet,
+              headerRow + 14,
+              column,
+            );
+            const horasLubricante = this.getWorkbookCellNumber(
+              sheet,
+              headerRow + 15,
+              column,
+            );
+            const condicion = this.normalizeLubricantCondition(
+              this.getWorkbookCellText(sheet, headerRow + 16, column) || 'N/D',
+            );
+
+            if (
+              !numeroMuestra &&
+              !fechaMuestra &&
+              !fechaInforme &&
+              horasEquipo == null &&
+              horasLubricante == null
+            ) {
+              continue;
+            }
+
+            const detalles = LUBRICANT_IMPORT_PARAMETER_ROWS.map((item) => {
+              const definition = this.getLubricantMetricDefinition(item.label);
+              const targetRow = item.row + rowOffset;
+              const textValue = this.getWorkbookCellText(
+                sheet,
+                targetRow,
+                column,
+              );
+              const numericValue = this.getWorkbookCellNumber(
+                sheet,
+                targetRow,
+                column,
+              );
+              const usesText = this.lubricantMetricUsesTextResult(definition);
+              const normalizedText =
+                String(definition?.key || '') === 'HUMEDAD'
+                  ? this.normalizeSearchToken(textValue)
+                  : textValue || null;
+
+              return {
+                compartimento,
+                numero_muestra: numeroMuestra || undefined,
+                parametro: definition?.label || item.label,
+                resultado_numerico:
+                  usesText || normalizedText
+                    ? usesText
+                      ? undefined
+                      : numericValue ?? undefined
+                    : numericValue ?? undefined,
+                resultado_texto:
+                  usesText || (!Number.isFinite(Number(numericValue)) && normalizedText)
+                    ? normalizedText ?? undefined
+                    : undefined,
+                unidad: definition?.unit ?? undefined,
+                orden: definition?.order ?? targetRow,
+              };
+            });
+
+            analyses.push({
+              cliente,
+              equipo_id: equipmentContext.equipo?.id ?? undefined,
+              equipo_codigo: equipmentContext.equipoCodigo || undefined,
+              equipo_nombre: equipmentContext.equipoNombre || undefined,
+              lubricante: lubricante || undefined,
+              marca_lubricante: marcaLubricante || undefined,
+              compartimento_principal: compartimento || undefined,
+              fecha_muestra: fechaMuestra || undefined,
+              fecha_reporte: fechaInforme || undefined,
+              estado_diagnostico: condicion,
+              documento_origen: fileName,
+              payload_json: {
+                sample_info: {
+                  numero_muestra: numeroMuestra || undefined,
+                  fecha_ingreso: fechaIngreso,
+                  fecha_informe: fechaInforme,
+                  horas_equipo: horasEquipo,
+                  horas_lubricante: horasLubricante,
+                  condicion,
+                  equipo_marca: marcaEquipo,
+                  equipo_serie: serie,
+                  equipo_modelo: modelo,
+                  lubricante: lubricante || null,
+                  marca_lubricante: marcaLubricante || null,
+                  compartimento,
+                  hoja_origen: sheetName,
+                  bloque_hoja: blockIndex + 1,
+                },
+              },
+              detalles,
+            });
+          }
         }
       }
 
