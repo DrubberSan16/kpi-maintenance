@@ -8,10 +8,11 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { URLSearchParams } from 'url';
-import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
+import { appendFile, mkdir, readFile, unlink, writeFile } from 'fs/promises';
 import { basename, extname, join } from 'path';
+import * as XLSX from 'xlsx';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
@@ -179,6 +180,61 @@ type AlertCandidate = {
   payload_json: Record<string, unknown>;
 };
 
+type AnalisisLubricanteSaveOptions = {
+  skipAlertRecalc?: boolean;
+  skipProcessEvent?: boolean;
+};
+
+type LubricantImportLogLevel = 'INFO' | 'WARNING' | 'ERROR';
+type LubricantImportJobStatus =
+  | 'QUEUED'
+  | 'PARSING'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED';
+
+type LubricantImportLogEntry = {
+  at: string;
+  level: LubricantImportLogLevel;
+  message: string;
+  context?: Record<string, unknown> | null;
+};
+
+type LubricantImportJobState = {
+  id: string;
+  status: LubricantImportJobStatus;
+  progress: number;
+  current_step: string;
+  current_index: number;
+  total_steps: number;
+  upsert_existing: boolean;
+  requested_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  source_file_name: string;
+  stored_file_name: string;
+  stored_file_path: string;
+  file_size_bytes: number;
+  warnings: string[];
+  errors: Array<{ index: number; message: string }>;
+  logs: LubricantImportLogEntry[];
+  summary: {
+    total: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    imported_ids: string[];
+  };
+  error_message: string | null;
+};
+
+type ParsedLubricantWorkbook = {
+  analyses: CreateAnalisisLubricanteDto[];
+  warnings: string[];
+  sheets: string[];
+};
+
 const LUBRICANT_GROUP_LABELS: Record<LubricantMetricGroupKey, string> = {
   ESTADO_LUBRICANTE: 'Estado del lubricante',
   DEGRADACION_QUIMICA: 'Degradación química',
@@ -187,6 +243,54 @@ const LUBRICANT_GROUP_LABELS: Record<LubricantMetricGroupKey, string> = {
   OTROS_ELEMENTOS: 'Otros elementos',
   ADITIVOS: 'Presencia de aditivos',
 };
+
+const LUBRICANT_IMPORT_SHEETS = [
+  'MOTOR',
+  'HIDRAULICO',
+  'TRANSMISION',
+  'INDUSTRTIAL',
+  'DIFERENCIAL DELANTERO',
+  'DIFERENCIAL POSTERIOR',
+  'SWING',
+  'ENGRANAJE DE LA BOMBA',
+  'MANDO FINAL DERECHO',
+  'MANDO FINAL IZQUIERDO',
+  'TANDEM DERECHO',
+  'TANDEM IZQUIERDO',
+];
+
+const LUBRICANT_IMPORT_PARAMETER_ROWS = [
+  { row: 22, label: 'Viscosidad a 100ÂºC, cSt' },
+  { row: 23, label: 'Viscosidad a 40ÂºC, cSt' },
+  { row: 24, label: 'Indice de Viscosidad' },
+  { row: 25, label: 'T.B.N. mgKOH/gr' },
+  { row: 26, label: 'Humedad' },
+  { row: 27, label: 'Glycol, Abs/cm' },
+  { row: 28, label: 'Combustible' },
+  { row: 32, label: 'OxidaciÃ³n, Abs/cm' },
+  { row: 33, label: 'NitraciÃ³n, Abs/cm' },
+  { row: 34, label: 'SulfataciÃ³n, Abs/cm' },
+  { row: 35, label: 'HollÃ­n, wt%' },
+  { row: 39, label: 'Si (Silicio)' },
+  { row: 40, label: 'Na (Sodio)' },
+  { row: 41, label: 'Vanadio (V)' },
+  { row: 42, label: 'Ni (Niquel)' },
+  { row: 46, label: 'Fe (Hierro)' },
+  { row: 47, label: 'Cr (Cromo)' },
+  { row: 48, label: 'Al (Aluminio)' },
+  { row: 49, label: 'Cu (Cobre)' },
+  { row: 50, label: 'Pb (Plomo)' },
+  { row: 51, label: 'EstaÃ±o (Sn)' },
+  { row: 55, label: 'Mo (Molibdeno)' },
+  { row: 56, label: 'B (Boro)' },
+  { row: 57, label: 'Ba (Bario)' },
+  { row: 58, label: 'Ti (Titanio)' },
+  { row: 59, label: 'Ag (Plata)' },
+  { row: 63, label: 'Ca (Calcio)' },
+  { row: 64, label: 'Mg (Magnesio)' },
+  { row: 65, label: 'Zn (Zinc)' },
+  { row: 66, label: 'P (Fosforo)' },
+] as const;
 
 const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
   {
@@ -569,6 +673,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly uploadRoot =
     process.env.WORK_ORDER_UPLOAD_DIR ||
     join(process.cwd(), 'storage', 'work-orders');
+  private readonly lubricantImportRoot =
+    process.env.LUBRICANT_IMPORT_DIR ||
+    join(process.cwd(), 'storage', 'lubricant-imports');
+  private readonly lubricantImportJobs = new Map<string, LubricantImportJobState>();
 
   private buildProductoLabel(producto?: Partial<ProductoEntity> | null) {
     if (!producto) return null;
@@ -2446,6 +2554,330 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       fechaMuestra || 'SIN_FECHA',
       lubricanteKey || 'SIN_LUBRICANTE',
     ].join('::');
+  }
+
+  private coerceBoolean(value: unknown, fallback = false) {
+    if (typeof value === 'boolean') return value;
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (!raw) return fallback;
+    if (['true', '1', 'si', 'sí', 'yes'].includes(raw)) return true;
+    if (['false', '0', 'no'].includes(raw)) return false;
+    return fallback;
+  }
+
+  private normalizeWorkbookToken(value: unknown) {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  }
+
+  private slugifyWorkbookToken(value: unknown) {
+    return this.normalizeWorkbookToken(value).replace(/[^A-Z0-9]/g, '');
+  }
+
+  private getWorkbookCellValue(
+    sheet: XLSX.WorkSheet | undefined,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    if (!sheet) return null;
+    const cell = sheet[
+      XLSX.utils.encode_cell({ r: rowNumber - 1, c: columnNumber - 1 })
+    ];
+    return cell?.v ?? null;
+  }
+
+  private getWorkbookCellText(
+    sheet: XLSX.WorkSheet | undefined,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    const value = this.getWorkbookCellValue(sheet, rowNumber, columnNumber);
+    return String(value ?? '').trim();
+  }
+
+  private getWorkbookCellNumber(
+    sheet: XLSX.WorkSheet | undefined,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    const value = this.getWorkbookCellValue(sheet, rowNumber, columnNumber);
+    if (value == null || value === '') return null;
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : Number(String(value).replace(/,/g, '.'));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private getWorkbookCellDate(
+    sheet: XLSX.WorkSheet | undefined,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    const value = this.getWorkbookCellValue(sheet, rowNumber, columnNumber);
+    return this.safeDateOnlyString(value);
+  }
+
+  private normalizeImportedCompartment(value: unknown) {
+    const normalized = this.normalizeWorkbookToken(value);
+    return (
+      LUBRICANT_IMPORT_SHEETS.find(
+        (item) => this.normalizeWorkbookToken(item) === normalized,
+      ) ?? String(value ?? '').trim().toUpperCase()
+    );
+  }
+
+  private resolveWorkbookEquipmentHint(
+    workbook: XLSX.WorkBook,
+    fileName: string,
+  ) {
+    const motorSheet =
+      workbook.Sheets.MOTOR ||
+      workbook.Sheets[
+        workbook.SheetNames.find(
+          (name) => this.normalizeWorkbookToken(name) === 'MOTOR',
+        ) || ''
+      ];
+    const byHeader = this.getWorkbookCellText(motorSheet, 3, 20);
+    if (byHeader) return byHeader;
+
+    const dataSheet = workbook.Sheets.Datos;
+    const byDatos = this.getWorkbookCellText(dataSheet, 28, 9);
+    if (byDatos) return byDatos;
+
+    const match = String(fileName || '')
+      .toUpperCase()
+      .match(/UGN?\s*[- ]?\s*0*(\d{1,3})/);
+    if (match) {
+      const [, rawCode = ''] = match;
+      return `UG ${rawCode.padStart(2, '0')}`;
+    }
+
+    return '';
+  }
+
+  private async resolveLubricantImportEquipment(hint: string) {
+    const normalizedHint = this.slugifyWorkbookToken(hint);
+    const numericHint = normalizedHint.replace(/[^0-9]/g, '');
+    if (!normalizedHint && !numericHint) {
+      return {
+        equipo: null as EquipoEntity | null,
+        marcaNombre: null as string | null,
+        equipoCodigo: '',
+        equipoNombre: '',
+      };
+    }
+
+    const equipments = await this.equipoRepo.find({
+      where: { is_deleted: false },
+    });
+    const brandIds = [
+      ...new Set(
+        equipments
+          .map((item) => String(item.marca_id ?? '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const brands = brandIds.length
+      ? await this.marcaRepo.find({ where: { id: In(brandIds), is_deleted: false } })
+      : [];
+    const brandMap = new Map(
+      brands.map((item) => [String(item.id), String(item.nombre ?? '').trim()]),
+    );
+
+    const match = equipments.find((item) => {
+      const code = this.slugifyWorkbookToken(item.codigo);
+      const name = this.slugifyWorkbookToken(item.nombre);
+      const numericCode = code.replace(/[^0-9]/g, '');
+      return (
+        (normalizedHint && (code === normalizedHint || name === normalizedHint)) ||
+        (numericHint &&
+          numericCode === numericHint &&
+          numericHint.length === numericCode.length) ||
+        (normalizedHint &&
+          ((code && normalizedHint.includes(code)) ||
+            (name && normalizedHint.includes(name)) ||
+            (code && code.includes(normalizedHint)) ||
+            (name && name.includes(normalizedHint))))
+      );
+    });
+
+    return {
+      equipo: match ?? null,
+      marcaNombre: match
+        ? String(brandMap.get(String(match.marca_id ?? '')) ?? '').trim() || null
+        : null,
+      equipoCodigo: String(match?.codigo ?? hint ?? '').trim(),
+      equipoNombre: String(match?.nombre ?? '').trim(),
+    };
+  }
+
+  private parseLubricantWorkbook(
+    buffer: Buffer,
+    fileName: string,
+  ): Promise<ParsedLubricantWorkbook> {
+    return (async () => {
+      const workbook = XLSX.read(buffer, {
+        type: 'buffer',
+        cellDates: true,
+      });
+      const warnings: string[] = [];
+      const validSheets = workbook.SheetNames.filter((sheetName) =>
+        LUBRICANT_IMPORT_SHEETS.some(
+          (item) =>
+            this.normalizeWorkbookToken(item) ===
+            this.normalizeWorkbookToken(sheetName),
+        ),
+      );
+
+      if (!validSheets.length) {
+        throw new BadRequestException(
+          'El archivo no contiene hojas válidas de análisis de lubricante.',
+        );
+      }
+
+      const workbookEquipmentHint = this.resolveWorkbookEquipmentHint(
+        workbook,
+        fileName,
+      );
+      const workbookEquipment = await this.resolveLubricantImportEquipment(
+        workbookEquipmentHint,
+      );
+      const analyses: CreateAnalisisLubricanteDto[] = [];
+
+      for (const sheetName of validSheets) {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) continue;
+        const compartimento = this.normalizeImportedCompartment(
+          this.getWorkbookCellText(sheet, 2, 20) || sheetName,
+        );
+        const equipmentHint =
+          this.getWorkbookCellText(sheet, 3, 20) || workbookEquipmentHint;
+        const equipmentContext = equipmentHint
+          ? await this.resolveLubricantImportEquipment(equipmentHint)
+          : workbookEquipment;
+        const cliente = this.getWorkbookCellText(sheet, 4, 3) || 'JUSTICE COMPANY';
+        const lubricante = this.getWorkbookCellText(sheet, 7, 20);
+        const marcaLubricante = this.getWorkbookCellText(sheet, 8, 20);
+        const serie = this.getWorkbookCellText(sheet, 5, 20) || null;
+        const modelo = this.getWorkbookCellText(sheet, 6, 20) || null;
+        const marcaEquipo =
+          equipmentContext.marcaNombre ||
+          this.getWorkbookCellText(sheet, 4, 20) ||
+          null;
+
+        if (!lubricante) {
+          warnings.push(
+            `La hoja ${sheetName} no contiene valor en la posición T7 (Lubricante).`,
+          );
+        }
+        if (!marcaLubricante) {
+          warnings.push(
+            `La hoja ${sheetName} no contiene valor en la posición T8 (Marca del Lubricante).`,
+          );
+        }
+
+        const sampleColumns: number[] = [];
+        const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+        for (let column = 3; column <= range.e.c + 1; column += 1) {
+          const numeroMuestra = this.getWorkbookCellText(sheet, 12, column);
+          if (numeroMuestra) sampleColumns.push(column);
+        }
+        if (!sampleColumns.length) {
+          warnings.push(
+            `La hoja ${sheetName} no contiene columnas de muestra en la fila 12.`,
+          );
+          continue;
+        }
+
+        for (const column of sampleColumns) {
+          const numeroMuestra = this.getWorkbookCellText(sheet, 12, column);
+          const fechaMuestra = this.getWorkbookCellDate(sheet, 13, column);
+          const fechaIngreso = this.getWorkbookCellDate(sheet, 14, column);
+          const fechaInforme = this.getWorkbookCellDate(sheet, 15, column);
+          const horasEquipo = this.getWorkbookCellNumber(sheet, 16, column);
+          const horasLubricante = this.getWorkbookCellNumber(sheet, 17, column);
+          const condicion = this.normalizeLubricantCondition(
+            this.getWorkbookCellText(sheet, 18, column) || 'N/D',
+          );
+
+          if (!numeroMuestra && !fechaMuestra && !fechaInforme) {
+            continue;
+          }
+
+          const detalles = LUBRICANT_IMPORT_PARAMETER_ROWS.map((item) => {
+            const definition = this.getLubricantMetricDefinition(item.label);
+            const textValue = this.getWorkbookCellText(sheet, item.row, column);
+            const numericValue = this.getWorkbookCellNumber(sheet, item.row, column);
+            const usesText = this.lubricantMetricUsesTextResult(definition);
+            const normalizedText =
+              String(definition?.key || '') === 'HUMEDAD'
+                ? this.normalizeSearchToken(textValue)
+                : textValue || null;
+
+            return {
+              compartimento,
+              numero_muestra: numeroMuestra || undefined,
+              parametro: definition?.label || item.label,
+              resultado_numerico:
+                usesText || normalizedText
+                  ? usesText
+                    ? undefined
+                    : numericValue ?? undefined
+                  : numericValue ?? undefined,
+              resultado_texto:
+                usesText || (!Number.isFinite(Number(numericValue)) && normalizedText)
+                  ? normalizedText ?? undefined
+                  : undefined,
+              unidad: definition?.unit ?? undefined,
+              orden: definition?.order ?? item.row,
+            };
+          });
+
+          analyses.push({
+            cliente,
+            equipo_id: equipmentContext.equipo?.id ?? undefined,
+            equipo_codigo: equipmentContext.equipoCodigo || undefined,
+            equipo_nombre: equipmentContext.equipoNombre || undefined,
+            lubricante: lubricante || undefined,
+            marca_lubricante: marcaLubricante || undefined,
+            compartimento_principal: compartimento || undefined,
+            fecha_muestra: fechaMuestra || undefined,
+            fecha_reporte: fechaInforme || undefined,
+            estado_diagnostico: condicion,
+            documento_origen: fileName,
+            payload_json: {
+              sample_info: {
+                numero_muestra: numeroMuestra || undefined,
+                fecha_ingreso: fechaIngreso,
+                fecha_informe: fechaInforme,
+                horas_equipo: horasEquipo,
+                horas_lubricante: horasLubricante,
+                condicion,
+                equipo_marca: marcaEquipo,
+                equipo_serie: serie,
+                equipo_modelo: modelo,
+                lubricante: lubricante || null,
+                marca_lubricante: marcaLubricante || null,
+                compartimento,
+                hoja_origen: sheetName,
+              },
+            },
+            detalles,
+          });
+        }
+      }
+
+      return {
+        analyses,
+        warnings,
+        sheets: validSheets,
+      };
+    })();
   }
 
   private resolveDashboardDateRange(
@@ -4715,7 +5147,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async createAnalisisLubricante(dto: CreateAnalisisLubricanteDto) {
+  async createAnalisisLubricante(
+    dto: CreateAnalisisLubricanteDto,
+    options: AnalisisLubricanteSaveOptions = {},
+  ) {
     let resolution = await this.resolveRequestedAnalisisLubricanteCode(
       dto.codigo,
     );
@@ -4837,7 +5272,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     const payload = await this.buildAnalisisLubricantePayload(saved);
-    await this.registerProcessEvent({
+    if (!options.skipProcessEvent) {
+      await this.registerProcessEvent({
       tipo_proceso: 'ANALISIS_LUBRICANTE',
       accion: 'CREATED',
       referencia_tabla: 'tb_analisis_lubricante',
@@ -4858,8 +5294,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         detalles: payload.detalles.length,
         estado: saved.estado_diagnostico,
       },
-    });
-    await this.triggerAlertRecalculation('analisis-lubricante-create');
+      });
+    }
+    if (!options.skipAlertRecalc) {
+      await this.triggerAlertRecalculation('analisis-lubricante-create');
+    }
     return this.wrap(
       {
         ...payload,
@@ -4871,7 +5310,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async updateAnalisisLubricante(id: string, dto: UpdateAnalisisLubricanteDto) {
+  async updateAnalisisLubricante(
+    id: string,
+    dto: UpdateAnalisisLubricanteDto,
+    options: AnalisisLubricanteSaveOptions = {},
+  ) {
     await this.findOneOrFail(this.analisisLubricanteRepo, { id, is_deleted: false });
 
     await this.dataSource.transaction(async (manager) => {
@@ -4991,7 +5434,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const saved = await this.findOneOrFail(this.analisisLubricanteRepo, { id, is_deleted: false });
     const payload = await this.buildAnalisisLubricantePayload(saved);
-    await this.registerProcessEvent({
+    if (!options.skipProcessEvent) {
+      await this.registerProcessEvent({
       tipo_proceso: 'ANALISIS_LUBRICANTE',
       accion: 'UPDATED',
       referencia_tabla: 'tb_analisis_lubricante',
@@ -5010,8 +5454,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         detalles: payload.detalles.length,
         estado: saved.estado_diagnostico,
       },
-    });
-    await this.triggerAlertRecalculation('analisis-lubricante-update');
+      });
+    }
+    if (!options.skipAlertRecalc) {
+      await this.triggerAlertRecalculation('analisis-lubricante-update');
+    }
     return this.wrap(payload, 'Análisis de lubricante actualizado');
   }
 
@@ -5030,11 +5477,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Análisis de lubricante eliminado');
   }
 
-  async importAnalisisLubricanteBatch(dto: ImportAnalisisLubricanteBatchDto) {
-    const items = Array.isArray(dto.analyses)
-      ? dto.analyses.filter((item) => item && typeof item === 'object')
+  private async importAnalisisLubricanteItems(
+    items: CreateAnalisisLubricanteDto[],
+    options?: {
+      upsertExisting?: boolean;
+      onProgress?: (payload: {
+        index: number;
+        total: number;
+        action: 'created' | 'updated' | 'error';
+        message?: string;
+      }) => Promise<void> | void;
+    },
+  ) {
+    const sanitizedItems = Array.isArray(items)
+      ? items.filter((item) => item && typeof item === 'object')
       : [];
-    if (!items.length) {
+    if (!sanitizedItems.length) {
       throw new BadRequestException(
         'No se recibieron análisis válidos para importar.',
       );
@@ -5061,7 +5519,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const summary = {
-      total: items.length,
+      total: sanitizedItems.length,
       created: 0,
       updated: 0,
       skipped: 0,
@@ -5069,8 +5527,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       imported_ids: [] as string[],
     };
 
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
+    for (let index = 0; index < sanitizedItems.length; index += 1) {
+      const item = sanitizedItems[index];
       try {
         const identity = this.buildAnalisisImportIdentity({
           equipo_id: item.equipo_id ?? null,
@@ -5082,25 +5540,40 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         });
 
         const existing =
-          identity && dto.upsert_existing !== false
+          identity && options?.upsertExisting !== false
             ? existingMap.get(identity) ?? null
             : null;
 
         if (existing) {
-          const updated = (await this.updateAnalisisLubricante(existing.id, {
-            ...item,
-            codigo: existing.codigo,
-          })) as any;
+          const updated = (await this.updateAnalisisLubricante(
+            existing.id,
+            {
+              ...item,
+              codigo: existing.codigo,
+            },
+            {
+              skipAlertRecalc: true,
+              skipProcessEvent: true,
+            },
+          )) as any;
           summary.updated += 1;
           if (updated?.data?.id) {
             summary.imported_ids.push(String(updated.data.id));
           } else {
             summary.imported_ids.push(existing.id);
           }
+          await options?.onProgress?.({
+            index: index + 1,
+            total: sanitizedItems.length,
+            action: 'updated',
+          });
           continue;
         }
 
-        const created = (await this.createAnalisisLubricante(item)) as any;
+        const created = (await this.createAnalisisLubricante(item, {
+          skipAlertRecalc: true,
+          skipProcessEvent: true,
+        })) as any;
         summary.created += 1;
         if (created?.data?.id) {
           summary.imported_ids.push(String(created.data.id));
@@ -5119,6 +5592,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             existingMap.set(createdIdentity, createdRow);
           }
         }
+        await options?.onProgress?.({
+          index: index + 1,
+          total: sanitizedItems.length,
+          action: 'created',
+        });
       } catch (error: any) {
         summary.errors.push({
           index,
@@ -5132,9 +5610,300 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     summary.skipped = summary.errors.length;
 
+    if (summary.created > 0 || summary.updated > 0) {
+      await this.triggerAlertRecalculation('analisis-lubricante-import');
+    }
+
+    return summary; /*
+      `Importación de análisis de lubricante procesada desde ${
+    */
+  }
+
+  private getLubricantImportJobDir(jobId: string) {
+    return join(this.lubricantImportRoot, jobId);
+  }
+
+  private getLubricantImportStatusPath(jobId: string) {
+    return join(this.getLubricantImportJobDir(jobId), 'status.json');
+  }
+
+  private getLubricantImportLogPath(jobId: string) {
+    return join(this.getLubricantImportJobDir(jobId), 'import.log');
+  }
+
+  private buildLubricantImportJobResponse(job: LubricantImportJobState) {
+    return {
+      ...job,
+      logs: [...job.logs].slice(-80),
+    };
+  }
+
+  private async persistLubricantImportJob(job: LubricantImportJobState) {
+    await mkdir(this.getLubricantImportJobDir(job.id), { recursive: true });
+    await writeFile(
+      this.getLubricantImportStatusPath(job.id),
+      JSON.stringify(this.buildLubricantImportJobResponse(job), null, 2),
+      'utf8',
+    );
+  }
+
+  private async loadLubricantImportJob(jobId: string) {
+    const inMemory = this.lubricantImportJobs.get(jobId);
+    if (inMemory) return inMemory;
+    try {
+      const raw = await readFile(this.getLubricantImportStatusPath(jobId), 'utf8');
+      const parsed = JSON.parse(raw) as LubricantImportJobState;
+      this.lubricantImportJobs.set(jobId, parsed);
+      return parsed;
+    } catch {
+      throw new NotFoundException('Importacion de lubricante no encontrada');
+    }
+  }
+
+  private async appendLubricantImportLog(
+    job: LubricantImportJobState,
+    level: LubricantImportLogLevel,
+    message: string,
+    context?: Record<string, unknown> | null,
+  ) {
+    const entry: LubricantImportLogEntry = {
+      at: new Date().toISOString(),
+      level,
+      message,
+      context: context ?? null,
+    };
+    job.logs.push(entry);
+    if (job.logs.length > 200) {
+      job.logs = job.logs.slice(-200);
+    }
+    await mkdir(this.getLubricantImportJobDir(job.id), { recursive: true });
+    await appendFile(
+      this.getLubricantImportLogPath(job.id),
+      `${entry.at} [${entry.level}] ${entry.message}${
+        context ? ` ${JSON.stringify(context)}` : ''
+      }\n`,
+      'utf8',
+    );
+    await this.persistLubricantImportJob(job);
+  }
+
+  async startAnalisisLubricanteImport(
+    file: {
+      originalname?: string;
+      buffer?: Buffer;
+      size?: number;
+    } | null,
+    options?: {
+      upsert_existing?: unknown;
+      requested_by?: string | null;
+    },
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('Debes adjuntar un archivo Excel valido.');
+    }
+    const extension = extname(String(file.originalname ?? '')).toLowerCase();
+    if (!['.xlsx', '.xls'].includes(extension)) {
+      throw new BadRequestException(
+        'El archivo debe tener formato .xlsx o .xls.',
+      );
+    }
+
+    const jobId = randomUUID();
+    const storedFileName = `source${extension || '.xlsx'}`;
+    const storedFilePath = join(
+      this.getLubricantImportJobDir(jobId),
+      storedFileName,
+    );
+    await mkdir(this.getLubricantImportJobDir(jobId), { recursive: true });
+    await writeFile(storedFilePath, file.buffer);
+
+    const job: LubricantImportJobState = {
+      id: jobId,
+      status: 'QUEUED',
+      progress: 0,
+      current_step: 'Archivo recibido',
+      current_index: 0,
+      total_steps: 0,
+      upsert_existing: this.coerceBoolean(options?.upsert_existing, true),
+      requested_by: String(options?.requested_by ?? '').trim() || null,
+      created_at: new Date().toISOString(),
+      started_at: null,
+      finished_at: null,
+      source_file_name: String(file.originalname ?? storedFileName),
+      stored_file_name: storedFileName,
+      stored_file_path: storedFilePath,
+      file_size_bytes: Number(file.size ?? file.buffer.length ?? 0),
+      warnings: [],
+      errors: [],
+      logs: [],
+      summary: {
+        total: 0,
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        imported_ids: [],
+      },
+      error_message: null,
+    };
+
+    this.lubricantImportJobs.set(job.id, job);
+    await this.persistLubricantImportJob(job);
+    await this.appendLubricantImportLog(
+      job,
+      'INFO',
+      'Archivo cargado en servidor y encolado para procesamiento.',
+      {
+        file_name: job.source_file_name,
+        size_bytes: job.file_size_bytes,
+      },
+    );
+    await this.writeSecurityLog({
+      typeLog: 'LUBRICANT_IMPORT_START',
+      description: `Inicio de importacion de lubricante ${job.id} desde ${job.source_file_name}`,
+      createdBy: job.requested_by,
+    });
+
+    setImmediate(() => {
+      void this.runAnalisisLubricanteImport(job.id);
+    });
+
+    return this.wrap(
+      this.buildLubricantImportJobResponse(job),
+      'Archivo de lubricante recibido para procesamiento en segundo plano',
+    );
+  }
+
+  async getAnalisisLubricanteImportStatus(jobId: string) {
+    const job = await this.loadLubricantImportJob(jobId);
+    return this.wrap(
+      this.buildLubricantImportJobResponse(job),
+      'Estado de importacion de lubricante obtenido',
+    );
+  }
+
+  private async runAnalisisLubricanteImport(jobId: string) {
+    const job = await this.loadLubricantImportJob(jobId);
+    try {
+      job.status = 'PARSING';
+      job.started_at = new Date().toISOString();
+      job.progress = 5;
+      job.current_step = 'Leyendo workbook';
+      await this.persistLubricantImportJob(job);
+      await this.appendLubricantImportLog(
+        job,
+        'INFO',
+        'Inicio de lectura y validacion del workbook.',
+      );
+
+      const buffer = await readFile(job.stored_file_path);
+      const parsed = await this.parseLubricantWorkbook(
+        buffer,
+        job.source_file_name,
+      );
+
+      job.warnings = parsed.warnings;
+      job.total_steps = parsed.analyses.length;
+      job.progress = parsed.analyses.length ? 10 : 100;
+      job.current_step = parsed.analyses.length
+        ? 'Procesando muestras'
+        : 'Sin muestras validas';
+      await this.persistLubricantImportJob(job);
+      for (const warning of parsed.warnings) {
+        await this.appendLubricantImportLog(job, 'WARNING', warning);
+      }
+
+      if (!parsed.analyses.length) {
+        throw new BadRequestException(
+          'El archivo no contiene muestras validas para importar.',
+        );
+      }
+
+      job.status = 'PROCESSING';
+      await this.persistLubricantImportJob(job);
+
+      const summary = await this.importAnalisisLubricanteItems(parsed.analyses, {
+        upsertExisting: job.upsert_existing,
+        onProgress: async (payload) => {
+          job.current_index = payload.index;
+          job.total_steps = payload.total;
+          job.current_step = `Procesando muestra ${payload.index} de ${payload.total}`;
+          job.progress = Math.max(
+            10,
+            Math.min(
+              99,
+              Math.round(10 + (payload.index / Math.max(payload.total, 1)) * 85),
+            ),
+          );
+          if (payload.index === 1 || payload.index % 10 === 0) {
+            await this.appendLubricantImportLog(
+              job,
+              payload.action === 'error' ? 'ERROR' : 'INFO',
+              `Avance ${payload.index}/${payload.total}`,
+              {
+                action: payload.action,
+                message: payload.message ?? null,
+              },
+            );
+          } else {
+            await this.persistLubricantImportJob(job);
+          }
+        },
+      });
+
+      job.summary = summary;
+      job.errors = summary.errors;
+      job.status = 'COMPLETED';
+      job.progress = 100;
+      job.current_step = 'Importacion finalizada';
+      job.finished_at = new Date().toISOString();
+      await this.persistLubricantImportJob(job);
+      await this.appendLubricantImportLog(
+        job,
+        summary.errors.length ? 'WARNING' : 'INFO',
+        'Importacion de lubricante completada.',
+        {
+          created: summary.created,
+          updated: summary.updated,
+          errors: summary.errors.length,
+        },
+      );
+      await this.writeSecurityLog({
+        typeLog: 'LUBRICANT_IMPORT_SUCCESS',
+        description: `Importacion de lubricante ${job.id} finalizada. Creados=${summary.created}, actualizados=${summary.updated}, errores=${summary.errors.length}`,
+        createdBy: job.requested_by,
+      });
+    } catch (error: any) {
+      job.status = 'FAILED';
+      job.finished_at = new Date().toISOString();
+      job.current_step = 'Importacion fallida';
+      job.error_message =
+        error?.message || 'Ocurrio un error durante la importacion.';
+      await this.persistLubricantImportJob(job);
+      await this.appendLubricantImportLog(
+        job,
+        'ERROR',
+        'La importacion de lubricante fallo.',
+        { message: job.error_message },
+      );
+      await this.writeSecurityLog({
+        typeLog: 'LUBRICANT_IMPORT_ERROR',
+        description: `Importacion de lubricante ${job.id} fallo: ${job.error_message}`,
+        status: 'ERROR',
+        createdBy: job.requested_by,
+      });
+      this.logger.error(
+        `Error en importacion de lubricante ${job.id}: ${job.error_message}`,
+      );
+    }
+  }
+
+  async importAnalisisLubricanteBatch(dto: ImportAnalisisLubricanteBatchDto) {
+    const summary = await this.importAnalisisLubricanteItems(dto.analyses, {
+      upsertExisting: dto.upsert_existing !== false,
+    });
     return this.wrap(
       summary,
-      `Importación de análisis de lubricante procesada desde ${
+      `Importacion de analisis de lubricante procesada desde ${
         dto.source_file_name || 'archivo'
       }`,
     );

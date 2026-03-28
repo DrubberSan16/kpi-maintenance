@@ -8,10 +8,14 @@ import {
   Post,
   Query,
   Res,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import {
   ApiBody,
+  ApiConsumes,
   ApiOperation,
   ApiParam,
   ApiQuery,
@@ -818,6 +822,52 @@ export class KpiMaintenanceController {
   @Post('inteligencia/analisis-lubricante/import')
   importAnalisisLubricanteBatch(@Body() dto: ImportAnalisisLubricanteBatchDto) {
     return this.service.importAnalisisLubricanteBatch(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary:
+      'Subir archivo Excel de análisis de lubricante para procesarlo en segundo plano',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: {
+        file: { type: 'string', format: 'binary' },
+        upsert_existing: {
+          type: 'boolean',
+          description:
+            'Si es true, actualiza registros existentes que coincidan con la muestra importada',
+        },
+        requested_by: {
+          type: 'string',
+          description: 'Usuario responsable de la carga',
+        },
+      },
+    },
+  })
+  @UseInterceptors(FileInterceptor('file'))
+  @Post('inteligencia/analisis-lubricante/import/upload')
+  uploadAnalisisLubricanteWorkbook(
+    @UploadedFile() file: any,
+    @Body('upsert_existing') upsertExisting?: string | boolean,
+    @Body('requested_by') requestedBy?: string,
+  ) {
+    return this.service.startAnalisisLubricanteImport(file, {
+      upsert_existing: upsertExisting,
+      requested_by: requestedBy,
+    });
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary: 'Consultar estado, progreso y logs de una importación de lubricante',
+  })
+  @Get('inteligencia/analisis-lubricante/import/:jobId')
+  getAnalisisLubricanteImportStatus(@Param('jobId') jobId: string) {
+    return this.service.getAnalisisLubricanteImportStatus(jobId);
   }
 
   @ApiTags('Inteligencia Operativa')
