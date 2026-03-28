@@ -1089,6 +1089,30 @@ export class CreateAnalisisLubricanteDto {
 
 export class UpdateAnalisisLubricanteDto extends CreateAnalisisLubricanteDto {}
 
+export class ImportAnalisisLubricanteBatchDto {
+  @ApiPropertyOptional({ description: 'Nombre del archivo fuente' })
+  @IsOptional()
+  @IsString()
+  source_file_name?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Si es true, actualiza registros existentes que coincidan con la identidad funcional de la muestra',
+  })
+  @IsOptional()
+  @IsBoolean()
+  upsert_existing?: boolean;
+
+  @ApiProperty({
+    description: 'Análisis extraídos desde el Excel para importar en lote',
+    type: [CreateAnalisisLubricanteDto],
+  })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateAnalisisLubricanteDto)
+  analyses: CreateAnalisisLubricanteDto[];
+}
+
 export class AnalisisLubricanteCatalogQueryDto {
   @ApiPropertyOptional({
     description: 'Texto de búsqueda para lubricante, marca o código asociado',

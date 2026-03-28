@@ -43,6 +43,7 @@ import {
   EquipoQueryDto,
   IssueMaterialsDto,
   EventoProcesoQueryDto,
+  ImportAnalisisLubricanteBatchDto,
   UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
   UpdateEquipoDto,
@@ -810,6 +811,13 @@ export class KpiMaintenanceController {
   @Post('inteligencia/analisis-lubricante')
   createAnalisisLubricante(@Body() dto: CreateAnalisisLubricanteDto) {
     return this.service.createAnalisisLubricante(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Importar análisis de lubricante en lote desde un Excel ya parseado' })
+  @Post('inteligencia/analisis-lubricante/import')
+  importAnalisisLubricanteBatch(@Body() dto: ImportAnalisisLubricanteBatchDto) {
+    return this.service.importAnalisisLubricanteBatch(dto);
   }
 
   @ApiTags('Inteligencia Operativa')

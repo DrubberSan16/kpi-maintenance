@@ -93,6 +93,7 @@ import {
   EquipoQueryDto,
   EquipoTipoQueryDto,
   EventoProcesoQueryDto,
+  ImportAnalisisLubricanteBatchDto,
   IssueMaterialsDto,
   UpdateAnalisisLubricanteDto,
   LocationQueryDto,
@@ -2410,6 +2411,41 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.safeDateOnlyString(row.created_at) ??
       null
     );
+  }
+
+  private buildAnalisisImportIdentity(input: {
+    equipo_id?: string | null;
+    equipo_codigo?: string | null;
+    compartimento_principal?: string | null;
+    fecha_muestra?: string | null;
+    lubricante?: string | null;
+    payload_json?: Record<string, unknown> | null;
+  }) {
+    const payload = (input.payload_json ?? {}) as Record<string, unknown>;
+    const sampleInfo = this.extractAnalysisSampleInfo(payload);
+    const numeroMuestra = String(sampleInfo.numero_muestra ?? '').trim();
+    const fechaMuestra =
+      this.safeDateOnlyString(input.fecha_muestra) ??
+      this.safeDateOnlyString(payload.fecha_muestra) ??
+      null;
+    const compartimento = this.normalizeSearchToken(input.compartimento_principal);
+    const equipoKey =
+      String(input.equipo_id || '').trim() ||
+      this.normalizeSearchToken(input.equipo_codigo) ||
+      'GLOBAL';
+    const lubricanteKey = this.normalizeSearchToken(input.lubricante);
+
+    if (!numeroMuestra && !fechaMuestra) {
+      return null;
+    }
+
+    return [
+      equipoKey,
+      compartimento || 'GENERAL',
+      numeroMuestra || 'SIN_MUESTRA',
+      fechaMuestra || 'SIN_FECHA',
+      lubricanteKey || 'SIN_LUBRICANTE',
+    ].join('::');
   }
 
   private resolveDashboardDateRange(
@@ -4992,6 +5028,116 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     await this.triggerAlertRecalculation('analisis-lubricante-delete');
     return this.wrap(true, 'Análisis de lubricante eliminado');
+  }
+
+  async importAnalisisLubricanteBatch(dto: ImportAnalisisLubricanteBatchDto) {
+    const items = Array.isArray(dto.analyses)
+      ? dto.analyses.filter((item) => item && typeof item === 'object')
+      : [];
+    if (!items.length) {
+      throw new BadRequestException(
+        'No se recibieron análisis válidos para importar.',
+      );
+    }
+
+    const existingRows = await this.analisisLubricanteRepo.find({
+      where: { is_deleted: false },
+      order: { created_at: 'DESC' },
+    });
+
+    const existingMap = new Map<string, AnalisisLubricanteEntity>();
+    for (const row of existingRows) {
+      const identity = this.buildAnalisisImportIdentity({
+        equipo_id: row.equipo_id ?? null,
+        equipo_codigo: row.equipo_codigo ?? null,
+        compartimento_principal: row.compartimento_principal ?? null,
+        fecha_muestra: row.fecha_muestra ?? null,
+        lubricante: row.lubricante ?? null,
+        payload_json: (row.payload_json ?? {}) as Record<string, unknown>,
+      });
+      if (identity) {
+        existingMap.set(identity, row);
+      }
+    }
+
+    const summary = {
+      total: items.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: [] as Array<{ index: number; message: string }>,
+      imported_ids: [] as string[],
+    };
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      try {
+        const identity = this.buildAnalisisImportIdentity({
+          equipo_id: item.equipo_id ?? null,
+          equipo_codigo: item.equipo_codigo ?? null,
+          compartimento_principal: item.compartimento_principal ?? null,
+          fecha_muestra: item.fecha_muestra ?? null,
+          lubricante: item.lubricante ?? null,
+          payload_json: (item.payload_json ?? {}) as Record<string, unknown>,
+        });
+
+        const existing =
+          identity && dto.upsert_existing !== false
+            ? existingMap.get(identity) ?? null
+            : null;
+
+        if (existing) {
+          const updated = (await this.updateAnalisisLubricante(existing.id, {
+            ...item,
+            codigo: existing.codigo,
+          })) as any;
+          summary.updated += 1;
+          if (updated?.data?.id) {
+            summary.imported_ids.push(String(updated.data.id));
+          } else {
+            summary.imported_ids.push(existing.id);
+          }
+          continue;
+        }
+
+        const created = (await this.createAnalisisLubricante(item)) as any;
+        summary.created += 1;
+        if (created?.data?.id) {
+          summary.imported_ids.push(String(created.data.id));
+          const createdRow = created.data as AnalisisLubricanteEntity & {
+            payload_json?: Record<string, unknown>;
+          };
+          const createdIdentity = this.buildAnalisisImportIdentity({
+            equipo_id: createdRow.equipo_id ?? null,
+            equipo_codigo: createdRow.equipo_codigo ?? null,
+            compartimento_principal: createdRow.compartimento_principal ?? null,
+            fecha_muestra: createdRow.fecha_muestra ?? null,
+            lubricante: createdRow.lubricante ?? null,
+            payload_json: createdRow.payload_json ?? {},
+          });
+          if (createdIdentity) {
+            existingMap.set(createdIdentity, createdRow);
+          }
+        }
+      } catch (error: any) {
+        summary.errors.push({
+          index,
+          message:
+            error?.response?.data?.message ||
+            error?.message ||
+            'No se pudo importar el análisis.',
+        });
+      }
+    }
+
+    summary.skipped = summary.errors.length;
+
+    return this.wrap(
+      summary,
+      `Importación de análisis de lubricante procesada desde ${
+        dto.source_file_name || 'archivo'
+      }`,
+    );
   }
 
   async listCronogramasSemanales() {
