@@ -727,6 +727,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener el siguiente código disponible de plantilla MPG' })
+  @Get('inteligencia/procedimientos/next-code')
+  getNextProcedimientoPlantillaCode() {
+    return this.service.getNextProcedimientoPlantillaCode();
+  }
+
+  @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener plantilla de procedimiento por ID' })
   @Get('inteligencia/procedimientos/:id')
   getProcedimientoPlantilla(@Param('id') id: string) {
@@ -762,6 +769,13 @@ export class KpiMaintenanceController {
   @Get('inteligencia/analisis-lubricante')
   listAnalisisLubricante() {
     return this.service.listAnalisisLubricante();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener el siguiente código disponible de análisis de lubricante' })
+  @Get('inteligencia/analisis-lubricante/next-code')
+  getNextAnalisisLubricanteCode() {
+    return this.service.getNextAnalisisLubricanteCode();
   }
 
   @ApiTags('Inteligencia Operativa')

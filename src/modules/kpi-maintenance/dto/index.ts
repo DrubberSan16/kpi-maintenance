@@ -190,7 +190,7 @@ export class CreateLocationDto {
   @ApiProperty({ description: 'Código único de la ubicación' })
   @IsString()
   @IsNotEmpty()
-  codigo: string;
+  codigo?: string;
   @ApiProperty({ description: 'Nombre de la ubicación' })
   @IsString()
   @IsNotEmpty()
@@ -307,7 +307,7 @@ export class CreateEventoDto {
 export class CreatePlanDto {
   @ApiProperty({ description: 'Código del plan' })
   @IsString()
-  codigo: string;
+  codigo?: string;
   @ApiProperty({ description: 'Nombre del plan' })
   @IsString()
   nombre: string;
@@ -904,10 +904,14 @@ export class ProcedimientoActividadDto {
 }
 
 export class CreateProcedimientoPlantillaDto {
+  @ValidateIf(
+    (_obj, value) =>
+      value !== undefined && value !== null && String(value).trim() !== '',
+  )
   @ApiProperty({ description: 'Código de la plantilla' })
   @IsString()
   @IsNotEmpty()
-  codigo: string;
+  codigo?: string;
   @ApiProperty({ description: 'Nombre de la plantilla' })
   @IsString()
   @IsNotEmpty()
@@ -1019,10 +1023,10 @@ export class CreateAnalisisLubricanteDto {
     (_obj, value) =>
       value !== undefined && value !== null && String(value).trim() !== '',
   )
-  @ApiProperty({ description: 'Código del análisis' })
+  @ApiPropertyOptional({ description: 'Código del análisis' })
   @IsString()
   @IsNotEmpty()
-  codigo: string;
+  codigo?: string;
   @ApiPropertyOptional({ description: 'Cliente asociado' })
   @IsOptional()
   @IsString()

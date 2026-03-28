@@ -130,6 +130,12 @@ type AlertOrigin =
   | 'COMBUSTIBLE'
   | 'INVENTARIO'
   | 'BITACORA';
+type CodeResolution = {
+  requestedCode: string | null;
+  resolvedCode: string;
+  codeWasReassigned: boolean;
+  reassignmentReason: string | null;
+};
 
 type AlertCandidate = {
   equipo_id?: string | null;
@@ -752,6 +758,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.computeNextWorkOrderCode(codes[0] ?? null);
   }
 
+  private async generateNextProcedimientoPlantillaCode() {
+    const rows = await this.procedimientoRepo.find({
+      select: { codigo: true, id: true },
+    });
+    const codes = rows
+      .map((row) => String(row.codigo || '').trim())
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          this.getAlphaNumericCodeRank('PMP', b) -
+          this.getAlphaNumericCodeRank('PMP', a),
+      );
+    return this.computeNextAlphaNumericCode('PMP', codes[0] ?? null);
+  }
+
   private async generateNextAnalisisLubricanteCode() {
     const rows = await this.analisisLubricanteRepo.find({
       select: { codigo: true, id: true },
@@ -771,7 +792,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap({ code: await this.generateNextWorkOrderCode() }, 'Siguiente código de OT generado');
   }
 
-  private async resolveRequestedWorkOrderCode(requestedCode?: string | null) {
+  async getNextProcedimientoPlantillaCode() {
+    return this.wrap(
+      { code: await this.generateNextProcedimientoPlantillaCode() },
+      'Siguiente código de plantilla MPG generado',
+    );
+  }
+
+  async getNextAnalisisLubricanteCode() {
+    return this.wrap(
+      { code: await this.generateNextAnalisisLubricanteCode() },
+      'Siguiente código de análisis de lubricante generado',
+    );
+  }
+
+  private async resolveRequestedWorkOrderCode(
+    requestedCode?: string | null,
+  ): Promise<CodeResolution> {
     const candidate = String(requestedCode || '').trim();
     if (!candidate) {
       const generatedCode = await this.generateNextWorkOrderCode();
@@ -802,10 +839,95 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private async resolveRequestedProcedimientoPlantillaCode(
+    requestedCode?: string | null,
+  ): Promise<CodeResolution> {
+    const candidate = String(requestedCode || '').trim();
+    if (!candidate) {
+      const generatedCode = await this.generateNextProcedimientoPlantillaCode();
+      return {
+        requestedCode: null,
+        resolvedCode: generatedCode,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const existing = await this.procedimientoRepo.findOne({
+      where: { codigo: candidate },
+    });
+    if (!existing) {
+      return {
+        requestedCode: candidate,
+        resolvedCode: candidate,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const generatedCode = await this.generateNextProcedimientoPlantillaCode();
+    return {
+      requestedCode: candidate,
+      resolvedCode: generatedCode,
+      codeWasReassigned: generatedCode !== candidate,
+      reassignmentReason: existing.is_deleted
+        ? 'El código solicitado existía en una plantilla eliminada lógicamente.'
+        : 'El código solicitado ya estaba en uso.',
+    };
+  }
+
+  private async resolveRequestedAnalisisLubricanteCode(
+    requestedCode?: string | null,
+  ): Promise<CodeResolution> {
+    const candidate = String(requestedCode || '').trim();
+    if (!candidate) {
+      const generatedCode = await this.generateNextAnalisisLubricanteCode();
+      return {
+        requestedCode: null,
+        resolvedCode: generatedCode,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const existing = await this.analisisLubricanteRepo.findOne({
+      where: { codigo: candidate },
+    });
+    if (!existing) {
+      return {
+        requestedCode: candidate,
+        resolvedCode: candidate,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const generatedCode = await this.generateNextAnalisisLubricanteCode();
+    return {
+      requestedCode: candidate,
+      resolvedCode: generatedCode,
+      codeWasReassigned: generatedCode !== candidate,
+      reassignmentReason: existing.is_deleted
+        ? 'El código solicitado existía en un análisis eliminado lógicamente.'
+        : 'El código solicitado ya estaba en uso.',
+    };
+  }
+
   private isDuplicateWorkOrderCodeError(error: any) {
     const driverCode = String(error?.driverError?.code || error?.code || '').trim();
     const constraint = String(error?.driverError?.constraint || error?.constraint || '').trim();
     return driverCode === '23505' && constraint === 'tb_work_order_code_key';
+  }
+
+  private isDuplicateCodigoError(error: any) {
+    const driverCode = String(
+      error?.driverError?.code || error?.code || '',
+    ).trim();
+    const constraint = String(
+      error?.driverError?.constraint || error?.constraint || '',
+    )
+      .trim()
+      .toLowerCase();
+    return (
+      driverCode === '23505' &&
+      (constraint.includes('codigo') || constraint.includes('code'))
+    );
   }
 
   private buildMaintenanceRelativePath(path: string) {
@@ -3016,48 +3138,80 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createProcedimientoPlantilla(dto: CreateProcedimientoPlantillaDto) {
-    const savedId = await this.dataSource.transaction(async (manager) => {
-      const procedimientoRepo = manager.getRepository(ProcedimientoPlantillaEntity);
-      const actividadRepo = manager.getRepository(ProcedimientoActividadEntity);
+    let resolution = await this.resolveRequestedProcedimientoPlantillaCode(
+      dto.codigo,
+    );
+    let savedId: string | null = null;
 
-      const row = await procedimientoRepo.save(
-        procedimientoRepo.create({
-          codigo: dto.codigo,
-          nombre: dto.nombre,
-          tipo_proceso: dto.tipo_proceso,
-          documento_referencia: dto.documento_referencia ?? null,
-          version: dto.version ?? null,
-          clase_mantenimiento: dto.clase_mantenimiento ?? null,
-          frecuencia_horas: dto.frecuencia_horas ?? null,
-          objetivo: dto.objetivo ?? null,
-          precauciones: this.normalizeStringArray(dto.precauciones),
-          herramientas: this.normalizeStringArray(dto.herramientas),
-          materiales: this.normalizeMaterialIdArray(dto.materiales),
-          responsabilidades: this.normalizeStringArray(dto.responsabilidades),
-        }),
-      );
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        savedId = await this.dataSource.transaction(async (manager) => {
+          const procedimientoRepo = manager.getRepository(
+            ProcedimientoPlantillaEntity,
+          );
+          const actividadRepo = manager.getRepository(
+            ProcedimientoActividadEntity,
+          );
 
-      if (dto.actividades?.length) {
-        await actividadRepo.save(
-          dto.actividades.map((actividad, index) =>
-            actividadRepo.create({
-              procedimiento_id: row.id,
-              orden: actividad.orden ?? index + 1,
-              fase: actividad.fase ?? null,
-              actividad: actividad.actividad,
-              detalle: actividad.detalle ?? null,
-              requiere_permiso: actividad.requiere_permiso ?? false,
-              requiere_epp: actividad.requiere_epp ?? false,
-              requiere_bloqueo: actividad.requiere_bloqueo ?? false,
-              requiere_evidencia: actividad.requiere_evidencia ?? false,
-              meta: actividad.meta ?? {},
+          const row = await procedimientoRepo.save(
+            procedimientoRepo.create({
+              codigo: resolution.resolvedCode,
+              nombre: dto.nombre,
+              tipo_proceso: dto.tipo_proceso,
+              documento_referencia: dto.documento_referencia ?? null,
+              version: dto.version ?? null,
+              clase_mantenimiento: dto.clase_mantenimiento ?? null,
+              frecuencia_horas: dto.frecuencia_horas ?? null,
+              objetivo: dto.objetivo ?? null,
+              precauciones: this.normalizeStringArray(dto.precauciones),
+              herramientas: this.normalizeStringArray(dto.herramientas),
+              materiales: this.normalizeMaterialIdArray(dto.materiales),
+              responsabilidades: this.normalizeStringArray(dto.responsabilidades),
             }),
-          ),
-        );
-      }
+          );
 
-      return row.id;
-    });
+          if (dto.actividades?.length) {
+            await actividadRepo.save(
+              dto.actividades.map((actividad, index) =>
+                actividadRepo.create({
+                  procedimiento_id: row.id,
+                  orden: actividad.orden ?? index + 1,
+                  fase: actividad.fase ?? null,
+                  actividad: actividad.actividad,
+                  detalle: actividad.detalle ?? null,
+                  requiere_permiso: actividad.requiere_permiso ?? false,
+                  requiere_epp: actividad.requiere_epp ?? false,
+                  requiere_bloqueo: actividad.requiere_bloqueo ?? false,
+                  requiere_evidencia: actividad.requiere_evidencia ?? false,
+                  meta: actividad.meta ?? {},
+                }),
+              ),
+            );
+          }
+
+          return row.id;
+        });
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextProcedimientoPlantillaCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El código solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!savedId) {
+      throw new ConflictException(
+        'No se pudo generar un código único para la plantilla MPG.',
+      );
+    }
 
     const saved = await this.findOneOrFail(this.procedimientoRepo, {
       id: savedId,
@@ -3078,7 +3232,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         tipo_proceso: saved.tipo_proceso,
       },
     });
-    return this.wrap(payload, 'Procedimiento plantilla creado');
+    return this.wrap(
+      {
+        ...payload,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
+      'Procedimiento plantilla creado',
+    );
   }
 
   async updateProcedimientoPlantilla(id: string, dto: UpdateProcedimientoPlantillaDto) {
@@ -3093,7 +3255,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!row) throw new NotFoundException('Procedimiento plantilla no encontrado');
 
       Object.assign(row, {
-        codigo: dto.codigo ?? row.codigo,
+        codigo: row.codigo,
         nombre: dto.nombre ?? row.nombre,
         tipo_proceso: dto.tipo_proceso ?? row.tipo_proceso,
         documento_referencia: dto.documento_referencia ?? row.documento_referencia ?? null,
@@ -3197,51 +3359,79 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createAnalisisLubricante(dto: CreateAnalisisLubricanteDto) {
-    const resolvedCode =
-      String(dto.codigo || '').trim() || (await this.generateNextAnalisisLubricanteCode());
-    const savedId = await this.dataSource.transaction(async (manager) => {
-      const analisisRepo = manager.getRepository(AnalisisLubricanteEntity);
-      const detalleRepo = manager.getRepository(AnalisisLubricanteDetalleEntity);
-      const row = await analisisRepo.save(
-        analisisRepo.create({
-          codigo: resolvedCode,
-          cliente: dto.cliente ?? null,
-          equipo_id: dto.equipo_id ?? null,
-          equipo_codigo: dto.equipo_codigo ?? null,
-          equipo_nombre: dto.equipo_nombre ?? null,
-          compartimento_principal: dto.compartimento_principal ?? null,
-          fecha_muestra: this.toDateOnlyString(dto.fecha_muestra),
-          fecha_reporte: this.toDateOnlyString(dto.fecha_reporte),
-          diagnostico: dto.diagnostico ?? null,
-          estado_diagnostico: dto.estado_diagnostico ?? 'NORMAL',
-          documento_origen: dto.documento_origen ?? null,
-          payload_json: dto.payload_json ?? {},
-        }),
-      );
+    let resolution = await this.resolveRequestedAnalisisLubricanteCode(
+      dto.codigo,
+    );
+    let savedId: string | null = null;
 
-      if (dto.detalles?.length) {
-        await detalleRepo.save(
-          dto.detalles.map((detalle, index) =>
-            detalleRepo.create({
-              analisis_id: row.id,
-              compartimento: detalle.compartimento,
-              numero_muestra: detalle.numero_muestra ?? null,
-              parametro: detalle.parametro,
-              resultado_numerico: detalle.resultado_numerico ?? null,
-              resultado_texto: detalle.resultado_texto ?? null,
-              unidad: detalle.unidad ?? null,
-              linea_base: detalle.linea_base ?? null,
-              nivel_alerta: detalle.nivel_alerta ?? 'NORMAL',
-              tendencia: detalle.tendencia ?? null,
-              observacion: detalle.observacion ?? null,
-              orden: detalle.orden ?? index + 1,
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        savedId = await this.dataSource.transaction(async (manager) => {
+          const analisisRepo = manager.getRepository(AnalisisLubricanteEntity);
+          const detalleRepo = manager.getRepository(
+            AnalisisLubricanteDetalleEntity,
+          );
+          const row = await analisisRepo.save(
+            analisisRepo.create({
+              codigo: resolution.resolvedCode,
+              cliente: dto.cliente ?? null,
+              equipo_id: dto.equipo_id ?? null,
+              equipo_codigo: dto.equipo_codigo ?? null,
+              equipo_nombre: dto.equipo_nombre ?? null,
+              compartimento_principal: dto.compartimento_principal ?? null,
+              fecha_muestra: this.toDateOnlyString(dto.fecha_muestra),
+              fecha_reporte: this.toDateOnlyString(dto.fecha_reporte),
+              diagnostico: dto.diagnostico ?? null,
+              estado_diagnostico: dto.estado_diagnostico ?? 'NORMAL',
+              documento_origen: dto.documento_origen ?? null,
+              payload_json: dto.payload_json ?? {},
             }),
-          ),
-        );
-      }
+          );
 
-      return row.id;
-    });
+          if (dto.detalles?.length) {
+            await detalleRepo.save(
+              dto.detalles.map((detalle, index) =>
+                detalleRepo.create({
+                  analisis_id: row.id,
+                  compartimento: detalle.compartimento,
+                  numero_muestra: detalle.numero_muestra ?? null,
+                  parametro: detalle.parametro,
+                  resultado_numerico: detalle.resultado_numerico ?? null,
+                  resultado_texto: detalle.resultado_texto ?? null,
+                  unidad: detalle.unidad ?? null,
+                  linea_base: detalle.linea_base ?? null,
+                  nivel_alerta: detalle.nivel_alerta ?? 'NORMAL',
+                  tendencia: detalle.tendencia ?? null,
+                  observacion: detalle.observacion ?? null,
+                  orden: detalle.orden ?? index + 1,
+                }),
+              ),
+            );
+          }
+
+          return row.id;
+        });
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextAnalisisLubricanteCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El código solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!savedId) {
+      throw new ConflictException(
+        'No se pudo generar un código único para el análisis de lubricante.',
+      );
+    }
 
     const saved = await this.findOneOrFail(this.analisisLubricanteRepo, {
       id: savedId,
@@ -3267,7 +3457,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       },
     });
     await this.triggerAlertRecalculation('analisis-lubricante-create');
-    return this.wrap(payload, 'Análisis de lubricante creado');
+    return this.wrap(
+      {
+        ...payload,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
+      'Análisis de lubricante creado',
+    );
   }
 
   async updateAnalisisLubricante(id: string, dto: UpdateAnalisisLubricanteDto) {
@@ -3280,7 +3478,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!row) throw new NotFoundException('Análisis de lubricante no encontrado');
 
       Object.assign(row, {
-        codigo: dto.codigo ?? row.codigo,
+        codigo: row.codigo,
         cliente: dto.cliente ?? row.cliente ?? null,
         equipo_id: dto.equipo_id ?? row.equipo_id ?? null,
         equipo_codigo: dto.equipo_codigo ?? row.equipo_codigo ?? null,
