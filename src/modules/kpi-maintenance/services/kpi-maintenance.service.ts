@@ -485,7 +485,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return [
       String(input.origen || 'SYSTEM').trim().toUpperCase(),
       String(input.equipo_id || 'GLOBAL').trim() || 'GLOBAL',
-      String(input.tipo_alerta || '').trim().toUpperCase(),
       String(input.referencia || '').trim() || 'SIN_REFERENCIA',
     ].join('::');
   }
