@@ -149,7 +149,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private recalculationInterval: NodeJS.Timeout | null = null;
   private recalculationRunning = false;
 
-  private readonly RECALCULATION_INTERVAL_MS = 2 * 60 * 1000;
+  private readonly RECALCULATION_INTERVAL_MS = 60 * 1000;
   private readonly RECALCULATION_BATCH_SIZE = 100;
   private readonly RECALCULATION_WORKERS = 4;
   private readonly MAX_STORED_ERRORS = 200;
