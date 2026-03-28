@@ -358,6 +358,8 @@ export class AnalisisLubricanteEntity {
   @Column() codigo: string;
   @Column({ type: 'text', nullable: true }) cliente?: string | null;
   @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
+  @Column({ type: 'text', nullable: true }) lubricante?: string | null;
+  @Column({ type: 'text', nullable: true }) marca_lubricante?: string | null;
   @Column({ type: 'text', nullable: true }) equipo_codigo?: string | null;
   @Column({ type: 'text', nullable: true }) equipo_nombre?: string | null;
   @Column({ type: 'text', nullable: true }) compartimento_principal?: string | null;

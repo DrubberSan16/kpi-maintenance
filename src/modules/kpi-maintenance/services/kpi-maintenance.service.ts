@@ -65,6 +65,8 @@ import {
 } from '../entities/kpi-maintenance.entity';
 import {
   AlertaQueryDto,
+  AnalisisLubricanteCatalogQueryDto,
+  AnalisisLubricanteDashboardQueryDto,
   CreateAnalisisLubricanteDto,
   ChangeEstadoDto,
   ComponenteQueryDto,
@@ -137,6 +139,32 @@ type CodeResolution = {
   reassignmentReason: string | null;
 };
 
+type LubricantMetricGroupKey =
+  | 'ESTADO_LUBRICANTE'
+  | 'DEGRADACION_QUIMICA'
+  | 'CONTAMINACION'
+  | 'DESGASTE'
+  | 'OTROS_ELEMENTOS'
+  | 'ADITIVOS';
+
+type LubricantMetricDefinition = {
+  key: string;
+  label: string;
+  group: LubricantMetricGroupKey;
+  order: number;
+  unit?: string;
+  chartGroup: 'estado' | 'desgaste' | 'contaminacion' | 'otros';
+  aliases?: string[];
+  lowerWarnMultiplier?: number;
+  upperWarnMultiplier?: number;
+  lowerAlertMultiplier?: number;
+  upperAlertMultiplier?: number;
+  numericWarningMin?: number;
+  numericAlertMin?: number;
+  textAlert?: string[];
+  textWarning?: string[];
+};
+
 type AlertCandidate = {
   equipo_id?: string | null;
   tipo_alerta: string;
@@ -148,6 +176,304 @@ type AlertCandidate = {
   detalle: string;
   payload_json: Record<string, unknown>;
 };
+
+const LUBRICANT_GROUP_LABELS: Record<LubricantMetricGroupKey, string> = {
+  ESTADO_LUBRICANTE: 'Estado del lubricante',
+  DEGRADACION_QUIMICA: 'Degradación química',
+  CONTAMINACION: 'Contaminación del lubricante',
+  DESGASTE: 'Desgaste del equipo',
+  OTROS_ELEMENTOS: 'Otros elementos',
+  ADITIVOS: 'Presencia de aditivos',
+};
+
+const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
+  {
+    key: 'VISCOSIDAD_100C',
+    label: 'Viscosidad a 100ºC, cSt',
+    group: 'ESTADO_LUBRICANTE',
+    order: 1,
+    unit: 'cSt',
+    chartGroup: 'estado',
+    aliases: ['viscosidad a 100c', 'viscosidad a 100 c', 'viscosidad a 100°c', 'viscosidad a 100ºc'],
+    lowerWarnMultiplier: 0.9,
+    upperWarnMultiplier: 1.1,
+    lowerAlertMultiplier: 0.85,
+    upperAlertMultiplier: 1.15,
+  },
+  {
+    key: 'VISCOSIDAD_40C',
+    label: 'Viscosidad a 40ºC, cSt',
+    group: 'ESTADO_LUBRICANTE',
+    order: 2,
+    unit: 'cSt',
+    chartGroup: 'estado',
+    aliases: ['viscosidad a 40c', 'viscosidad a 40 c', 'viscosidad a 40°c', 'viscosidad a 40ºc'],
+    lowerWarnMultiplier: 0.9,
+    upperWarnMultiplier: 1.1,
+    lowerAlertMultiplier: 0.85,
+    upperAlertMultiplier: 1.15,
+  },
+  {
+    key: 'INDICE_VISCOSIDAD',
+    label: 'Indice de Viscosidad',
+    group: 'ESTADO_LUBRICANTE',
+    order: 3,
+    chartGroup: 'estado',
+    aliases: ['indice de viscosidad', 'índice de viscosidad'],
+  },
+  {
+    key: 'TBN',
+    label: 'T.B.N. mgKOH/gr',
+    group: 'ESTADO_LUBRICANTE',
+    order: 4,
+    unit: 'mgKOH/gr',
+    chartGroup: 'estado',
+    aliases: ['tbn', 't.b.n. mgkoh/gr', 'tbn mgkoh/gr'],
+    lowerWarnMultiplier: 0.5,
+    lowerAlertMultiplier: 0.35,
+  },
+  {
+    key: 'HUMEDAD',
+    label: 'Humedad',
+    group: 'ESTADO_LUBRICANTE',
+    order: 5,
+    chartGroup: 'estado',
+    textAlert: ['positivo', 'presente'],
+  },
+  {
+    key: 'GLYCOL',
+    label: 'Glycol, Abs/cm',
+    group: 'ESTADO_LUBRICANTE',
+    order: 6,
+    unit: 'Abs/cm',
+    chartGroup: 'estado',
+    aliases: ['glycol', 'glycol abs/cm'],
+    numericAlertMin: 2,
+  },
+  {
+    key: 'COMBUSTIBLE',
+    label: 'Combustible',
+    group: 'ESTADO_LUBRICANTE',
+    order: 7,
+    chartGroup: 'estado',
+    textAlert: ['positivo', 'presente'],
+  },
+  {
+    key: 'OXIDACION',
+    label: 'Oxidación, Abs/cm',
+    group: 'DEGRADACION_QUIMICA',
+    order: 1,
+    unit: 'Abs/cm',
+    chartGroup: 'estado',
+    aliases: ['oxidacion', 'oxidación'],
+    numericWarningMin: 20,
+    numericAlertMin: 30,
+  },
+  {
+    key: 'NITRACION',
+    label: 'Nitración, Abs/cm',
+    group: 'DEGRADACION_QUIMICA',
+    order: 2,
+    unit: 'Abs/cm',
+    chartGroup: 'estado',
+    aliases: ['nitracion', 'nitración'],
+    numericWarningMin: 10,
+    numericAlertMin: 15,
+  },
+  {
+    key: 'SULFATACION',
+    label: 'Sulfatación, Abs/cm',
+    group: 'DEGRADACION_QUIMICA',
+    order: 3,
+    unit: 'Abs/cm',
+    chartGroup: 'estado',
+    aliases: ['sulfatacion', 'sulfatación'],
+    numericWarningMin: 20,
+    numericAlertMin: 30,
+  },
+  {
+    key: 'HOLLIN',
+    label: 'Hollín, wt%',
+    group: 'DEGRADACION_QUIMICA',
+    order: 4,
+    unit: 'wt%',
+    chartGroup: 'estado',
+    aliases: ['hollin', 'hollín', 'hollin wt%', 'hollín wt%'],
+    numericWarningMin: 0.75,
+    numericAlertMin: 1.2,
+  },
+  {
+    key: 'SI',
+    label: 'Si (Silicio)',
+    group: 'CONTAMINACION',
+    order: 1,
+    unit: 'ppm',
+    chartGroup: 'contaminacion',
+    aliases: ['si', 'si silicio', 'silicio'],
+  },
+  {
+    key: 'NA',
+    label: 'Na (Sodio)',
+    group: 'CONTAMINACION',
+    order: 2,
+    unit: 'ppm',
+    chartGroup: 'contaminacion',
+    aliases: ['na', 'na sodio', 'sodio'],
+  },
+  {
+    key: 'V',
+    label: 'Vanadio (V)',
+    group: 'CONTAMINACION',
+    order: 3,
+    unit: 'ppm',
+    chartGroup: 'contaminacion',
+    aliases: ['v', 'vanadio'],
+  },
+  {
+    key: 'NI',
+    label: 'Ni (Niquel)',
+    group: 'CONTAMINACION',
+    order: 4,
+    unit: 'ppm',
+    chartGroup: 'contaminacion',
+    aliases: ['ni', 'niquel', 'níquel'],
+  },
+  {
+    key: 'FE',
+    label: 'Fe (Hierro)',
+    group: 'DESGASTE',
+    order: 1,
+    unit: 'ppm',
+    chartGroup: 'desgaste',
+    aliases: ['fe', 'hierro'],
+  },
+  {
+    key: 'CR',
+    label: 'Cr (Cromo)',
+    group: 'DESGASTE',
+    order: 2,
+    unit: 'ppm',
+    chartGroup: 'desgaste',
+    aliases: ['cr', 'cromo'],
+  },
+  {
+    key: 'AL',
+    label: 'Al (Aluminio)',
+    group: 'DESGASTE',
+    order: 3,
+    unit: 'ppm',
+    chartGroup: 'desgaste',
+    aliases: ['al', 'aluminio'],
+  },
+  {
+    key: 'CU',
+    label: 'Cu (Cobre)',
+    group: 'DESGASTE',
+    order: 4,
+    unit: 'ppm',
+    chartGroup: 'desgaste',
+    aliases: ['cu', 'cobre'],
+  },
+  {
+    key: 'PB',
+    label: 'Pb (Plomo)',
+    group: 'DESGASTE',
+    order: 5,
+    unit: 'ppm',
+    chartGroup: 'desgaste',
+    aliases: ['pb', 'plomo'],
+  },
+  {
+    key: 'SN',
+    label: 'Estaño (Sn)',
+    group: 'DESGASTE',
+    order: 6,
+    unit: 'ppm',
+    chartGroup: 'desgaste',
+    aliases: ['sn', 'estaño', 'estano'],
+  },
+  {
+    key: 'MO',
+    label: 'Mo (Molibdeno)',
+    group: 'OTROS_ELEMENTOS',
+    order: 1,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['mo', 'molibdeno'],
+  },
+  {
+    key: 'B',
+    label: 'B (Boro)',
+    group: 'OTROS_ELEMENTOS',
+    order: 2,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['b', 'boro'],
+  },
+  {
+    key: 'BA',
+    label: 'Ba (Bario)',
+    group: 'OTROS_ELEMENTOS',
+    order: 3,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['ba', 'bario'],
+  },
+  {
+    key: 'TI',
+    label: 'Ti (Titanio)',
+    group: 'OTROS_ELEMENTOS',
+    order: 4,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['ti', 'titanio'],
+  },
+  {
+    key: 'AG',
+    label: 'Ag (Plata)',
+    group: 'OTROS_ELEMENTOS',
+    order: 5,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['ag', 'plata'],
+  },
+  {
+    key: 'CA',
+    label: 'Ca (Calcio)',
+    group: 'ADITIVOS',
+    order: 1,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['ca', 'calcio'],
+  },
+  {
+    key: 'MG',
+    label: 'Mg (Magnesio)',
+    group: 'ADITIVOS',
+    order: 2,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['mg', 'magnesio'],
+  },
+  {
+    key: 'ZN',
+    label: 'Zn (Zinc)',
+    group: 'ADITIVOS',
+    order: 3,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['zn', 'zinc'],
+  },
+  {
+    key: 'P',
+    label: 'P (Fosforo)',
+    group: 'ADITIVOS',
+    order: 4,
+    unit: 'ppm',
+    chartGroup: 'otros',
+    aliases: ['p', 'fosforo', 'fósforo'],
+  },
+];
 
 @Injectable()
 export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
@@ -1438,14 +1764,520 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
   }
 
+  private normalizeSearchToken(value: unknown) {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  private safeDateOnlyString(value: unknown) {
+    if (value == null || value === '') return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  private getLubricantMetricDefinition(
+    parametro: unknown,
+  ): LubricantMetricDefinition | null {
+    const normalized = this.normalizeSearchToken(parametro);
+    if (!normalized) return null;
+    return (
+      LUBRICANT_METRIC_DEFINITIONS.find((item) => {
+        const terms = [item.label, item.key, ...(item.aliases ?? [])];
+        return terms.some(
+          (term) => this.normalizeSearchToken(term) === normalized,
+        );
+      }) ?? null
+    );
+  }
+
+  private normalizeLubricantDetailLevel(value: unknown) {
+    const raw = String(value ?? '').trim().toUpperCase();
+    if (
+      ['ALERTA', 'ANORMAL', 'CRITICO', 'CRÍTICO', 'CRITICAL', 'ROJO'].includes(
+        raw,
+      )
+    ) {
+      return 'ALERTA';
+    }
+    if (
+      [
+        'OBSERVACION',
+        'OBSERVACIÓN',
+        'PRECAUCION',
+        'PRECAUCIÓN',
+        'WARNING',
+        'WARN',
+        'AMARILLO',
+      ].includes(raw)
+    ) {
+      return 'OBSERVACION';
+    }
+    return 'NORMAL';
+  }
+
+  private normalizeLubricantCondition(value: unknown) {
+    return this.normalizeLubricantDetailLevel(value);
+  }
+
+  private resolveLubricantIdentity(
+    row:
+      | (Partial<AnalisisLubricanteEntity> & {
+          payload_json?: Record<string, unknown> | null;
+        })
+      | null
+      | undefined,
+  ) {
+    const payload = (row?.payload_json ?? {}) as Record<string, unknown>;
+    const sampleInfo = ((payload.sample_info ?? payload.muestra) ||
+      {}) as Record<string, unknown>;
+
+    const lubricante =
+      String(
+        row?.lubricante ??
+          sampleInfo.lubricante ??
+          payload.lubricante ??
+          row?.equipo_codigo ??
+          '',
+      ).trim() || null;
+    const marcaLubricante =
+      String(
+        row?.marca_lubricante ??
+          sampleInfo.marca_lubricante ??
+          payload.marca_lubricante ??
+          row?.equipo_nombre ??
+          '',
+      ).trim() || null;
+    const lubricanteCodigo =
+      String(
+        sampleInfo.lubricante_codigo ?? payload.lubricante_codigo ?? '',
+      ).trim() || null;
+
+    return {
+      lubricante,
+      marca_lubricante: marcaLubricante,
+      lubricante_codigo: lubricanteCodigo,
+      lubricante_label: [lubricanteCodigo, lubricante, marcaLubricante]
+        .filter(Boolean)
+        .join(' · '),
+      lubricante_lookup_key: this.normalizeSearchToken(
+        [lubricanteCodigo, lubricante, marcaLubricante].filter(Boolean).join(' '),
+      ),
+    };
+  }
+
+  private extractAnalysisSampleInfo(payload: Record<string, unknown>) {
+    const info = ((payload.sample_info ?? payload.muestra) ||
+      {}) as Record<string, unknown>;
+    const toNullableNumber = (value: unknown) => {
+      if (value == null || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    return {
+      numero_muestra:
+        String(info.numero_muestra ?? payload.numero_muestra ?? '').trim() ||
+        null,
+      fecha_ingreso: this.safeDateOnlyString(
+        info.fecha_ingreso ?? payload.fecha_ingreso,
+      ),
+      fecha_informe: this.safeDateOnlyString(
+        info.fecha_informe ?? payload.fecha_informe,
+      ),
+      horas_equipo: toNullableNumber(
+        info.horas_equipo ?? payload.horas_equipo,
+      ),
+      horas_lubricante: toNullableNumber(
+        info.horas_lubricante ?? payload.horas_lubricante,
+      ),
+      condicion: this.normalizeLubricantCondition(
+        info.condicion ?? payload.condicion,
+      ),
+      equipo_marca:
+        String(info.equipo_marca ?? payload.equipo_marca ?? '').trim() || null,
+      equipo_serie:
+        String(info.equipo_serie ?? payload.equipo_serie ?? '').trim() || null,
+      equipo_modelo:
+        String(info.equipo_modelo ?? payload.equipo_modelo ?? '').trim() || null,
+      laboratorio:
+        String(info.laboratorio ?? payload.laboratorio ?? '').trim() || null,
+    };
+  }
+
+  private evaluateLubricantDetailLevel(
+    detalle: Partial<AnalisisLubricanteDetalleEntity>,
+    baselineValue?: number | null,
+  ) {
+    if (detalle.nivel_alerta) {
+      return this.normalizeLubricantDetailLevel(detalle.nivel_alerta);
+    }
+
+    const definition = this.getLubricantMetricDefinition(detalle.parametro);
+    const textValue = String(detalle.resultado_texto ?? '').trim();
+    if (definition) {
+      const normalizedText = this.normalizeSearchToken(textValue);
+      if (
+        normalizedText &&
+        definition.textAlert?.some(
+          (item) => this.normalizeSearchToken(item) === normalizedText,
+        )
+      ) {
+        return 'ALERTA';
+      }
+      if (
+        normalizedText &&
+        definition.textWarning?.some(
+          (item) => this.normalizeSearchToken(item) === normalizedText,
+        )
+      ) {
+        return 'OBSERVACION';
+      }
+    }
+
+    const currentValue =
+      detalle.resultado_numerico == null
+        ? null
+        : Number(detalle.resultado_numerico);
+    if (currentValue == null || !Number.isFinite(currentValue)) {
+      return 'NORMAL';
+    }
+
+    if (
+      definition?.numericAlertMin != null &&
+      currentValue >= definition.numericAlertMin
+    ) {
+      return 'ALERTA';
+    }
+    if (
+      definition?.numericWarningMin != null &&
+      currentValue >= definition.numericWarningMin
+    ) {
+      return 'OBSERVACION';
+    }
+
+    const baseline =
+      baselineValue == null ? null : Number(baselineValue);
+    if (baseline != null && Number.isFinite(baseline) && baseline > 0) {
+      if (
+        definition?.lowerAlertMultiplier != null &&
+        currentValue <= baseline * definition.lowerAlertMultiplier
+      ) {
+        return 'ALERTA';
+      }
+      if (
+        definition?.upperAlertMultiplier != null &&
+        currentValue >= baseline * definition.upperAlertMultiplier
+      ) {
+        return 'ALERTA';
+      }
+      if (
+        definition?.lowerWarnMultiplier != null &&
+        currentValue <= baseline * definition.lowerWarnMultiplier
+      ) {
+        return 'OBSERVACION';
+      }
+      if (
+        definition?.upperWarnMultiplier != null &&
+        currentValue >= baseline * definition.upperWarnMultiplier
+      ) {
+        return 'OBSERVACION';
+      }
+
+      if (currentValue >= baseline * 2) return 'ALERTA';
+      if (currentValue >= baseline * 1.25) return 'OBSERVACION';
+    }
+
+    return 'NORMAL';
+  }
+
+  private inferAnalisisStateFromDetails(
+    detalles: Partial<AnalisisLubricanteDetalleEntity>[],
+    fallback?: string | null,
+  ) {
+    const levels = detalles.map((item) =>
+      this.normalizeLubricantDetailLevel(item.nivel_alerta),
+    );
+    if (levels.includes('ALERTA')) return 'ALERTA';
+    if (levels.includes('OBSERVACION')) return 'OBSERVACION';
+    return this.normalizeLubricantCondition(fallback);
+  }
+
+  private async buildPreviousLubricantDetailMap(options: {
+    analisisId?: string | null;
+    lubricante?: string | null;
+    compartimento?: string | null;
+  }) {
+    const normalizedLubricante = this.normalizeSearchToken(options.lubricante);
+    const normalizedCompartimento = this.normalizeSearchToken(
+      options.compartimento,
+    );
+    if (!normalizedLubricante) {
+      return new Map<string, AnalisisLubricanteDetalleEntity>();
+    }
+
+    const rows = await this.analisisLubricanteRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_reporte: 'DESC', fecha_muestra: 'DESC', created_at: 'DESC' },
+      take: 250,
+    });
+
+    const previous = rows.find((item) => {
+      if (options.analisisId && item.id === options.analisisId) return false;
+      const identity = this.resolveLubricantIdentity(item);
+      if (identity.lubricante_lookup_key !== normalizedLubricante) return false;
+      if (normalizedCompartimento) {
+        const compartimento = this.normalizeSearchToken(
+          item.compartimento_principal,
+        );
+        if (compartimento !== normalizedCompartimento) return false;
+      }
+      return true;
+    });
+
+    if (!previous) {
+      return new Map<string, AnalisisLubricanteDetalleEntity>();
+    }
+
+    const details = await this.analisisLubricanteDetRepo.find({
+      where: { analisis_id: previous.id, is_deleted: false },
+      order: { orden: 'ASC', created_at: 'ASC' },
+    });
+
+    return new Map(
+      details.map((item) => [
+        this.getLubricantMetricDefinition(item.parametro)?.key ||
+          this.normalizeSearchToken(item.parametro),
+        item,
+      ]),
+    );
+  }
+
+  private async prepareAnalisisDetallesForSave(options: {
+    analisisId?: string | null;
+    lubricante?: string | null;
+    compartimento?: string | null;
+    detalles?: CreateAnalisisLubricanteDto['detalles'];
+  }) {
+    if (!options.detalles?.length) return [];
+
+    const previousMap = await this.buildPreviousLubricantDetailMap(options);
+
+    return options.detalles.map((detalle, index) => {
+      const definition = this.getLubricantMetricDefinition(detalle.parametro);
+      const previous =
+        previousMap.get(
+          definition?.key || this.normalizeSearchToken(detalle.parametro),
+        ) ?? null;
+
+      const baselineValue =
+        detalle.linea_base ??
+        previous?.linea_base ??
+        previous?.resultado_numerico ??
+        null;
+      const currentNumeric =
+        detalle.resultado_numerico == null
+          ? null
+          : Number(detalle.resultado_numerico);
+      const previousNumeric =
+        previous?.resultado_numerico == null
+          ? null
+          : Number(previous.resultado_numerico);
+
+      const trendValue =
+        detalle.tendencia != null
+          ? this.toNumeric(detalle.tendencia, 0)
+          : currentNumeric != null &&
+            Number.isFinite(currentNumeric) &&
+            previousNumeric != null &&
+            Number.isFinite(previousNumeric)
+          ? Number((currentNumeric - previousNumeric).toFixed(4))
+          : null;
+
+      return {
+        ...detalle,
+        compartimento:
+          detalle.compartimento || options.compartimento || 'GENERAL',
+        parametro: definition?.label || detalle.parametro,
+        unidad: detalle.unidad ?? previous?.unidad ?? definition?.unit ?? null,
+        linea_base:
+          baselineValue == null || !Number.isFinite(Number(baselineValue))
+            ? null
+            : this.toNumeric(baselineValue, 0),
+        tendencia: trendValue,
+        nivel_alerta: this.evaluateLubricantDetailLevel(detalle, baselineValue),
+        orden: detalle.orden ?? definition?.order ?? previous?.orden ?? index + 1,
+      };
+    });
+  }
+
   private async buildAnalisisLubricantePayload(row: AnalisisLubricanteEntity) {
     const detalles = await this.analisisLubricanteDetRepo.find({
       where: { analisis_id: row.id, is_deleted: false },
       order: { orden: 'ASC', created_at: 'ASC' },
     });
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const identity = this.resolveLubricantIdentity(row);
+    const sampleInfo = this.extractAnalysisSampleInfo(payload);
+    const enrichedDetails = detalles.map((detalle) => {
+      const definition = this.getLubricantMetricDefinition(detalle.parametro);
+      const nivel = this.evaluateLubricantDetailLevel(
+        detalle,
+        detalle.linea_base,
+      );
+      const baseline =
+        detalle.linea_base == null ? null : Number(detalle.linea_base);
+      const current =
+        detalle.resultado_numerico == null
+          ? null
+          : Number(detalle.resultado_numerico);
+      const trend =
+        detalle.tendencia == null ? null : Number(detalle.tendencia);
+      const deltaPercent =
+        baseline != null &&
+        Number.isFinite(baseline) &&
+        baseline !== 0 &&
+        current != null &&
+        Number.isFinite(current)
+          ? Number((((current - baseline) / baseline) * 100).toFixed(2))
+          : null;
+
+      return {
+        ...detalle,
+        parametro_label: definition?.label || detalle.parametro,
+        parametro_key:
+          definition?.key || this.normalizeSearchToken(detalle.parametro),
+        grupo: definition?.group ?? 'OTROS_ELEMENTOS',
+        grupo_label:
+          LUBRICANT_GROUP_LABELS[definition?.group ?? 'OTROS_ELEMENTOS'],
+        chart_group: definition?.chartGroup ?? 'otros',
+        nivel_alerta: nivel,
+        linea_base_resuelta:
+          baseline != null && Number.isFinite(baseline) ? baseline : null,
+        delta_valor:
+          trend != null && Number.isFinite(trend) ? Number(trend.toFixed(4)) : null,
+        delta_porcentaje: deltaPercent,
+      };
+    });
+
+    const groupedDetails = Object.values(
+      enrichedDetails.reduce<
+        Record<
+          string,
+          {
+            key: string;
+            label: string;
+            order: number;
+            detalles: typeof enrichedDetails;
+          }
+        >
+      >((acc, detalle) => {
+        const key = String(detalle.grupo || 'OTROS_ELEMENTOS');
+        if (!acc[key]) {
+          acc[key] = {
+            key,
+            label: detalle.grupo_label,
+            order:
+              LUBRICANT_METRIC_DEFINITIONS.find((item) => item.group === key)
+                ?.order ?? 999,
+            detalles: [],
+          };
+        }
+        acc[key].detalles.push(detalle);
+        return acc;
+      }, {}),
+    )
+      .map((item) => ({
+        ...item,
+        detalles: item.detalles.sort(
+          (a, b) =>
+            Number(a.orden ?? 999) - Number(b.orden ?? 999) ||
+            String(a.parametro_label ?? '').localeCompare(
+              String(b.parametro_label ?? ''),
+            ),
+        ),
+      }))
+      .sort((a, b) => a.order - b.order);
+
+    const totals = enrichedDetails.reduce(
+      (acc, detalle) => {
+        const level = this.normalizeLubricantDetailLevel(detalle.nivel_alerta);
+        if (level === 'ALERTA') acc.alerta += 1;
+        else if (level === 'OBSERVACION') acc.observacion += 1;
+        else acc.normal += 1;
+        return acc;
+      },
+      { alerta: 0, observacion: 0, normal: 0 },
+    );
+
     return {
       ...row,
-      detalles,
+      lubricante: identity.lubricante,
+      marca_lubricante: identity.marca_lubricante,
+      lubricante_codigo: identity.lubricante_codigo,
+      lubricante_label: identity.lubricante_label || identity.lubricante,
+      sample_info: sampleInfo,
+      estado_diagnostico: this.inferAnalisisStateFromDetails(
+        enrichedDetails,
+        row.estado_diagnostico || sampleInfo.condicion,
+      ),
+      detalles: enrichedDetails,
+      detalle_grupos: groupedDetails,
+      resumen_detalles: {
+        total: enrichedDetails.length,
+        ...totals,
+      },
+    };
+  }
+
+  private resolveAnalisisFechaReferencia(
+    row: Partial<AnalisisLubricanteEntity> & { created_at?: Date | string | null },
+  ) {
+    return (
+      this.safeDateOnlyString(row.fecha_reporte) ??
+      this.safeDateOnlyString(row.fecha_muestra) ??
+      this.safeDateOnlyString(row.created_at) ??
+      null
+    );
+  }
+
+  private resolveDashboardDateRange(
+    periodo?: string | null,
+    from?: string | null,
+    to?: string | null,
+  ) {
+    const normalizedPeriod = String(periodo || '')
+      .trim()
+      .toUpperCase();
+    const today = new Date();
+    let resolvedFrom = this.safeDateOnlyString(from);
+    let resolvedTo = this.safeDateOnlyString(to) ?? today.toISOString().slice(0, 10);
+
+    if (!resolvedFrom) {
+      const base = new Date(today);
+      if (normalizedPeriod === 'SEMANAL') {
+        base.setDate(base.getDate() - 7);
+        resolvedFrom = base.toISOString().slice(0, 10);
+      } else if (normalizedPeriod === 'MENSUAL') {
+        base.setMonth(base.getMonth() - 1);
+        resolvedFrom = base.toISOString().slice(0, 10);
+      } else if (normalizedPeriod === 'ANUAL') {
+        base.setFullYear(base.getFullYear() - 1);
+        resolvedFrom = base.toISOString().slice(0, 10);
+      }
+    }
+
+    return {
+      periodo:
+        normalizedPeriod || (resolvedFrom || resolvedTo ? 'PERSONALIZADO' : 'GLOBAL'),
+      from: resolvedFrom,
+      to: resolvedTo,
     };
   }
 
@@ -3358,11 +4190,352 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async listAnalisisLubricanteCatalog(
+    query: AnalisisLubricanteCatalogQueryDto,
+  ) {
+    const rows = await this.analisisLubricanteRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_reporte: 'DESC', fecha_muestra: 'DESC', created_at: 'DESC' },
+      take: 500,
+    });
+
+    const catalog = new Map<
+      string,
+      {
+        key: string;
+        lubricante: string;
+        marca_lubricante: string | null;
+        lubricante_codigo: string | null;
+        total_analisis: number;
+        ultima_fecha_reporte: string | null;
+        ultimo_codigo: string | null;
+        codigos_analisis: string[];
+        clientes: string[];
+        compartimentos: string[];
+      }
+    >();
+
+    for (const row of rows) {
+      const identity = this.resolveLubricantIdentity(row);
+      if (!identity.lubricante_lookup_key || !identity.lubricante) continue;
+      const existing = catalog.get(identity.lubricante_lookup_key) ?? {
+        key: identity.lubricante_lookup_key,
+        lubricante: identity.lubricante,
+        marca_lubricante: identity.marca_lubricante,
+        lubricante_codigo: identity.lubricante_codigo,
+        total_analisis: 0,
+        ultima_fecha_reporte: null,
+        ultimo_codigo: null,
+        codigos_analisis: [],
+        clientes: [],
+        compartimentos: [],
+      };
+
+      existing.total_analisis += 1;
+      const referenceDate = this.resolveAnalisisFechaReferencia(row);
+      if (
+        referenceDate &&
+        (!existing.ultima_fecha_reporte ||
+          new Date(referenceDate) > new Date(existing.ultima_fecha_reporte))
+      ) {
+        existing.ultima_fecha_reporte = referenceDate;
+        existing.ultimo_codigo = row.codigo;
+      }
+      if (row.codigo && !existing.codigos_analisis.includes(row.codigo)) {
+        existing.codigos_analisis.push(row.codigo);
+      }
+      if (row.cliente && !existing.clientes.includes(row.cliente)) {
+        existing.clientes.push(row.cliente);
+      }
+      if (
+        row.compartimento_principal &&
+        !existing.compartimentos.includes(row.compartimento_principal)
+      ) {
+        existing.compartimentos.push(row.compartimento_principal);
+      }
+      catalog.set(identity.lubricante_lookup_key, existing);
+    }
+
+    const search = this.normalizeSearchToken(query.search);
+    const items = [...catalog.values()]
+      .filter((item) => {
+        if (!search) return true;
+        const haystack = this.normalizeSearchToken(
+          [
+            item.lubricante_codigo,
+            item.lubricante,
+            item.marca_lubricante,
+            ...item.codigos_analisis,
+          ]
+            .filter(Boolean)
+            .join(' '),
+        );
+        return haystack.includes(search);
+      })
+      .sort((a, b) => {
+        const dateA = a.ultima_fecha_reporte
+          ? new Date(a.ultima_fecha_reporte).getTime()
+          : 0;
+        const dateB = b.ultima_fecha_reporte
+          ? new Date(b.ultima_fecha_reporte).getTime()
+          : 0;
+        if (dateB !== dateA) return dateB - dateA;
+        return a.lubricante.localeCompare(b.lubricante);
+      });
+
+    return this.wrap(items, 'Catálogo de lubricantes generado');
+  }
+
+  async getAnalisisLubricanteDashboard(
+    query: AnalisisLubricanteDashboardQueryDto,
+  ) {
+    const rows = await this.analisisLubricanteRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_reporte: 'ASC', fecha_muestra: 'ASC', created_at: 'ASC' },
+    });
+
+    const referencedRow = query.codigo
+      ? rows.find(
+          (item) =>
+            this.normalizeSearchToken(item.codigo) ===
+            this.normalizeSearchToken(query.codigo),
+        ) ?? null
+      : null;
+    const referenceIdentity = this.resolveLubricantIdentity(referencedRow);
+    const targetLookup = this.normalizeSearchToken(
+      referenceIdentity.lubricante ?? query.lubricante ?? query.codigo ?? '',
+    );
+    const targetBrand = this.normalizeSearchToken(query.marca_lubricante);
+    const targetCompartimento = this.normalizeSearchToken(query.compartimento);
+    const range = this.resolveDashboardDateRange(
+      query.periodo,
+      query.from,
+      query.to,
+    );
+
+    const matchingRows = rows.filter((row) => {
+      const identity = this.resolveLubricantIdentity(row);
+      const dateValue = this.resolveAnalisisFechaReferencia(row);
+      const rowCompartimento = this.normalizeSearchToken(
+        row.compartimento_principal,
+      );
+      const rowSearch = this.normalizeSearchToken(
+        [
+          identity.lubricante_codigo,
+          identity.lubricante,
+          identity.marca_lubricante,
+          row.codigo,
+        ]
+          .filter(Boolean)
+          .join(' '),
+      );
+
+      if (targetLookup && !rowSearch.includes(targetLookup)) return false;
+      if (
+        targetBrand &&
+        !this.normalizeSearchToken(identity.marca_lubricante).includes(
+          targetBrand,
+        )
+      ) {
+        return false;
+      }
+      if (targetCompartimento && rowCompartimento !== targetCompartimento) {
+        return false;
+      }
+      if (
+        range.from &&
+        dateValue &&
+        new Date(dateValue) < new Date(range.from)
+      ) {
+        return false;
+      }
+      if (
+        range.to &&
+        dateValue &&
+        new Date(dateValue) > new Date(range.to)
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const analyses = await Promise.all(
+      matchingRows.map((row) => this.buildAnalisisLubricantePayload(row)),
+    );
+    const sortedAnalyses = [...analyses].sort((a, b) => {
+      const refA = this.resolveAnalisisFechaReferencia(a);
+      const refB = this.resolveAnalisisFechaReferencia(b);
+      const dateA = refA ? new Date(refA).getTime() : 0;
+      const dateB = refB ? new Date(refB).getTime() : 0;
+      return dateA - dateB;
+    });
+
+    const latestAnalysis = sortedAnalyses[sortedAnalyses.length - 1] ?? null;
+    const selectedIdentity = this.resolveLubricantIdentity(latestAnalysis);
+    const sampleHistory = sortedAnalyses.map((item) => ({
+      id: item.id,
+      codigo: item.codigo,
+      fecha_reporte: item.fecha_reporte ?? null,
+      fecha_muestra: item.fecha_muestra ?? null,
+      numero_muestra: item.sample_info?.numero_muestra ?? null,
+      compartimento_principal: item.compartimento_principal ?? null,
+      estado_diagnostico: item.estado_diagnostico ?? 'NORMAL',
+      condicion:
+        item.sample_info?.condicion ?? item.estado_diagnostico ?? 'NORMAL',
+      horas_equipo: item.sample_info?.horas_equipo ?? null,
+      horas_lubricante: item.sample_info?.horas_lubricante ?? null,
+    }));
+
+    const seriesMap = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        group: string;
+        group_label: string;
+        chart_group: string;
+        unit: string | null;
+        points: Array<Record<string, unknown>>;
+      }
+    >();
+
+    for (const analysis of sortedAnalyses) {
+      const referenceDate = this.resolveAnalisisFechaReferencia(analysis);
+      for (const detail of analysis.detalles ?? []) {
+        const currentValue =
+          detail.resultado_numerico == null
+            ? null
+            : Number(detail.resultado_numerico);
+        if (currentValue == null || !Number.isFinite(currentValue)) continue;
+
+        const key = String(detail.parametro_key || detail.parametro || '').trim();
+        if (!key) continue;
+        if (!seriesMap.has(key)) {
+          seriesMap.set(key, {
+            key,
+            label: detail.parametro_label ?? detail.parametro ?? key,
+            group: detail.grupo ?? 'OTROS_ELEMENTOS',
+            group_label: detail.grupo_label ?? 'Otros elementos',
+            chart_group: detail.chart_group ?? 'otros',
+            unit: detail.unidad ?? null,
+            points: [],
+          });
+        }
+        seriesMap.get(key)?.points.push({
+          analisis_id: analysis.id,
+          codigo: analysis.codigo,
+          fecha: referenceDate,
+          numero_muestra: analysis.sample_info?.numero_muestra ?? null,
+          compartimento: detail.compartimento ?? analysis.compartimento_principal,
+          valor: Number(currentValue.toFixed(4)),
+          linea_base: detail.linea_base_resuelta ?? detail.linea_base ?? null,
+          tendencia: detail.delta_valor ?? detail.tendencia ?? null,
+          nivel_alerta: detail.nivel_alerta ?? 'NORMAL',
+        });
+      }
+    }
+
+    const chartSections = [
+      { key: 'estado', title: 'Estado del lubricante' },
+      { key: 'desgaste', title: 'Desgaste del equipo' },
+      { key: 'contaminacion', title: 'Contaminación del lubricante' },
+      { key: 'otros', title: 'Otros indicadores' },
+    ].map((section) => ({
+      ...section,
+      metrics: [...seriesMap.values()]
+        .filter((item) => item.chart_group === section.key)
+        .sort((a, b) => {
+          const defA = this.getLubricantMetricDefinition(a.label);
+          const defB = this.getLubricantMetricDefinition(b.label);
+          return (defA?.order ?? 999) - (defB?.order ?? 999);
+        }),
+    }));
+
+    const globalLubricants = new Set(
+      rows
+        .map((item) => this.resolveLubricantIdentity(item).lubricante_lookup_key)
+        .filter(Boolean),
+    ).size;
+
+    return this.wrap(
+      {
+        filters: range,
+        selected: latestAnalysis
+          ? {
+              lubricante: selectedIdentity.lubricante,
+              marca_lubricante: selectedIdentity.marca_lubricante,
+              lubricante_codigo: selectedIdentity.lubricante_codigo,
+              total_analisis: sortedAnalyses.length,
+              compartimentos: [
+                ...new Set(
+                  sortedAnalyses
+                    .map((item) => item.compartimento_principal)
+                    .filter(Boolean),
+                ),
+              ],
+              clientes: [
+                ...new Set(
+                  sortedAnalyses.map((item) => item.cliente).filter(Boolean),
+                ),
+              ],
+            }
+          : null,
+        metrics: {
+          lubricantes_registrados: globalLubricants,
+          analisis_filtrados: sortedAnalyses.length,
+          compartimentos_monitoreados: new Set(
+            sortedAnalyses
+              .map((item) => item.compartimento_principal)
+              .filter(Boolean),
+          ).size,
+          alertas: sortedAnalyses.filter(
+            (item) =>
+              this.normalizeLubricantCondition(item.estado_diagnostico) ===
+              'ALERTA',
+          ).length,
+          observaciones: sortedAnalyses.filter(
+            (item) =>
+              this.normalizeLubricantCondition(item.estado_diagnostico) ===
+              'OBSERVACION',
+          ).length,
+        },
+        timeline: sampleHistory,
+        latest_analysis: latestAnalysis,
+        detail_groups: latestAnalysis?.detalle_grupos ?? [],
+        chart_sections: chartSections,
+        series: [...seriesMap.values()],
+      },
+      'Dashboard de análisis de lubricante generado',
+    );
+  }
+
   async createAnalisisLubricante(dto: CreateAnalisisLubricanteDto) {
     let resolution = await this.resolveRequestedAnalisisLubricanteCode(
       dto.codigo,
     );
     let savedId: string | null = null;
+    const lubricanteIdentity = this.resolveLubricantIdentity({
+      lubricante: dto.lubricante ?? null,
+      marca_lubricante: dto.marca_lubricante ?? null,
+      equipo_codigo: dto.equipo_codigo ?? null,
+      equipo_nombre: dto.equipo_nombre ?? null,
+      payload_json: dto.payload_json ?? {},
+    });
+    const preparedDetalles = await this.prepareAnalisisDetallesForSave({
+      lubricante: lubricanteIdentity.lubricante,
+      compartimento: dto.compartimento_principal ?? null,
+      detalles: dto.detalles,
+    });
+    const inferredState = this.inferAnalisisStateFromDetails(
+      preparedDetalles,
+      dto.estado_diagnostico ??
+        ((dto.payload_json ?? {}) as Record<string, unknown>).condicion?.toString(),
+    );
+    const payloadJson = {
+      ...(dto.payload_json ?? {}),
+      lubricante: lubricanteIdentity.lubricante,
+      marca_lubricante: lubricanteIdentity.marca_lubricante,
+    };
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -3376,21 +4549,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               codigo: resolution.resolvedCode,
               cliente: dto.cliente ?? null,
               equipo_id: dto.equipo_id ?? null,
+              lubricante: lubricanteIdentity.lubricante,
+              marca_lubricante: lubricanteIdentity.marca_lubricante,
               equipo_codigo: dto.equipo_codigo ?? null,
               equipo_nombre: dto.equipo_nombre ?? null,
               compartimento_principal: dto.compartimento_principal ?? null,
               fecha_muestra: this.toDateOnlyString(dto.fecha_muestra),
               fecha_reporte: this.toDateOnlyString(dto.fecha_reporte),
               diagnostico: dto.diagnostico ?? null,
-              estado_diagnostico: dto.estado_diagnostico ?? 'NORMAL',
+              estado_diagnostico: inferredState,
               documento_origen: dto.documento_origen ?? null,
-              payload_json: dto.payload_json ?? {},
+              payload_json: payloadJson,
             }),
           );
 
-          if (dto.detalles?.length) {
+          if (preparedDetalles.length) {
             await detalleRepo.save(
-              dto.detalles.map((detalle, index) =>
+              preparedDetalles.map((detalle, index) =>
                 detalleRepo.create({
                   analisis_id: row.id,
                   compartimento: detalle.compartimento,
@@ -3446,7 +4621,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       referencia_codigo: saved.codigo,
       equipo_id: saved.equipo_id ?? null,
       title: 'Nuevo análisis de lubricante',
-      body: `${saved.codigo}${saved.equipo_codigo ? ` · ${saved.equipo_codigo}` : ''}`,
+      body: `${saved.codigo}${
+        lubricanteIdentity.lubricante ? ` · ${lubricanteIdentity.lubricante}` : ''
+      }`,
       level:
         String(saved.estado_diagnostico || 'NORMAL').toUpperCase() === 'ALERTA'
           ? 'warning'
@@ -3476,11 +4653,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const detalleRepo = manager.getRepository(AnalisisLubricanteDetalleEntity);
       const row = await analisisRepo.findOne({ where: { id, is_deleted: false } });
       if (!row) throw new NotFoundException('Análisis de lubricante no encontrado');
+      const mergedPayload = {
+        ...((row.payload_json ?? {}) as Record<string, unknown>),
+        ...((dto.payload_json ?? {}) as Record<string, unknown>),
+      };
+      const lubricanteIdentity = this.resolveLubricantIdentity({
+        lubricante: dto.lubricante ?? row.lubricante ?? null,
+        marca_lubricante: dto.marca_lubricante ?? row.marca_lubricante ?? null,
+        equipo_codigo: dto.equipo_codigo ?? row.equipo_codigo ?? null,
+        equipo_nombre: dto.equipo_nombre ?? row.equipo_nombre ?? null,
+        payload_json: mergedPayload,
+      });
+      const preparedDetalles = dto.detalles
+        ? await this.prepareAnalisisDetallesForSave({
+            analisisId: row.id,
+            lubricante: lubricanteIdentity.lubricante,
+            compartimento:
+              dto.compartimento_principal ?? row.compartimento_principal ?? null,
+            detalles: dto.detalles,
+          })
+        : null;
 
       Object.assign(row, {
         codigo: row.codigo,
         cliente: dto.cliente ?? row.cliente ?? null,
         equipo_id: dto.equipo_id ?? row.equipo_id ?? null,
+        lubricante: lubricanteIdentity.lubricante,
+        marca_lubricante: lubricanteIdentity.marca_lubricante,
         equipo_codigo: dto.equipo_codigo ?? row.equipo_codigo ?? null,
         equipo_nombre: dto.equipo_nombre ?? row.equipo_nombre ?? null,
         compartimento_principal:
@@ -3492,22 +4691,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? this.toDateOnlyString(dto.fecha_reporte)
           : row.fecha_reporte ?? null,
         diagnostico: dto.diagnostico ?? row.diagnostico ?? null,
-        estado_diagnostico: dto.estado_diagnostico ?? row.estado_diagnostico,
+        estado_diagnostico:
+          dto.estado_diagnostico ??
+          (preparedDetalles
+            ? this.inferAnalisisStateFromDetails(
+                preparedDetalles,
+                row.estado_diagnostico,
+              )
+            : row.estado_diagnostico),
         documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
-        payload_json: dto.payload_json ?? row.payload_json ?? {},
+        payload_json: {
+          ...mergedPayload,
+          lubricante: lubricanteIdentity.lubricante,
+          marca_lubricante: lubricanteIdentity.marca_lubricante,
+        },
       });
       await analisisRepo.save(row);
 
-      if (dto.detalles) {
+      if (preparedDetalles) {
         const current = await detalleRepo.find({
           where: { analisis_id: row.id, is_deleted: false },
         });
         for (const item of current) item.is_deleted = true;
         if (current.length) await detalleRepo.save(current);
 
-        if (dto.detalles.length) {
+        if (preparedDetalles.length) {
           await detalleRepo.save(
-            dto.detalles.map((detalle, index) =>
+            preparedDetalles.map((detalle, index) =>
               detalleRepo.create({
                 analisis_id: row.id,
                 compartimento: detalle.compartimento,
@@ -3538,7 +4748,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       referencia_codigo: saved.codigo,
       equipo_id: saved.equipo_id ?? null,
       title: 'Análisis de lubricante actualizado',
-      body: `${saved.codigo}${saved.equipo_codigo ? ` · ${saved.equipo_codigo}` : ''}`,
+      body: `${saved.codigo}${saved.lubricante ? ` · ${saved.lubricante}` : ''}`,
       level:
         String(saved.estado_diagnostico || 'NORMAL').toUpperCase() === 'ALERTA'
           ? 'warning'
@@ -4093,6 +5303,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       pendingWorkOrders,
       componentesTotal,
       componentesRecientes,
+      allAnalysesForLubricants,
     ] = await Promise.all([
       this.procedimientoRepo.count({ where: { is_deleted: false } }),
       this.analisisLubricanteRepo.count({ where: { is_deleted: false } }),
@@ -4129,6 +5340,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         order: { updated_at: 'DESC', created_at: 'DESC' },
         take: 10,
       }),
+      this.analisisLubricanteRepo.find({
+        where: { is_deleted: false },
+      }),
     ]);
 
     const programaciones = await Promise.all(
@@ -4145,6 +5359,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       acc[key] = (acc[key] ?? 0) + 1;
       return acc;
     }, {});
+    const lubricantesRegistrados = new Set(
+      allAnalysesForLubricants
+        .map(
+          (item) =>
+            this.resolveLubricantIdentity(item).lubricante_lookup_key || null,
+        )
+        .filter(Boolean),
+    ).size;
 
     return this.wrap(
       {
@@ -4152,6 +5374,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         kpis: {
           procedimientos,
           analisis_lubricante: analisisTotal,
+          lubricantes_registrados: lubricantesRegistrados,
           cronogramas_semanales: cronogramasTotal,
           reportes_diarios: reportesTotal,
           eventos_proceso: eventosTotal,

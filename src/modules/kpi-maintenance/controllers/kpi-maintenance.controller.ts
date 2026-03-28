@@ -20,6 +20,8 @@ import {
 import { KpiMaintenanceService } from '../services/kpi-maintenance.service';
 import {
   AlertaQueryDto,
+  AnalisisLubricanteCatalogQueryDto,
+  AnalisisLubricanteDashboardQueryDto,
   CreateAnalisisLubricanteDto,
   ChangeEstadoDto,
   CreateBitacoraDto,
@@ -776,6 +778,24 @@ export class KpiMaintenanceController {
   @Get('inteligencia/analisis-lubricante/next-code')
   getNextAnalisisLubricanteCode() {
     return this.service.getNextAnalisisLubricanteCode();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Catálogo de lubricantes para autocompletado' })
+  @Get('inteligencia/analisis-lubricante/catalog')
+  listAnalisisLubricanteCatalog(
+    @Query() query: AnalisisLubricanteCatalogQueryDto,
+  ) {
+    return this.service.listAnalisisLubricanteCatalog(query);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Dashboard del análisis de lubricante por lubricante o código' })
+  @Get('inteligencia/analisis-lubricante/dashboard')
+  getAnalisisLubricanteDashboard(
+    @Query() query: AnalisisLubricanteDashboardQueryDto,
+  ) {
+    return this.service.getAnalisisLubricanteDashboard(query);
   }
 
   @ApiTags('Inteligencia Operativa')

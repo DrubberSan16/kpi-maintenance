@@ -1035,6 +1035,14 @@ export class CreateAnalisisLubricanteDto {
   @IsOptional()
   @IsUUID()
   equipo_id?: string;
+  @ApiPropertyOptional({ description: 'Lubricante' })
+  @IsOptional()
+  @IsString()
+  lubricante?: string;
+  @ApiPropertyOptional({ description: 'Marca del lubricante' })
+  @IsOptional()
+  @IsString()
+  marca_lubricante?: string;
   @ApiPropertyOptional({ description: 'Código de equipo' })
   @IsOptional()
   @IsString()
@@ -1080,6 +1088,52 @@ export class CreateAnalisisLubricanteDto {
 }
 
 export class UpdateAnalisisLubricanteDto extends CreateAnalisisLubricanteDto {}
+
+export class AnalisisLubricanteCatalogQueryDto {
+  @ApiPropertyOptional({
+    description: 'Texto de búsqueda para lubricante, marca o código asociado',
+  })
+  @IsOptional()
+  @IsString()
+  search?: string;
+}
+
+export class AnalisisLubricanteDashboardQueryDto {
+  @ApiPropertyOptional({
+    description:
+      'Código del análisis usado para resolver el lubricante seleccionado',
+  })
+  @IsOptional()
+  @IsString()
+  codigo?: string;
+  @ApiPropertyOptional({ description: 'Nombre o código del lubricante' })
+  @IsOptional()
+  @IsString()
+  lubricante?: string;
+  @ApiPropertyOptional({ description: 'Marca del lubricante' })
+  @IsOptional()
+  @IsString()
+  marca_lubricante?: string;
+  @ApiPropertyOptional({ description: 'Compartimento a filtrar' })
+  @IsOptional()
+  @IsString()
+  compartimento?: string;
+  @ApiPropertyOptional({
+    description:
+      'Periodo sugerido para el dashboard: SEMANAL, MENSUAL, ANUAL o PERSONALIZADO',
+  })
+  @IsOptional()
+  @IsString()
+  periodo?: string;
+  @ApiPropertyOptional({ description: 'Fecha de inicio del rango (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  from?: string;
+  @ApiPropertyOptional({ description: 'Fecha de fin del rango (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  to?: string;
+}
 
 export class CronogramaSemanalDetalleDto {
   @ApiProperty({ description: 'Día de la semana' })
