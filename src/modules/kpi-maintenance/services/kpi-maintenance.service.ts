@@ -1936,6 +1936,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private normalizeLubricantDetailLevel(value: unknown) {
     const raw = this.normalizeSearchToken(value);
+    if (['alerta', 'anormal', 'critico', 'critical', 'rojo'].includes(raw)) {
+      return 'ANORMAL';
+    }
+    if (
+      ['observacion', 'precaucion', 'warning', 'warn', 'amarillo'].includes(
+        raw,
+      )
+    ) {
+      return 'PRECAUCION';
+    }
+    if (['n d', 'nd', 'no disponible', 'sin dato', 'sin datos'].includes(raw)) {
+      return 'N/D';
+    }
     if (
       ['ALERTA', 'ANORMAL', 'CRITICO', 'CRÍTICO', 'CRITICAL', 'ROJO'].includes(
         raw,
@@ -1964,18 +1977,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private normalizeLubricantCondition(value: unknown) {
     const raw = this.normalizeSearchToken(value);
-    if (['ANORMAL', 'ALERTA', 'CRITICO', 'CRITICO', 'CRITICAL'].includes(raw)) {
+    if (['anormal', 'alerta', 'critico', 'critical'].includes(raw)) {
+      return 'ANORMAL';
+    }
+    if (['precaucion', 'observacion', 'warning', 'warn'].includes(raw)) {
+      return 'PRECAUCION';
+    }
+    if (['n d', 'nd', 'no disponible', 'sin evaluacion'].includes(raw)) {
+      return 'N/D';
+    }
+    if (['anormal', 'alerta', 'critico', 'critical'].includes(raw)) {
       return 'ANORMAL';
     }
     if (
-      ['PRECAUCION', 'OBSERVACION', 'WARNING', 'WARN'].includes(raw)
+      ['precaucion', 'observacion', 'warning', 'warn'].includes(raw)
     ) {
       return 'PRECAUCION';
     }
-    if (['N/D', 'ND', 'NO DISPONIBLE', 'SIN EVALUACION'].includes(raw)) {
+    if (['n d', 'nd', 'no disponible', 'sin evaluacion'].includes(raw)) {
       return 'N/D';
     }
     return 'NORMAL';
+  }
+
+  private normalizePositiveNegativeValue(value: unknown) {
+    const raw = this.normalizeSearchToken(value);
+    if (['positivo', 'positive', 'presente', 'presence'].includes(raw)) {
+      return 'POSITIVO';
+    }
+    if (['negativo', 'negative', 'ausente', 'absent'].includes(raw)) {
+      return 'NEGATIVO';
+    }
+    return null;
   }
 
   private lubricantMetricUsesTextResult(
@@ -2155,17 +2188,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (this.lubricantMetricUsesTextResult(definition)) {
       if (!textValue) return 'N/D';
       if (String(definition?.key || '') === 'HUMEDAD') {
-        const normalized = this.normalizeSearchToken(textValue);
-        if (['POSITIVO', 'POSITIVE'].includes(normalized)) return 'ANORMAL';
-        if (['NEGATIVO', 'NEGATIVE'].includes(normalized)) return 'NORMAL';
+        const normalized = this.normalizePositiveNegativeValue(textValue);
+        if (normalized === 'POSITIVO') return 'ANORMAL';
+        if (normalized === 'NEGATIVO') return 'NORMAL';
         return 'N/D';
       }
       if (String(definition?.key || '') === 'COMBUSTIBLE') {
-        const normalized = this.normalizeSearchToken(textValue);
-        if (['POSITIVO', 'POSITIVE', 'PRESENTE', 'PRESENCE'].includes(normalized))
-          return 'ANORMAL';
-        if (['NEGATIVO', 'NEGATIVE', 'AUSENTE', 'ABSENT'].includes(normalized))
-          return 'NORMAL';
+        const normalized = this.normalizePositiveNegativeValue(textValue);
+        if (normalized === 'POSITIVO') return 'ANORMAL';
+        if (normalized === 'NEGATIVO') return 'NORMAL';
         return 'N/D';
       }
     }
@@ -2332,13 +2363,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       let normalizedText = rawText || null;
 
       if (['HUMEDAD', 'COMBUSTIBLE'].includes(String(definition?.key || ''))) {
-        const humidityToken = this.normalizeSearchToken(rawText);
-        if (rawText && !['NEGATIVO', 'POSITIVO'].includes(humidityToken)) {
+        const positiveNegativeValue = this.normalizePositiveNegativeValue(rawText);
+        if (rawText && !positiveNegativeValue) {
           throw new BadRequestException(
             `El parametro ${definition?.label || detalle.parametro} solo permite NEGATIVO o POSITIVO.`,
           );
         }
-        normalizedText = rawText ? humidityToken : normalizedText;
+        normalizedText = positiveNegativeValue ?? normalizedText;
       } else if (normalizedText) {
         normalizedText = normalizedText.toUpperCase();
       }
@@ -2907,7 +2938,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               ['HUMEDAD', 'COMBUSTIBLE'].includes(
                 String(definition?.key || ''),
               )
-                ? this.normalizeSearchToken(textValue)
+                ? this.normalizePositiveNegativeValue(textValue)
                 : textValue || null;
 
             return {
@@ -3156,7 +3187,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 ['HUMEDAD', 'COMBUSTIBLE'].includes(
                   String(definition?.key || ''),
                 )
-                  ? this.normalizeSearchToken(textValue)
+                  ? this.normalizePositiveNegativeValue(textValue)
                   : textValue || null;
 
               const hasTextValue = !!normalizedText;
