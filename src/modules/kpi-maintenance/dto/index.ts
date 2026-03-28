@@ -1171,6 +1171,22 @@ export class AnalisisLubricanteDashboardQueryDto {
   @IsOptional()
   @IsString()
   marca_lubricante?: string;
+  @ApiPropertyOptional({ description: 'ID del equipo asociado al anÃ¡lisis' })
+  @IsOptional()
+  @IsString()
+  equipo_id?: string;
+  @ApiPropertyOptional({ description: 'CÃ³digo del equipo asociado al anÃ¡lisis' })
+  @IsOptional()
+  @IsString()
+  equipo_codigo?: string;
+  @ApiPropertyOptional({ description: 'Nombre del equipo asociado al anÃ¡lisis' })
+  @IsOptional()
+  @IsString()
+  equipo_nombre?: string;
+  @ApiPropertyOptional({ description: 'Modelo del equipo asociado al anÃ¡lisis' })
+  @IsOptional()
+  @IsString()
+  equipo_modelo?: string;
   @ApiPropertyOptional({ description: 'Compartimento a filtrar' })
   @IsOptional()
   @IsString()

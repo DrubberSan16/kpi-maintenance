@@ -1910,6 +1910,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .toLowerCase();
   }
 
+  private matchesNormalizedToken(source: unknown, target: unknown) {
+    const normalizedSource = this.normalizeSearchToken(source);
+    const normalizedTarget = this.normalizeSearchToken(target);
+    if (!normalizedTarget) return true;
+    if (!normalizedSource) return false;
+    return (
+      normalizedSource === normalizedTarget ||
+      normalizedSource.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedSource)
+    );
+  }
+
   private safeDateOnlyString(value: unknown) {
     if (value == null || value === '') return null;
     const raw = String(value).trim();
@@ -2121,14 +2133,71 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       String(
         sampleInfo.lubricante_codigo ?? payload.lubricante_codigo ?? '',
       ).trim() || null;
+    const equipoId =
+      String(row?.equipo_id ?? sampleInfo.equipo_id ?? payload.equipo_id ?? '').trim() ||
+      null;
+    const equipoCodigo =
+      String(
+        row?.equipo_codigo ??
+          sampleInfo.equipo_codigo ??
+          payload.equipo_codigo ??
+          '',
+      ).trim() || null;
+    const equipoNombre =
+      String(
+        row?.equipo_nombre ??
+          sampleInfo.equipo_nombre ??
+          payload.equipo_nombre ??
+          '',
+      ).trim() || null;
+    const equipoModelo =
+      String(
+        sampleInfo.equipo_modelo ?? payload.equipo_modelo ?? '',
+      ).trim() || null;
+    const equipoLabel =
+      equipoCodigo && equipoNombre && equipoCodigo !== equipoNombre
+        ? `${equipoCodigo} · ${equipoNombre}`
+        : equipoCodigo || equipoNombre || null;
+    const equipoLookupKey = this.normalizeSearchToken(
+      [equipoId, equipoCodigo, equipoNombre].filter(Boolean).join(' '),
+    );
+    const identityLookupKey = this.normalizeSearchToken(
+      [
+        lubricanteCodigo,
+        lubricante,
+        marcaLubricante,
+        equipoId,
+        equipoCodigo,
+        equipoNombre,
+        equipoModelo,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    );
 
     return {
       lubricante,
       marca_lubricante: marcaLubricante,
       lubricante_codigo: lubricanteCodigo,
+      equipo_id: equipoId,
+      equipo_codigo: equipoCodigo,
+      equipo_nombre: equipoNombre,
+      equipo_modelo: equipoModelo,
+      equipo_label: equipoLabel,
+      equipo_lookup_key: equipoLookupKey,
+      identity_lookup_key: identityLookupKey,
       lubricante_label: [lubricanteCodigo, lubricante, marcaLubricante]
         .filter(Boolean)
         .join(' · '),
+      identity_label: [
+        lubricanteCodigo,
+        lubricante,
+        marcaLubricante,
+        equipoLabel,
+        equipoModelo,
+      ]
+        .filter(Boolean)
+        .join(' Â· '),
       lubricante_lookup_key: this.normalizeSearchToken(
         [lubricanteCodigo, lubricante, marcaLubricante].filter(Boolean).join(' '),
       ),
@@ -2297,11 +2366,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     analisisId?: string | null;
     lubricante?: string | null;
     compartimento?: string | null;
+    equipo_id?: string | null;
+    equipo_codigo?: string | null;
+    equipo_nombre?: string | null;
+    equipo_modelo?: string | null;
   }) {
     const normalizedLubricante = this.normalizeSearchToken(options.lubricante);
     const normalizedCompartimento = this.normalizeSearchToken(
       options.compartimento,
     );
+    const normalizedEquipment = this.normalizeSearchToken(
+      [
+        options.equipo_id,
+        options.equipo_codigo,
+        options.equipo_nombre,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    );
+    const normalizedModel = this.normalizeSearchToken(options.equipo_modelo);
     if (!normalizedLubricante) {
       return new Map<string, AnalisisLubricanteDetalleEntity>();
     }
@@ -2316,6 +2399,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (options.analisisId && item.id === options.analisisId) return false;
       const identity = this.resolveLubricantIdentity(item);
       if (identity.lubricante_lookup_key !== normalizedLubricante) return false;
+      if (
+        normalizedEquipment &&
+        !this.matchesNormalizedToken(identity.equipo_lookup_key, normalizedEquipment)
+      ) {
+        return false;
+      }
+      if (
+        normalizedModel &&
+        this.normalizeSearchToken(identity.equipo_modelo) !== normalizedModel
+      ) {
+        return false;
+      }
       if (normalizedCompartimento) {
         const compartimento = this.normalizeSearchToken(
           item.compartimento_principal,
@@ -2347,6 +2442,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     analisisId?: string | null;
     lubricante?: string | null;
     compartimento?: string | null;
+    equipo_id?: string | null;
+    equipo_codigo?: string | null;
+    equipo_nombre?: string | null;
+    equipo_modelo?: string | null;
     detalles?: CreateAnalisisLubricanteDto['detalles'];
   }) {
     if (!options.detalles?.length) return [];
@@ -5223,6 +5322,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         lubricante: string;
         marca_lubricante: string | null;
         lubricante_codigo: string | null;
+        equipo_id: string | null;
+        equipo_codigo: string | null;
+        equipo_nombre: string | null;
+        equipo_modelo: string | null;
+        equipo_label: string | null;
         total_analisis: number;
         ultima_fecha_reporte: string | null;
         ultimo_codigo: string | null;
@@ -5234,12 +5338,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     for (const row of rows) {
       const identity = this.resolveLubricantIdentity(row);
-      if (!identity.lubricante_lookup_key || !identity.lubricante) continue;
-      const existing = catalog.get(identity.lubricante_lookup_key) ?? {
-        key: identity.lubricante_lookup_key,
+      if (!identity.identity_lookup_key || !identity.lubricante) continue;
+      const existing = catalog.get(identity.identity_lookup_key) ?? {
+        key: identity.identity_lookup_key,
         lubricante: identity.lubricante,
         marca_lubricante: identity.marca_lubricante,
         lubricante_codigo: identity.lubricante_codigo,
+        equipo_id: identity.equipo_id,
+        equipo_codigo: identity.equipo_codigo,
+        equipo_nombre: identity.equipo_nombre,
+        equipo_modelo: identity.equipo_modelo,
+        equipo_label: identity.equipo_label,
         total_analisis: 0,
         ultima_fecha_reporte: null,
         ultimo_codigo: null,
@@ -5270,7 +5379,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ) {
         existing.compartimentos.push(row.compartimento_principal);
       }
-      catalog.set(identity.lubricante_lookup_key, existing);
+      catalog.set(identity.identity_lookup_key, existing);
     }
 
     const search = this.normalizeSearchToken(query.search);
@@ -5282,6 +5391,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             item.lubricante_codigo,
             item.lubricante,
             item.marca_lubricante,
+            item.equipo_codigo,
+            item.equipo_nombre,
+            item.equipo_modelo,
             ...item.codigos_analisis,
           ]
             .filter(Boolean)
@@ -5322,7 +5434,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const targetLookup = this.normalizeSearchToken(
       referenceIdentity.lubricante ?? query.lubricante ?? query.codigo ?? '',
     );
-    const targetBrand = this.normalizeSearchToken(query.marca_lubricante);
+    const targetBrand = this.normalizeSearchToken(
+      referenceIdentity.marca_lubricante ?? query.marca_lubricante,
+    );
+    const targetEquipment = this.normalizeSearchToken(
+      [
+        query.equipo_id ?? referenceIdentity.equipo_id,
+        query.equipo_codigo ?? referenceIdentity.equipo_codigo,
+        query.equipo_nombre ?? referenceIdentity.equipo_nombre,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    );
+    const targetModel = this.normalizeSearchToken(
+      query.equipo_modelo ?? referenceIdentity.equipo_modelo,
+    );
     const targetCompartimento = this.normalizeSearchToken(query.compartimento);
     const range = this.resolveDashboardDateRange(
       query.periodo,
@@ -5353,6 +5479,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         !this.normalizeSearchToken(identity.marca_lubricante).includes(
           targetBrand,
         )
+      ) {
+        return false;
+      }
+      if (
+        targetEquipment &&
+        !this.matchesNormalizedToken(identity.equipo_lookup_key, targetEquipment)
+      ) {
+        return false;
+      }
+      if (
+        targetModel &&
+        this.normalizeSearchToken(identity.equipo_modelo) !== targetModel
       ) {
         return false;
       }
@@ -5396,6 +5534,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       fecha_muestra: item.fecha_muestra ?? null,
       numero_muestra: item.sample_info?.numero_muestra ?? null,
       compartimento_principal: item.compartimento_principal ?? null,
+      equipo_codigo: item.equipo_codigo ?? null,
+      equipo_nombre: item.equipo_nombre ?? null,
+      equipo_modelo: item.sample_info?.equipo_modelo ?? null,
       estado_diagnostico: item.estado_diagnostico ?? 'NORMAL',
       condicion:
         item.sample_info?.condicion ?? item.estado_diagnostico ?? 'NORMAL',
@@ -5470,7 +5611,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const globalLubricants = new Set(
       rows
-        .map((item) => this.resolveLubricantIdentity(item).lubricante_lookup_key)
+        .map((item) => this.resolveLubricantIdentity(item).identity_lookup_key)
         .filter(Boolean),
     ).size;
 
@@ -5478,13 +5619,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       {
         filters: range,
         selected: latestAnalysis
-          ? {
-              lubricante: selectedIdentity.lubricante,
-              marca_lubricante: selectedIdentity.marca_lubricante,
-              lubricante_codigo: selectedIdentity.lubricante_codigo,
-              total_analisis: sortedAnalyses.length,
-              compartimentos: [
-                ...new Set(
+            ? {
+                lubricante: selectedIdentity.lubricante,
+                marca_lubricante: selectedIdentity.marca_lubricante,
+                lubricante_codigo: selectedIdentity.lubricante_codigo,
+                equipo_id: selectedIdentity.equipo_id,
+                equipo_codigo: selectedIdentity.equipo_codigo,
+                equipo_nombre: selectedIdentity.equipo_nombre,
+                equipo_label: selectedIdentity.equipo_label,
+                equipo_modelo: selectedIdentity.equipo_modelo,
+                total_analisis: sortedAnalyses.length,
+                compartimentos: [
+                  ...new Set(
                   sortedAnalyses
                     .map((item) => item.compartimento_principal)
                     .filter(Boolean),
@@ -5559,6 +5705,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const preparedDetalles = await this.prepareAnalisisDetallesForSave({
       lubricante: lubricanteIdentity.lubricante,
       compartimento: dto.compartimento_principal ?? null,
+      equipo_id: equipmentContext.equipo?.id ?? dto.equipo_id ?? null,
+      equipo_codigo: equipmentContext.equipo?.codigo ?? dto.equipo_codigo ?? null,
+      equipo_nombre: equipmentContext.equipo?.nombre ?? dto.equipo_nombre ?? null,
+      equipo_modelo: baseSampleInfo.equipo_modelo ?? null,
       detalles: dto.detalles,
     });
     const inferredState = this.inferAnalisisStateFromDetails(
@@ -5731,6 +5881,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             lubricante: lubricanteIdentity.lubricante,
             compartimento:
               dto.compartimento_principal ?? row.compartimento_principal ?? null,
+            equipo_id: equipmentContext.equipo?.id ?? dto.equipo_id ?? row.equipo_id ?? null,
+            equipo_codigo:
+              equipmentContext.equipo?.codigo ?? dto.equipo_codigo ?? row.equipo_codigo ?? null,
+            equipo_nombre:
+              equipmentContext.equipo?.nombre ?? dto.equipo_nombre ?? row.equipo_nombre ?? null,
+            equipo_modelo: mergedSampleInfo.equipo_modelo ?? null,
             detalles: dto.detalles,
           })
         : null;
