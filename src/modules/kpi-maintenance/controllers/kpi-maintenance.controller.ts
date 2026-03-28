@@ -48,6 +48,7 @@ import {
   IssueMaterialsDto,
   EventoProcesoQueryDto,
   ImportAnalisisLubricanteBatchDto,
+  PurgeAnalisisLubricanteDto,
   UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
   UpdateEquipoDto,
@@ -868,6 +869,16 @@ export class KpiMaintenanceController {
   @Get('inteligencia/analisis-lubricante/import/:jobId')
   getAnalisisLubricanteImportStatus(@Param('jobId') jobId: string) {
     return this.service.getAnalisisLubricanteImportStatus(jobId);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary:
+      'Eliminar físicamente toda la información de análisis de lubricante, incluyendo detalles, alertas derivadas, eventos y archivos de importación',
+  })
+  @Post('inteligencia/analisis-lubricante/purge')
+  purgeAnalisisLubricante(@Body() dto: PurgeAnalisisLubricanteDto) {
+    return this.service.purgeAnalisisLubricante(dto);
   }
 
   @ApiTags('Inteligencia Operativa')

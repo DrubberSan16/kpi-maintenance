@@ -10,7 +10,15 @@ import {
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { URLSearchParams } from 'url';
-import { appendFile, mkdir, readFile, unlink, writeFile } from 'fs/promises';
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  unlink,
+  writeFile,
+} from 'fs/promises';
 import { basename, extname, join } from 'path';
 import * as XLSX from 'xlsx';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -96,6 +104,7 @@ import {
   EventoProcesoQueryDto,
   ImportAnalisisLubricanteBatchDto,
   IssueMaterialsDto,
+  PurgeAnalisisLubricanteDto,
   UpdateAnalisisLubricanteDto,
   LocationQueryDto,
   UpdateBitacoraDto,
@@ -5475,6 +5484,119 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     await this.triggerAlertRecalculation('analisis-lubricante-delete');
     return this.wrap(true, 'Análisis de lubricante eliminado');
+  }
+
+  async purgeAnalisisLubricante(dto: PurgeAnalisisLubricanteDto) {
+    const confirmation = String(dto.confirmation ?? '').trim().toUpperCase();
+    if (confirmation !== 'ELIMINAR TODO') {
+      throw new BadRequestException(
+        'Debes confirmar la operación escribiendo exactamente ELIMINAR TODO.',
+      );
+    }
+
+    const requestedRole = String(dto.requested_role ?? '').trim().toUpperCase();
+    if (!requestedRole || !requestedRole.includes('ADMIN')) {
+      throw new BadRequestException(
+        'Solo administradores pueden ejecutar el borrado total de análisis de lubricante.',
+      );
+    }
+
+    const purgeImportJobs = dto.purge_import_jobs !== false;
+
+    const [totalAnalyses, totalDetails, totalEvents, totalAlerts] =
+      await Promise.all([
+        this.analisisLubricanteRepo.count(),
+        this.analisisLubricanteDetRepo.count(),
+        this.eventoProcesoRepo.count({
+          where: { referencia_tabla: 'tb_analisis_lubricante' },
+        }),
+        this.alertaRepo
+          .createQueryBuilder('alerta')
+          .where('alerta.origen = :origen', {
+            origen: 'ANALISIS_LUBRICANTE',
+          })
+          .orWhere('alerta.referencia_tipo = :tipo', {
+            tipo: 'ANALISIS_LUBRICANTE',
+          })
+          .orWhere('alerta.referencia LIKE :referencia', {
+            referencia: 'ANALISIS:%',
+          })
+          .getCount(),
+      ]);
+
+    let deletedImportJobs = 0;
+    if (purgeImportJobs) {
+      try {
+        const entries = await readdir(this.lubricantImportRoot, {
+          withFileTypes: true,
+        });
+        deletedImportJobs = entries.filter((entry) => entry.isDirectory()).length;
+      } catch {
+        deletedImportJobs = 0;
+      }
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager
+        .createQueryBuilder()
+        .delete()
+        .from(AnalisisLubricanteDetalleEntity)
+        .execute();
+
+      await manager
+        .createQueryBuilder()
+        .delete()
+        .from(AnalisisLubricanteEntity)
+        .execute();
+
+      await manager
+        .createQueryBuilder()
+        .delete()
+        .from(EventoProcesoEntity)
+        .where('referencia_tabla = :tabla', {
+          tabla: 'tb_analisis_lubricante',
+        })
+        .execute();
+
+      await manager
+        .createQueryBuilder()
+        .delete()
+        .from(AlertaMantenimientoEntity)
+        .where('origen = :origen', { origen: 'ANALISIS_LUBRICANTE' })
+        .orWhere('referencia_tipo = :tipo', {
+          tipo: 'ANALISIS_LUBRICANTE',
+        })
+        .orWhere('referencia LIKE :referencia', {
+          referencia: 'ANALISIS:%',
+        })
+        .execute();
+    });
+
+    if (purgeImportJobs) {
+      await rm(this.lubricantImportRoot, { recursive: true, force: true });
+      await mkdir(this.lubricantImportRoot, { recursive: true });
+      this.lubricantImportJobs.clear();
+    }
+
+    await this.writeSecurityLog({
+      typeLog: 'LUBRICANT_PURGE_ALL',
+      description: `Purga total de análisis de lubricante ejecutada. Analisis=${totalAnalyses}, detalles=${totalDetails}, eventos=${totalEvents}, alertas=${totalAlerts}, importaciones=${deletedImportJobs}`,
+      createdBy: dto.requested_by ?? null,
+    });
+
+    await this.triggerAlertRecalculation('analisis-lubricante-purge');
+
+    return this.wrap(
+      {
+        deleted_analyses: totalAnalyses,
+        deleted_details: totalDetails,
+        deleted_events: totalEvents,
+        deleted_alerts: totalAlerts,
+        deleted_import_jobs: purgeImportJobs ? deletedImportJobs : 0,
+        purge_import_jobs: purgeImportJobs,
+      },
+      'Toda la información de análisis de lubricante fue eliminada físicamente',
+    );
   }
 
   private async importAnalisisLubricanteItems(

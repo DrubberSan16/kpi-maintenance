@@ -1113,6 +1113,39 @@ export class ImportAnalisisLubricanteBatchDto {
   analyses: CreateAnalisisLubricanteDto[];
 }
 
+export class PurgeAnalisisLubricanteDto {
+  @ApiProperty({
+    description:
+      'Frase de confirmación para ejecutar el borrado físico masivo del módulo',
+    example: 'ELIMINAR TODO',
+  })
+  @IsString()
+  @IsNotEmpty()
+  confirmation: string;
+
+  @ApiPropertyOptional({
+    description: 'Usuario que solicita la purga masiva',
+  })
+  @IsOptional()
+  @IsString()
+  requested_by?: string;
+
+  @ApiPropertyOptional({
+    description: 'Rol del usuario que solicita la purga masiva',
+  })
+  @IsOptional()
+  @IsString()
+  requested_role?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Si es true, elimina también los archivos y logs de importación guardados en servidor',
+  })
+  @IsOptional()
+  @IsBoolean()
+  purge_import_jobs?: boolean;
+}
+
 export class AnalisisLubricanteCatalogQueryDto {
   @ApiPropertyOptional({
     description: 'Texto de búsqueda para lubricante, marca o código asociado',
