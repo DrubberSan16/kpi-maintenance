@@ -3121,11 +3121,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             );
 
             if (
-              !numeroMuestra &&
               !fechaMuestra &&
-              !fechaInforme &&
-              horasEquipo == null &&
-              horasLubricante == null
+              !fechaIngreso &&
+              !fechaInforme
             ) {
               continue;
             }
@@ -3149,24 +3147,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                   ? this.normalizeSearchToken(textValue)
                   : textValue || null;
 
+              const hasTextValue = !!normalizedText;
+              const hasNumericValue =
+                numericValue != null && Number.isFinite(Number(numericValue));
+              if (!hasTextValue && !hasNumericValue) {
+                return null;
+              }
+
               return {
                 compartimento,
                 numero_muestra: numeroMuestra || undefined,
                 parametro: definition?.label || item.label,
                 resultado_numerico:
-                  usesText || normalizedText
+                  usesText || hasTextValue
                     ? usesText
                       ? undefined
                       : numericValue ?? undefined
                     : numericValue ?? undefined,
                 resultado_texto:
-                  usesText || (!Number.isFinite(Number(numericValue)) && normalizedText)
+                  usesText || (!hasNumericValue && hasTextValue)
                     ? normalizedText ?? undefined
                     : undefined,
                 unidad: definition?.unit ?? undefined,
                 orden: definition?.order ?? targetRow,
               };
-            });
+            }).filter(Boolean) as NonNullable<CreateAnalisisLubricanteDto['detalles']>;
+
+            if (!detalles.length) {
+              continue;
+            }
 
             analyses.push({
               cliente,
