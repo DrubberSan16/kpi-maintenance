@@ -867,8 +867,8 @@ export class KpiMaintenanceController {
     summary: 'Descargar formato válido de carga para análisis de lubricante',
   })
   @Get('inteligencia/analisis-lubricante/import/template')
-  downloadAnalisisLubricanteTemplate(@Res() res: Response) {
-    const template = this.service.getAnalisisLubricanteImportTemplate();
+  async downloadAnalisisLubricanteTemplate(@Res() res: Response) {
+    const template = await this.service.getAnalisisLubricanteImportTemplate();
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
