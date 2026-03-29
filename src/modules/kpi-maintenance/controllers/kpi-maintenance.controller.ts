@@ -828,6 +828,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Obtener el siguiente código disponible de cronograma semanal' })
+  @Get('inteligencia/cronogramas-semanales/next-code')
+  getNextCronogramaSemanalCode() {
+    return this.service.getNextCronogramaSemanalCode();
+  }
+
+  @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Catálogo de lubricantes para autocompletado' })
   @Get('inteligencia/analisis-lubricante/catalog')
   listAnalisisLubricanteCatalog(

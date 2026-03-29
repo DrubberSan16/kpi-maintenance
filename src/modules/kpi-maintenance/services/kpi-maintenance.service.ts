@@ -1367,6 +1367,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async getNextCronogramaSemanalCode() {
+    return this.wrap(
+      { code: await this.generateNextCronogramaSemanalCode() },
+      'Siguiente código de cronograma semanal generado',
+    );
+  }
+
   private async resolveRequestedWorkOrderCode(
     requestedCode?: string | null,
   ): Promise<CodeResolution> {
@@ -2000,12 +2007,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private normalizeSearchToken(value: unknown) {
-    return String(value ?? '')
+    return this.repairPotentialMojibake(String(value ?? ''))
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-zA-Z0-9]+/g, ' ')
       .trim()
       .toLowerCase();
+  }
+
+  private repairPotentialMojibake(value: string) {
+    const raw = String(value ?? '');
+    if (!/[ÃÂâ€™â€œâ€\uFFFD]/.test(raw)) {
+      return raw;
+    }
+
+    try {
+      const repaired = Buffer.from(raw, 'latin1').toString('utf8');
+      const weirdnessScore = (input: string) =>
+        (input.match(/[ÃÂâ€™â€œâ€\uFFFD]/g) || []).length;
+      return weirdnessScore(repaired) < weirdnessScore(raw) ? repaired : raw;
+    } catch {
+      return raw;
+    }
   }
 
   private matchesNormalizedToken(source: unknown, target: unknown) {
@@ -2811,7 +2834,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private normalizeWorkbookToken(value: unknown) {
-    return String(value ?? '')
+    return this.repairPotentialMojibake(String(value ?? ''))
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/\s+/g, ' ')
@@ -2832,6 +2855,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const cell = sheet[
       XLSX.utils.encode_cell({ r: rowNumber - 1, c: columnNumber - 1 })
     ];
+    if (typeof cell?.v === 'string') {
+      return this.repairPotentialMojibake(cell.v);
+    }
     return cell?.v ?? null;
   }
 
@@ -3707,10 +3733,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private normalizeProgramacionWorkbookValue(value: unknown) {
     if (value == null) return '';
+    if (typeof value === 'string') {
+      const repaired = this.repairPotentialMojibake(value);
+      return repaired.replace(/\s+/g, ' ').trim();
+    }
     if (typeof value === 'number') {
       return Number.isInteger(value) ? String(value) : String(value);
     }
-    return String(value).replace(/\s+/g, ' ').trim();
+    return this.repairPotentialMojibake(String(value))
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private isMeaningfulProgramacionWorkbookValue(value: unknown) {
@@ -3733,8 +3765,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    const numericValue = /^\d+([.,]\d+)?$/.test(raw)
+      ? Number(raw.replace(/,/g, '.'))
+      : null;
+    const normalizedNumericValue =
+      numericValue != null && Number.isFinite(numericValue)
+        ? Math.round(numericValue)
+        : null;
+
     const frequencyMatch = normalized.match(/(250|325|500|650|975|1000|1300)/);
-    const frequency = frequencyMatch ? Number(frequencyMatch[1]) : null;
+    const frequency =
+      frequencyMatch != null
+        ? Number(frequencyMatch[1])
+        : normalizedNumericValue != null &&
+            PROGRAMACION_MPG_FREQUENCIES.has(normalizedNumericValue)
+          ? normalizedNumericValue
+          : null;
     if (frequency != null && PROGRAMACION_MPG_FREQUENCIES.has(frequency)) {
       return {
         raw,
@@ -3745,13 +3791,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    if (/^\d+([.,]\d+)?$/.test(raw)) {
+    if (normalizedNumericValue != null && normalizedNumericValue > 0) {
       return {
         raw,
-        normalized,
-        tipo_mantenimiento: 'NUMERICO_AUXILIAR',
-        frecuencia_horas: null as number | null,
-        es_reportable: false,
+        normalized: String(normalizedNumericValue),
+        tipo_mantenimiento: 'HORAS_PROGRAMADAS',
+        frecuencia_horas: normalizedNumericValue,
+        es_reportable: true,
       };
     }
 
@@ -7319,6 +7365,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         if (!this.isMeaningfulProgramacionWorkbookValue(rawValue)) continue;
         const descriptor = this.resolveProgramacionMaintenanceDescriptor(rawValue);
         if (!descriptor.es_reportable) continue;
+        const horometroProgramado =
+          descriptor.frecuencia_horas != null && horometroUltimo != null
+            ? Number((horometroUltimo + descriptor.frecuencia_horas).toFixed(2))
+            : null;
 
         const mapping = await this.resolveProgramacionMensualProcedure(
           descriptor.raw,
@@ -7349,6 +7399,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             columna_excel: column.column,
             horometro_ultimo: horometroUltimo,
             horometro_actual: horometroActual,
+            horometro_programado: horometroProgramado,
+            horas_programadas: descriptor.frecuencia_horas ?? null,
           },
         });
         order += 1;
@@ -7392,6 +7444,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     documento_origen: string;
     valor_crudo: string;
     frecuencia_horas?: number | null;
+    ultima_ejecucion_horas?: number | null;
+    proxima_horas?: number | null;
     payload_json?: Record<string, unknown>;
   }) {
     const existing = await this.programacionRepo.findOne({
@@ -7407,6 +7461,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (existing) {
       existing.origen_programacion = 'MENSUAL_IMPORT';
       existing.documento_origen = payload.documento_origen;
+      existing.proxima_fecha = payload.fecha_programada;
+      existing.ultima_ejecucion_horas =
+        payload.ultima_ejecucion_horas ?? existing.ultima_ejecucion_horas;
+      existing.proxima_horas = payload.proxima_horas ?? existing.proxima_horas;
       existing.payload_json = {
         ...(existing.payload_json ?? {}),
         ...(payload.payload_json ?? {}),
@@ -7425,9 +7483,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         modo_programacion: 'CALENDARIO',
         origen_programacion: 'MENSUAL_IMPORT',
         ultima_ejecucion_fecha: null,
-        ultima_ejecucion_horas: null,
+        ultima_ejecucion_horas: payload.ultima_ejecucion_horas ?? null,
         proxima_fecha: payload.fecha_programada,
-        proxima_horas: null,
+        proxima_horas: payload.proxima_horas ?? null,
         documento_origen: payload.documento_origen,
         payload_json: {
           ...(payload.payload_json ?? {}),
@@ -7544,6 +7602,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             documento_origen: parsed.header.documento_origen,
             valor_crudo: detail.valor_crudo,
             frecuencia_horas: detail.frecuencia_horas,
+            ultima_ejecucion_horas:
+              detail.payload_json?.horometro_ultimo != null
+                ? this.toNumeric(detail.payload_json.horometro_ultimo, 0)
+                : null,
+            proxima_horas:
+              detail.payload_json?.horometro_programado != null
+                ? this.toNumeric(detail.payload_json.horometro_programado, 0)
+                : null,
             payload_json: {
               programacion_mensual_codigo: parsed.header.codigo,
               tipo_mantenimiento: detail.tipo_mantenimiento,
@@ -7552,6 +7618,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 detail.payload_json?.horometro_ultimo ?? null,
               horometro_actual:
                 detail.payload_json?.horometro_actual ?? null,
+              horometro_programado:
+                detail.payload_json?.horometro_programado ?? null,
             },
           });
           programacionId = programacion.id;
