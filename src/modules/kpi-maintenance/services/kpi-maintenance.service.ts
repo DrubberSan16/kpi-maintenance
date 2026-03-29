@@ -685,14 +685,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly lubricantImportRoot =
     process.env.LUBRICANT_IMPORT_DIR ||
     join(process.cwd(), 'storage', 'lubricant-imports');
-  private readonly lubricantImportTemplatePath =
-    process.env.LUBRICANT_IMPORT_TEMPLATE_PATH ||
+  private readonly lubricantImportTemplatePaths = [
+    process.env.LUBRICANT_IMPORT_TEMPLATE_PATH,
     join(
       process.cwd(),
       'templates',
       'analisis-lubricante',
       'FORMATO_CARGA_ANALISIS_LUBRICANTE.xlsx',
-    );
+    ),
+    join(
+      process.cwd(),
+      'kpi-maintenance',
+      'templates',
+      'analisis-lubricante',
+      'FORMATO_CARGA_ANALISIS_LUBRICANTE.xlsx',
+    ),
+  ].filter((value): value is string => Boolean(value));
   private readonly lubricantImportJobs = new Map<string, LubricantImportJobState>();
 
   private buildProductoLabel(producto?: Partial<ProductoEntity> | null) {
@@ -3492,14 +3500,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getAnalisisLubricanteImportTemplate() {
-    try {
-      const buffer = await readFile(this.lubricantImportTemplatePath);
-      return {
-        filename: 'FORMATO_CARGA_ANALISIS_LUBRICANTE.xlsx',
-        buffer,
-      };
-    } catch {
-      // Fallback dinámico si el template visual no está disponible en disco.
+    for (const templatePath of this.lubricantImportTemplatePaths) {
+      try {
+        const buffer = await readFile(templatePath);
+        return {
+          filename: 'FORMATO_CARGA_ANALISIS_LUBRICANTE.xlsx',
+          buffer,
+        };
+      } catch {
+        // Intenta la siguiente ruta candidata.
+      }
     }
 
     const workbook = XLSX.utils.book_new();
