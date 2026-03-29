@@ -4657,7 +4657,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .filter((row) => !this.hasLinkedWorkOrders(row));
 
     for (const row of staleRows) {
-      row.estado = 'RESUELTA';
+      // For system-managed alerts without linked work orders, closing the
+      // condition should leave the record fully closed instead of "resolved".
+      // This keeps compatibility with older DB constraints that only accept
+      // open/in-process/closed values and matches the inventory use case.
+      row.estado = 'CERRADA';
       row.resolved_at = now;
       row.ultima_evaluacion_at = now;
       await this.alertaRepo.save(row);
