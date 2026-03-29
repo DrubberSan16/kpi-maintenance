@@ -48,6 +48,7 @@ import {
   IssueMaterialsDto,
   EventoProcesoQueryDto,
   ImportAnalisisLubricanteBatchDto,
+  ProgramacionMensualQueryDto,
   PurgeAnalisisLubricanteDto,
   UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
@@ -524,6 +525,46 @@ export class KpiMaintenanceController {
     return this.service.listProgramaciones();
   }
   @ApiTags('Programaciones')
+  @ApiOperation({
+    summary: 'Listar calendarios mensuales importados de programación MPG',
+  })
+  @Get('programaciones/mensuales')
+  listProgramacionesMensuales(@Query() query: ProgramacionMensualQueryDto) {
+    return this.service.listProgramacionesMensuales(query);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({
+    summary: 'Obtener calendario mensual importado de programación MPG por ID',
+  })
+  @Get('programaciones/mensuales/:id')
+  getProgramacionMensual(
+    @Param('id') id: string,
+    @Query() query: ProgramacionMensualQueryDto,
+  ) {
+    return this.service.getProgramacionMensual(id, query);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({
+    summary: 'Importar programación mensual MPG desde Excel',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  @UseInterceptors(FileInterceptor('file'))
+  @Post('programaciones/import/mensual/upload')
+  importProgramacionMensualWorkbook(@UploadedFile() file: any) {
+    return this.service.importProgramacionMensualWorkbook(file);
+  }
+  @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Obtener programación por ID' })
   @ApiParam({
     name: 'id',
@@ -935,6 +976,24 @@ export class KpiMaintenanceController {
   @Post('inteligencia/cronogramas-semanales')
   createCronogramaSemanal(@Body() dto: CreateCronogramaSemanalDto) {
     return this.service.createCronogramaSemanal(dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Importar cronograma semanal desde Excel' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  @UseInterceptors(FileInterceptor('file'))
+  @Post('inteligencia/cronogramas-semanales/import/upload')
+  importCronogramaSemanalWorkbook(@UploadedFile() file: any) {
+    return this.service.importCronogramaSemanalWorkbook(file);
   }
 
   @ApiTags('Inteligencia Operativa')

@@ -62,6 +62,8 @@ import {
   ProcedimientoActividadEntity,
   ProcedimientoPlantillaEntity,
   BodegaEntity,
+  ProgramacionMensualDetalleEntity,
+  ProgramacionMensualEntity,
   ProgramacionPlanEntity,
   ReservaStockEntity,
   ReporteCombustibleEntity,
@@ -105,6 +107,7 @@ import {
   ImportAnalisisLubricanteBatchDto,
   IssueMaterialsDto,
   PurgeAnalisisLubricanteDto,
+  ProgramacionMensualQueryDto,
   UpdateAnalisisLubricanteDto,
   LocationQueryDto,
   UpdateBitacoraDto,
@@ -244,6 +247,41 @@ type ParsedLubricantWorkbook = {
   sheets: string[];
 };
 
+type ParsedProgramacionMensualWorkbook = {
+  header: {
+    codigo: string;
+    fecha_inicio: string | null;
+    fecha_fin: string | null;
+    documento_origen: string;
+    nombre_archivo: string;
+    resumen: string;
+    payload_json: Record<string, unknown>;
+  };
+  detalles: Array<{
+    equipo_id?: string | null;
+    equipo_codigo: string;
+    equipo_nombre?: string | null;
+    fecha_programada: string;
+    dia_mes: number;
+    valor_crudo: string;
+    valor_normalizado: string;
+    tipo_mantenimiento: string;
+    frecuencia_horas?: number | null;
+    procedimiento_id?: string | null;
+    plan_id?: string | null;
+    es_sincronizable: boolean;
+    observacion?: string | null;
+    orden: number;
+    payload_json: Record<string, unknown>;
+  }>;
+  warnings: string[];
+};
+
+type ParsedCronogramaSemanalWorkbook = {
+  dto: CreateCronogramaSemanalDto;
+  warnings: string[];
+};
+
 const LUBRICANT_GROUP_LABELS: Record<LubricantMetricGroupKey, string> = {
   ESTADO_LUBRICANTE: 'Estado del lubricante',
   DEGRADACION_QUIMICA: 'Degradación química',
@@ -267,6 +305,16 @@ const LUBRICANT_IMPORT_SHEETS = [
   'TANDEM DERECHO',
   'TANDEM IZQUIERDO',
 ];
+
+const PROGRAMACION_MPG_FREQUENCIES = new Set([
+  250,
+  325,
+  500,
+  650,
+  975,
+  1000,
+  1300,
+]);
 
 const LUBRICANT_IMPORT_PARAMETER_ROWS = [
   { row: 22, label: 'Viscosidad a 100ºC, cSt' },
@@ -640,6 +688,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly cronogramaSemanalRepo: Repository<CronogramaSemanalEntity>,
     @InjectRepository(CronogramaSemanalDetalleEntity)
     private readonly cronogramaSemanalDetRepo: Repository<CronogramaSemanalDetalleEntity>,
+    @InjectRepository(ProgramacionMensualEntity)
+    private readonly programacionMensualRepo: Repository<ProgramacionMensualEntity>,
+    @InjectRepository(ProgramacionMensualDetalleEntity)
+    private readonly programacionMensualDetRepo: Repository<ProgramacionMensualDetalleEntity>,
     @InjectRepository(ReporteOperacionDiariaEntity)
     private readonly reporteDiarioRepo: Repository<ReporteOperacionDiariaEntity>,
     @InjectRepository(ReporteOperacionDiariaUnidadEntity)
@@ -1265,6 +1317,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.getAlphaNumericCodeRank('AL', a),
       );
     return this.computeNextAlphaNumericCode('AL', codes[0] ?? null);
+  }
+
+  private async generateNextProgramacionMensualCode() {
+    const rows = await this.programacionMensualRepo.find({
+      select: { codigo: true, id: true },
+    });
+    const codes = rows
+      .map((row) => String(row.codigo || '').trim())
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          this.getAlphaNumericCodeRank('PMM', b) -
+          this.getAlphaNumericCodeRank('PMM', a),
+      );
+    return this.computeNextAlphaNumericCode('PMM', codes[0] ?? null);
+  }
+
+  private async generateNextCronogramaSemanalCode() {
+    const rows = await this.cronogramaSemanalRepo.find({
+      select: { codigo: true, id: true },
+    });
+    const codes = rows
+      .map((row) => String(row.codigo || '').trim())
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          this.getAlphaNumericCodeRank('PCS', b) -
+          this.getAlphaNumericCodeRank('PCS', a),
+      );
+    return this.computeNextAlphaNumericCode('PCS', codes[0] ?? null);
   }
 
   async getNextWorkOrderCode() {
@@ -3603,6 +3685,176 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private parseSpanishMonthIndex(value: unknown) {
+    const token = this.normalizeWorkbookToken(value);
+    const months: Record<string, number> = {
+      ENERO: 1,
+      FEBRERO: 2,
+      MARZO: 3,
+      ABRIL: 4,
+      MAYO: 5,
+      JUNIO: 6,
+      JULIO: 7,
+      AGOSTO: 8,
+      SEPTIEMBRE: 9,
+      SETIEMBRE: 9,
+      OCTUBRE: 10,
+      NOVIEMBRE: 11,
+      DICIEMBRE: 12,
+    };
+    return months[token] ?? null;
+  }
+
+  private normalizeProgramacionWorkbookValue(value: unknown) {
+    if (value == null) return '';
+    if (typeof value === 'number') {
+      return Number.isInteger(value) ? String(value) : String(value);
+    }
+    return String(value).replace(/\s+/g, ' ').trim();
+  }
+
+  private isMeaningfulProgramacionWorkbookValue(value: unknown) {
+    const raw = this.normalizeProgramacionWorkbookValue(value);
+    if (!raw) return false;
+    const normalized = this.normalizeWorkbookToken(raw);
+    return !['0', '0.0', 'N/D', 'ND', 'NULL', 'NONE', '-'].includes(normalized);
+  }
+
+  private resolveProgramacionMaintenanceDescriptor(value: unknown) {
+    const raw = this.normalizeProgramacionWorkbookValue(value);
+    const normalized = this.normalizeWorkbookToken(raw);
+    if (!raw || !normalized) {
+      return {
+        raw,
+        normalized,
+        tipo_mantenimiento: 'VACIO',
+        frecuencia_horas: null as number | null,
+        es_reportable: false,
+      };
+    }
+
+    const frequencyMatch = normalized.match(/(250|325|500|650|975|1000|1300)/);
+    const frequency = frequencyMatch ? Number(frequencyMatch[1]) : null;
+    if (frequency != null && PROGRAMACION_MPG_FREQUENCIES.has(frequency)) {
+      return {
+        raw,
+        normalized: String(frequency),
+        tipo_mantenimiento: 'MPG',
+        frecuencia_horas: frequency,
+        es_reportable: true,
+      };
+    }
+
+    if (/^\d+([.,]\d+)?$/.test(raw)) {
+      return {
+        raw,
+        normalized,
+        tipo_mantenimiento: 'NUMERICO_AUXILIAR',
+        frecuencia_horas: null as number | null,
+        es_reportable: false,
+      };
+    }
+
+    const maintenanceKeywords = [
+      'R20',
+      'FILTRO',
+      'FILTROS',
+      'OVERHAUL',
+      'IZAJE',
+      'IN',
+      'CHAPAS',
+      'BIELA',
+      'CONTAMINACION',
+      'CONTAMINACIÓN',
+      'REPARACION',
+      'REPARACIÓN',
+      'INSPECCION',
+      'INSPECCIÓN',
+      'CAMBIO',
+      'MPG',
+    ];
+    const isMaintenanceLike = maintenanceKeywords.some((keyword) =>
+      normalized.includes(this.normalizeWorkbookToken(keyword)),
+    );
+
+    return {
+      raw,
+      normalized,
+      tipo_mantenimiento: isMaintenanceLike ? 'MANTENIMIENTO' : 'OTRO',
+      frecuencia_horas: null as number | null,
+      es_reportable: isMaintenanceLike,
+    };
+  }
+
+  private parseWorkbookTimeRange(value: unknown) {
+    const raw = this.normalizeWorkbookToken(value)
+      .replace(/\s+/g, '')
+      .replace(/H/g, ':');
+    const match = raw.match(
+      /(\d{1,2}):?(\d{2})\s*-\s*(\d{1,2}):?(\d{2})/,
+    );
+    if (!match) return null;
+    const [, startHour = '0', startMinute = '00', endHour = '0', endMinute = '00'] =
+      match;
+    const start = `${String(startHour).padStart(2, '0')}:${String(
+      startMinute,
+    ).padStart(2, '0')}:00`;
+    const end = `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(
+      2,
+      '0',
+    )}:00`;
+    const duration =
+      (Number(endHour) * 60 +
+        Number(endMinute) -
+        (Number(startHour) * 60 + Number(startMinute))) /
+      60;
+    return {
+      hora_inicio: start,
+      hora_fin: end,
+      duracion_horas: Number(duration.toFixed(2)),
+    };
+  }
+
+  private parseCronogramaDateRangeLabel(value: unknown) {
+    const raw = String(value ?? '').trim();
+    const normalized = this.normalizeWorkbookToken(raw);
+    const match = normalized.match(
+      /SEMANA DEL\s+(\d{1,2})\s+DE\s+([A-ZÁÉÍÓÚÜ]+)\s+AL\s+(\d{1,2})\s+DE\s+([A-ZÁÉÍÓÚÜ]+)\s+DEL\s+(\d{4})/,
+    );
+    if (!match) return null;
+    const [, fromDay, fromMonthLabel, toDay, toMonthLabel, yearLabel] = match;
+    const year = Number(yearLabel);
+    const fromMonth = this.parseSpanishMonthIndex(fromMonthLabel);
+    const toMonth = this.parseSpanishMonthIndex(toMonthLabel);
+    if (!fromMonth || !toMonth || !year) return null;
+    const start = new Date(year, fromMonth - 1, Number(fromDay));
+    const endYear = toMonth < fromMonth ? year + 1 : year;
+    const end = new Date(endYear, toMonth - 1, Number(toDay));
+    return {
+      fecha_inicio: start.toISOString().slice(0, 10),
+      fecha_fin: end.toISOString().slice(0, 10),
+      label: raw,
+    };
+  }
+
+  private resolveCronogramaTipoProceso(value: string) {
+    const normalized = this.normalizeWorkbookToken(value);
+    const hasSsa = normalized.includes('SSA');
+    const hasMpg = normalized.includes('MPG');
+    if (hasSsa && hasMpg) return 'MIXTO';
+    if (hasMpg) return 'MPG';
+    if (hasSsa) return 'SSA';
+    return 'OPERACION';
+  }
+
+  private extractEquipoCodigoFromText(value: string) {
+    const match = this.normalizeWorkbookToken(value).match(
+      /UGN?\s*-?\s*0*(\d{1,3})/,
+    );
+    if (!match) return null;
+    return `UG${String(match[1] || '').padStart(2, '0')}`;
+  }
+
   private resolveDashboardDateRange(
     periodo?: string | null,
     from?: string | null,
@@ -3642,8 +3894,42 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where: { cronograma_id: row.id, is_deleted: false },
       order: { orden: 'ASC', created_at: 'ASC' },
     });
+    const dailyHours = detalles.reduce((acc: Record<string, number>, item) => {
+      const key = String(item.fecha_actividad || '');
+      if (!key || !item.hora_inicio || !item.hora_fin) return acc;
+      const [startHour, startMinute] = String(item.hora_inicio)
+        .slice(0, 5)
+        .split(':')
+        .map((value) => Number(value || 0));
+      const [endHour, endMinute] = String(item.hora_fin)
+        .slice(0, 5)
+        .split(':')
+        .map((value) => Number(value || 0));
+      const duration =
+        (endHour * 60 + endMinute - (startHour * 60 + startMinute)) / 60;
+      acc[key] = Number(((acc[key] ?? 0) + Math.max(duration, 0)).toFixed(2));
+      return acc;
+    }, {});
+
+    const timeSlots = [...new Set(detalles.map((item) => `${item.hora_inicio || ''}-${item.hora_fin || ''}`))]
+      .filter(Boolean)
+      .map((key) => {
+        const [hora_inicio = null, hora_fin = null] = key.split('-');
+        return {
+          key,
+          hora_inicio,
+          hora_fin,
+          label:
+            hora_inicio && hora_fin
+              ? `${String(hora_inicio).slice(0, 5)} - ${String(hora_fin).slice(0, 5)}`
+              : key,
+        };
+      });
+
     return {
       ...row,
+      daily_hours: dailyHours,
+      time_slots: timeSlots,
       detalles,
     };
   }
@@ -4472,26 +4758,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const freqType = String(plan.frecuencia_tipo || 'HORAS').toUpperCase();
     const freqValue = this.toNumeric(plan.frecuencia_valor, 0);
     const patch: Partial<ProgramacionPlanEntity> = {};
+    const scheduleMode = String(
+      programacion.modo_programacion || 'DINAMICA',
+    ).toUpperCase();
 
-    if (freqType === 'HORAS') {
-      const baseHours =
-        programacion.ultima_ejecucion_horas != null
-          ? this.toNumeric(programacion.ultima_ejecucion_horas)
-          : this.toNumeric(equipo.horometro_actual);
-      patch.proxima_horas = Number((baseHours + freqValue).toFixed(2));
-      if (!programacion.ultima_ejecucion_horas && equipo.horometro_actual != null) {
-        patch.ultima_ejecucion_horas = this.toNumeric(equipo.horometro_actual);
-      }
-    } else {
-      const baseDate =
-        programacion.ultima_ejecucion_fecha ||
-        new Date().toISOString().slice(0, 10);
-      patch.proxima_fecha = this
-        .addInterval(baseDate, freqType, freqValue)
-        .toISOString()
-        .slice(0, 10);
-      if (!programacion.ultima_ejecucion_fecha) {
-        patch.ultima_ejecucion_fecha = baseDate;
+    if (scheduleMode !== 'CALENDARIO') {
+      if (freqType === 'HORAS') {
+        const baseHours =
+          programacion.ultima_ejecucion_horas != null
+            ? this.toNumeric(programacion.ultima_ejecucion_horas)
+            : this.toNumeric(equipo.horometro_actual);
+        patch.proxima_horas = Number((baseHours + freqValue).toFixed(2));
+        if (
+          !programacion.ultima_ejecucion_horas &&
+          equipo.horometro_actual != null
+        ) {
+          patch.ultima_ejecucion_horas = this.toNumeric(equipo.horometro_actual);
+        }
+      } else {
+        const baseDate =
+          programacion.ultima_ejecucion_fecha ||
+          new Date().toISOString().slice(0, 10);
+        patch.proxima_fecha = this
+          .addInterval(baseDate, freqType, freqValue)
+          .toISOString()
+          .slice(0, 10);
+        if (!programacion.ultima_ejecucion_fecha) {
+          patch.ultima_ejecucion_fecha = baseDate;
+        }
       }
     }
 
@@ -4518,6 +4812,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipo_codigo: equipo.codigo,
       plan_nombre: plan.nombre,
       plan_codigo: plan.codigo,
+      codigo: programacion.codigo ?? null,
+      modo_programacion: scheduleMode,
+      origen_programacion:
+        programacion.origen_programacion ?? 'MANUAL',
+      documento_origen: programacion.documento_origen ?? null,
+      payload_json: programacion.payload_json ?? {},
       procedimiento_id: procedimiento?.id ?? null,
       procedimiento_codigo: procedimiento?.codigo ?? null,
       procedimiento_nombre: procedimiento?.nombre ?? null,
@@ -4981,12 +5281,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
     const entity = this.programacionRepo.create({
+      codigo: dto.codigo?.trim() || null,
       equipo_id: dto.equipo_id,
       plan_id: resolvedPlanId,
+      modo_programacion: String(
+        dto.modo_programacion || 'DINAMICA',
+      ).toUpperCase(),
+      origen_programacion: String(
+        dto.origen_programacion || 'MANUAL',
+      ).toUpperCase(),
       ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? null,
       ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? null,
       proxima_fecha: dto.proxima_fecha ?? null,
       proxima_horas: dto.proxima_horas ?? null,
+      documento_origen: dto.documento_origen ?? null,
+      payload_json: dto.payload_json ?? {},
       activo: dto.activo ?? true,
     });
     const saved = await this.programacionRepo.save(entity);
@@ -5055,12 +5364,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     Object.assign(p, {
+      codigo: dto.codigo ?? p.codigo ?? null,
       equipo_id: dto.equipo_id ?? p.equipo_id,
       plan_id: resolvedPlanId,
+      modo_programacion: dto.modo_programacion
+        ? String(dto.modo_programacion).toUpperCase()
+        : p.modo_programacion ?? 'DINAMICA',
+      origen_programacion: dto.origen_programacion
+        ? String(dto.origen_programacion).toUpperCase()
+        : p.origen_programacion ?? 'MANUAL',
       ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? p.ultima_ejecucion_fecha ?? null,
       ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? p.ultima_ejecucion_horas ?? null,
       proxima_fecha: dto.proxima_fecha ?? p.proxima_fecha ?? null,
       proxima_horas: dto.proxima_horas ?? p.proxima_horas ?? null,
+      documento_origen: dto.documento_origen ?? p.documento_origen ?? null,
+      payload_json: dto.payload_json ?? p.payload_json ?? {},
       activo: dto.activo ?? p.activo,
     });
     const saved = await this.programacionRepo.save(p);
@@ -6799,6 +7117,608 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       `Importacion de analisis de lubricante procesada desde ${
         dto.source_file_name || 'archivo'
       }`,
+    );
+  }
+
+  private buildProgramacionMensualColumnMap(sheet: XLSX.WorkSheet | undefined) {
+    if (!sheet) return [] as Array<{ column: number; date: string; day: number }>;
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const columns: Array<{ column: number; date: string; day: number }> = [];
+    let currentYear: number | null = null;
+    let currentMonth: number | null = null;
+
+    for (let column = 4; column <= range.e.c + 1; column += 1) {
+      const monthCellValue = this.getWorkbookCellValue(sheet, 1, column);
+      const explicitDate = this.safeDateOnlyString(monthCellValue);
+      if (explicitDate) {
+        const parsed = new Date(explicitDate);
+        currentYear = parsed.getUTCFullYear();
+        currentMonth = parsed.getUTCMonth() + 1;
+      } else {
+        const monthIndex = this.parseSpanishMonthIndex(monthCellValue);
+        if (monthIndex) {
+          if (currentMonth != null && currentYear != null && monthIndex < currentMonth) {
+            currentYear += 1;
+          } else if (currentYear == null) {
+            currentYear = new Date().getUTCFullYear();
+          }
+          currentMonth = monthIndex;
+        }
+      }
+
+      const dayValue = this.getWorkbookCellValue(sheet, 2, column);
+      const day =
+        typeof dayValue === 'number'
+          ? Math.trunc(dayValue)
+          : Number(String(dayValue ?? '').trim());
+      if (
+        !currentYear ||
+        !currentMonth ||
+        !Number.isFinite(day) ||
+        day <= 0 ||
+        day > 31
+      ) {
+        continue;
+      }
+
+      const date = new Date(Date.UTC(currentYear, currentMonth - 1, day));
+      columns.push({
+        column,
+        date: date.toISOString().slice(0, 10),
+        day,
+      });
+    }
+
+    return columns;
+  }
+
+  private isProgramacionMensualEquipmentRow(
+    sheet: XLSX.WorkSheet | undefined,
+    rowNumber: number,
+  ) {
+    const tag = this.normalizeWorkbookToken(
+      this.getWorkbookCellValue(sheet, rowNumber, 1),
+    );
+    if (!/^UGN?\d+$/.test(tag.replace(/[^A-Z0-9]/g, ''))) return false;
+    const second = this.normalizeWorkbookToken(
+      this.getWorkbookCellValue(sheet, rowNumber, 2),
+    );
+    const third = this.normalizeWorkbookToken(
+      this.getWorkbookCellValue(sheet, rowNumber, 3),
+    );
+    if (second.startsWith('UG') || third.startsWith('UG')) return false;
+    return true;
+  }
+
+  private async resolveProgramacionMensualProcedure(
+    rawValue: string,
+    frecuenciaHoras: number | null,
+    procedimientos: ProcedimientoPlantillaEntity[],
+    syncCache: Map<string, { plan: PlanMantenimientoEntity; procedimiento: ProcedimientoPlantillaEntity }>,
+  ) {
+    const rawToken = this.normalizeSearchToken(rawValue);
+    let procedure =
+      frecuenciaHoras != null
+        ? procedimientos.find(
+            (item) => Number(item.frecuencia_horas || 0) === frecuenciaHoras,
+          ) ?? null
+        : null;
+
+    if (!procedure && rawToken) {
+      procedure =
+        procedimientos.find((item) => {
+          const haystack = this.normalizeSearchToken(
+            `${item.codigo || ''} ${item.nombre || ''} ${
+              item.clase_mantenimiento || ''
+            } ${item.tipo_proceso || ''}`,
+          );
+          return (
+            haystack === rawToken ||
+            haystack.includes(rawToken) ||
+            rawToken.includes(haystack)
+          );
+        }) ?? null;
+    }
+
+    if (!procedure) {
+      return {
+        procedimiento_id: null as string | null,
+        plan_id: null as string | null,
+        es_sincronizable: false,
+      };
+    }
+
+    let synced = syncCache.get(procedure.id);
+    if (!synced) {
+      synced = await this.syncPlanFromProcedimiento(procedure.id);
+      syncCache.set(procedure.id, synced);
+    }
+
+    return {
+      procedimiento_id: procedure.id,
+      plan_id: synced.plan.id,
+      es_sincronizable: true,
+    };
+  }
+
+  private async parseProgramacionMensualWorkbook(
+    buffer: Buffer,
+    fileName: string,
+  ): Promise<ParsedProgramacionMensualWorkbook> {
+    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName || ''];
+    if (!sheet) {
+      throw new BadRequestException(
+        'El archivo mensual no contiene una hoja válida para procesar.',
+      );
+    }
+
+    const columns = this.buildProgramacionMensualColumnMap(sheet);
+    if (!columns.length) {
+      throw new BadRequestException(
+        'No se pudieron identificar columnas de calendario válidas en el Excel mensual.',
+      );
+    }
+
+    const equipos = await this.equipoRepo.find({ where: { is_deleted: false } });
+    const procedimientos = await this.procedimientoRepo.find({
+      where: { is_deleted: false },
+    });
+    const syncCache = new Map<
+      string,
+      { plan: PlanMantenimientoEntity; procedimiento: ProcedimientoPlantillaEntity }
+    >();
+    const warnings: string[] = [];
+    const details: ParsedProgramacionMensualWorkbook['detalles'] = [];
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+
+    const resolveEquipo = (hint: string) => {
+      const normalizedHint = this.normalizeWorkbookToken(hint).replace(
+        /[^A-Z0-9]/g,
+        '',
+      );
+      const numericHint = normalizedHint.replace(/[^0-9]/g, '');
+      return (
+        equipos.find((item) => {
+          const code = this.normalizeWorkbookToken(item.codigo).replace(
+            /[^A-Z0-9]/g,
+            '',
+          );
+          const name = this.normalizeWorkbookToken(item.nombre).replace(
+            /[^A-Z0-9]/g,
+            '',
+          );
+          const numericCode = code.replace(/[^0-9]/g, '');
+          return (
+            code === normalizedHint ||
+            name === normalizedHint ||
+            (numericHint && numericCode === numericHint)
+          );
+        }) ?? null
+      );
+    };
+
+    let order = 1;
+    for (let rowNumber = 3; rowNumber <= range.e.r + 1; rowNumber += 1) {
+      if (!this.isProgramacionMensualEquipmentRow(sheet, rowNumber)) continue;
+      const equipoCodigo = this.normalizeProgramacionWorkbookValue(
+        this.getWorkbookCellValue(sheet, rowNumber, 1),
+      );
+      const horometroUltimo = this.getWorkbookCellNumber(sheet, rowNumber, 2);
+      const horometroActual = this.getWorkbookCellNumber(sheet, rowNumber, 3);
+      const equipo = resolveEquipo(equipoCodigo);
+      if (!equipo) {
+        warnings.push(
+          `No se encontró un equipo del sistema para la fila ${rowNumber} (${equipoCodigo}).`,
+        );
+      }
+
+      for (const column of columns) {
+        const rawValue = this.getWorkbookCellValue(sheet, rowNumber, column.column);
+        if (!this.isMeaningfulProgramacionWorkbookValue(rawValue)) continue;
+        const descriptor = this.resolveProgramacionMaintenanceDescriptor(rawValue);
+        if (!descriptor.es_reportable) continue;
+
+        const mapping = await this.resolveProgramacionMensualProcedure(
+          descriptor.raw,
+          descriptor.frecuencia_horas,
+          procedimientos,
+          syncCache,
+        );
+
+        details.push({
+          equipo_id: equipo?.id ?? null,
+          equipo_codigo: String(equipo?.codigo || equipoCodigo).trim(),
+          equipo_nombre: String(equipo?.nombre || '').trim() || null,
+          fecha_programada: column.date,
+          dia_mes: column.day,
+          valor_crudo: descriptor.raw,
+          valor_normalizado: descriptor.normalized,
+          tipo_mantenimiento: descriptor.tipo_mantenimiento,
+          frecuencia_horas: descriptor.frecuencia_horas,
+          procedimiento_id: mapping.procedimiento_id,
+          plan_id: mapping.plan_id,
+          es_sincronizable:
+            Boolean(mapping.es_sincronizable) && Boolean(equipo?.id),
+          observacion: null,
+          orden: order,
+          payload_json: {
+            hoja_origen: sheetName,
+            fila_excel: rowNumber,
+            columna_excel: column.column,
+            horometro_ultimo: horometroUltimo,
+            horometro_actual: horometroActual,
+          },
+        });
+        order += 1;
+      }
+    }
+
+    if (!details.length) {
+      throw new BadRequestException(
+        'El archivo no contiene mantenimientos mensuales válidos para importar.',
+      );
+    }
+
+    const dates = details
+      .map((item) => item.fecha_programada)
+      .filter(Boolean)
+      .sort((a, b) => String(a).localeCompare(String(b)));
+
+    return {
+      header: {
+        codigo: await this.generateNextProgramacionMensualCode(),
+        fecha_inicio: dates[0] ?? null,
+        fecha_fin: dates[dates.length - 1] ?? null,
+        documento_origen: fileName,
+        nombre_archivo: fileName,
+        resumen: `Importación mensual MPG desde ${fileName}`,
+        payload_json: {
+          hoja_origen: sheetName,
+          total_detalles: details.length,
+          columnas_calendario: columns.length,
+        },
+      },
+      detalles: details,
+      warnings,
+    };
+  }
+
+  private async upsertCalendarProgramacionFromMonthlyDetail(payload: {
+    equipo_id: string;
+    plan_id: string;
+    fecha_programada: string;
+    documento_origen: string;
+    valor_crudo: string;
+    frecuencia_horas?: number | null;
+    payload_json?: Record<string, unknown>;
+  }) {
+    const existing = await this.programacionRepo.findOne({
+      where: {
+        equipo_id: payload.equipo_id,
+        plan_id: payload.plan_id,
+        proxima_fecha: payload.fecha_programada,
+        modo_programacion: 'CALENDARIO',
+        is_deleted: false,
+      },
+    });
+
+    if (existing) {
+      existing.origen_programacion = 'MENSUAL_IMPORT';
+      existing.documento_origen = payload.documento_origen;
+      existing.payload_json = {
+        ...(existing.payload_json ?? {}),
+        ...(payload.payload_json ?? {}),
+        valor_crudo: payload.valor_crudo,
+        frecuencia_horas: payload.frecuencia_horas ?? null,
+      };
+      existing.activo = true;
+      return this.programacionRepo.save(existing);
+    }
+
+    return this.programacionRepo.save(
+      this.programacionRepo.create({
+        codigo: null,
+        equipo_id: payload.equipo_id,
+        plan_id: payload.plan_id,
+        modo_programacion: 'CALENDARIO',
+        origen_programacion: 'MENSUAL_IMPORT',
+        ultima_ejecucion_fecha: null,
+        ultima_ejecucion_horas: null,
+        proxima_fecha: payload.fecha_programada,
+        proxima_horas: null,
+        documento_origen: payload.documento_origen,
+        payload_json: {
+          ...(payload.payload_json ?? {}),
+          valor_crudo: payload.valor_crudo,
+          frecuencia_horas: payload.frecuencia_horas ?? null,
+        },
+        activo: true,
+      }),
+    );
+  }
+
+  private async buildProgramacionMensualPayload(
+    row: ProgramacionMensualEntity,
+    query?: ProgramacionMensualQueryDto,
+  ) {
+    const details = await this.programacionMensualDetRepo.find({
+      where: { programacion_mensual_id: row.id, is_deleted: false },
+      order: { fecha_programada: 'ASC', orden: 'ASC', created_at: 'ASC' },
+    });
+    const periodsMap = new Map<
+      string,
+      { period: string; total: number; sincronizados: number; label: string }
+    >();
+    for (const detail of details) {
+      const period = String(detail.fecha_programada || '').slice(0, 7);
+      if (!period) continue;
+      const parsed = new Date(`${period}-01T00:00:00Z`);
+      const label = parsed.toLocaleDateString('es-EC', {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+      const current = periodsMap.get(period) ?? {
+        period,
+        total: 0,
+        sincronizados: 0,
+        label,
+      };
+      current.total += 1;
+      if (detail.programacion_id) current.sincronizados += 1;
+      periodsMap.set(period, current);
+    }
+
+    const filteredDetails = query?.periodo
+      ? details.filter((item) =>
+          String(item.fecha_programada || '').startsWith(query.periodo || ''),
+        )
+      : details;
+
+    return {
+      ...row,
+      total_detalles: details.length,
+      periodos: [...periodsMap.values()].sort((a, b) =>
+        String(a.period).localeCompare(String(b.period)),
+      ),
+      detalles: filteredDetails,
+    };
+  }
+
+  async listProgramacionesMensuales(query?: ProgramacionMensualQueryDto) {
+    const rows = await this.programacionMensualRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_inicio: 'DESC', created_at: 'DESC' },
+    });
+    const payload = await Promise.all(
+      rows.map((row) => this.buildProgramacionMensualPayload(row, query)),
+    );
+    return this.wrap(payload, 'Programaciones mensuales listadas');
+  }
+
+  async getProgramacionMensual(id: string, query?: ProgramacionMensualQueryDto) {
+    const row = await this.findOneOrFail(this.programacionMensualRepo, {
+      id,
+      is_deleted: false,
+    });
+    return this.wrap(
+      await this.buildProgramacionMensualPayload(row, query),
+      'Programación mensual obtenida',
+    );
+  }
+
+  async importProgramacionMensualWorkbook(file?: {
+    buffer?: Buffer;
+    originalname?: string;
+  } | null) {
+    if (!file?.buffer) {
+      throw new BadRequestException(
+        'Debes adjuntar el archivo Excel de programación mensual.',
+      );
+    }
+
+    const parsed = await this.parseProgramacionMensualWorkbook(
+      file.buffer,
+      String(file.originalname || 'programacion_mensual.xlsx'),
+    );
+
+    const savedId = await this.dataSource.transaction(async (manager) => {
+      const headerRepo = manager.getRepository(ProgramacionMensualEntity);
+      const detailRepo = manager.getRepository(ProgramacionMensualDetalleEntity);
+
+      const header = await headerRepo.save(
+        headerRepo.create({
+          ...parsed.header,
+        }),
+      );
+
+      for (const detail of parsed.detalles) {
+        let programacionId: string | null = null;
+        if (detail.es_sincronizable && detail.equipo_id && detail.plan_id) {
+          const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
+            equipo_id: detail.equipo_id,
+            plan_id: detail.plan_id,
+            fecha_programada: detail.fecha_programada,
+            documento_origen: parsed.header.documento_origen,
+            valor_crudo: detail.valor_crudo,
+            frecuencia_horas: detail.frecuencia_horas,
+            payload_json: {
+              programacion_mensual_codigo: parsed.header.codigo,
+              tipo_mantenimiento: detail.tipo_mantenimiento,
+              valor_normalizado: detail.valor_normalizado,
+              horometro_ultimo:
+                detail.payload_json?.horometro_ultimo ?? null,
+              horometro_actual:
+                detail.payload_json?.horometro_actual ?? null,
+            },
+          });
+          programacionId = programacion.id;
+        }
+
+        await detailRepo.save(
+          detailRepo.create({
+            programacion_mensual_id: header.id,
+            programacion_id: programacionId,
+            ...detail,
+          }),
+        );
+      }
+
+      return header.id;
+    });
+
+    const saved = await this.findOneOrFail(this.programacionMensualRepo, {
+      id: savedId,
+      is_deleted: false,
+    });
+    const payload = await this.buildProgramacionMensualPayload(saved);
+    await this.registerProcessEvent({
+      tipo_proceso: 'PROGRAMACION_MENSUAL',
+      accion: 'IMPORTED',
+      referencia_tabla: 'tb_programacion_mensual',
+      referencia_id: saved.id,
+      referencia_codigo: saved.codigo,
+      title: 'Programación mensual importada',
+      body: `${saved.codigo} · ${saved.nombre_archivo || saved.documento_origen || 'Excel mensual'}`,
+      payload_kpi: {
+        detalles: payload.total_detalles,
+        periodos: payload.periodos.length,
+      },
+    });
+
+    return this.wrap(
+      {
+        ...payload,
+        warnings: parsed.warnings,
+      },
+      'Programación mensual importada desde Excel',
+    );
+  }
+
+  private async parseCronogramaSemanalWorkbook(
+    buffer: Buffer,
+    fileName: string,
+  ): Promise<ParsedCronogramaSemanalWorkbook> {
+    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName || ''];
+    if (!sheet) {
+      throw new BadRequestException(
+        'El archivo semanal no contiene una hoja válida para procesar.',
+      );
+    }
+
+    const warnings: string[] = [];
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const dateRange =
+      [2, 3, 4, 5]
+        .map((rowNumber) =>
+          this.parseCronogramaDateRangeLabel(
+            this.getWorkbookCellValue(sheet, rowNumber, 1),
+          ),
+        )
+        .find(Boolean) ?? null;
+
+    if (!dateRange) {
+      throw new BadRequestException(
+        'No se pudo identificar el rango semanal del cronograma.',
+      );
+    }
+
+    const detalles: CreateCronogramaSemanalDto['detalles'] = [];
+    const dailyHours: Record<string, number> = {};
+    const start = new Date(`${dateRange.fecha_inicio}T00:00:00Z`);
+
+    for (let rowNumber = 7; rowNumber <= range.e.r + 1; rowNumber += 1) {
+      const slot = this.parseWorkbookTimeRange(
+        this.getWorkbookCellValue(sheet, rowNumber, 1),
+      );
+      if (!slot) continue;
+
+      for (let column = 2; column <= 8; column += 1) {
+        const activity = this.getWorkbookCellText(sheet, rowNumber, column);
+        if (!activity) continue;
+        const dayLabel = this.normalizeProgramacionWorkbookValue(
+          this.getWorkbookCellValue(sheet, 5, column),
+        );
+        const activityDate = new Date(start);
+        activityDate.setUTCDate(start.getUTCDate() + (column - 2));
+        const tipoProceso = this.resolveCronogramaTipoProceso(activity);
+        const equipoCodigo = this.extractEquipoCodigoFromText(activity);
+        const fechaActividad = activityDate.toISOString().slice(0, 10);
+        dailyHours[fechaActividad] = Number(
+          ((dailyHours[fechaActividad] ?? 0) + slot.duracion_horas).toFixed(2),
+        );
+
+        detalles.push({
+          dia_semana: dayLabel || `Día ${column - 1}`,
+          fecha_actividad: fechaActividad,
+          hora_inicio: slot.hora_inicio,
+          hora_fin: slot.hora_fin,
+          tipo_proceso: tipoProceso,
+          actividad: activity,
+          responsable_area:
+            tipoProceso === 'SSA'
+              ? 'SSA'
+              : tipoProceso === 'MPG'
+                ? 'MANTENIMIENTO'
+                : undefined,
+          equipo_codigo: equipoCodigo ?? undefined,
+          observacion: undefined,
+          orden: detalles.length + 1,
+        });
+      }
+    }
+
+    if (!detalles.length) {
+      throw new BadRequestException(
+        'El archivo semanal no contiene actividades válidas para importar.',
+      );
+    }
+
+    return {
+      dto: {
+        codigo: await this.generateNextCronogramaSemanalCode(),
+        fecha_inicio: dateRange.fecha_inicio,
+        fecha_fin: dateRange.fecha_fin,
+        locacion: 'TPTA',
+        referencia_orden: undefined,
+        documento_origen: fileName,
+        resumen: `Importación semanal desde ${fileName}`,
+        payload_json: {
+          hoja_origen: sheetName,
+          rango_fuente: dateRange.label,
+          daily_hours: dailyHours,
+        },
+        detalles,
+      },
+      warnings,
+    };
+  }
+
+  async importCronogramaSemanalWorkbook(file?: {
+    buffer?: Buffer;
+    originalname?: string;
+  } | null) {
+    if (!file?.buffer) {
+      throw new BadRequestException(
+        'Debes adjuntar el archivo Excel del cronograma semanal.',
+      );
+    }
+
+    const parsed = await this.parseCronogramaSemanalWorkbook(
+      file.buffer,
+      String(file.originalname || 'cronograma_semanal.xlsx'),
+    );
+    const created = await this.createCronogramaSemanal(parsed.dto);
+    return this.wrap(
+      {
+        cronograma: created.data,
+        warnings: parsed.warnings,
+      },
+      'Cronograma semanal importado desde Excel',
     );
   }
 

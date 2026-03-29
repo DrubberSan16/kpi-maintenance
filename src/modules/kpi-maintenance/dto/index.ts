@@ -351,6 +351,10 @@ export class CreatePlanTareaDto {
 export class UpdatePlanTareaDto extends CreatePlanTareaDto {}
 
 export class CreateProgramacionDto {
+  @ApiPropertyOptional({ description: 'Código de la programación' })
+  @IsOptional()
+  @IsString()
+  codigo?: string;
   @ApiProperty({ description: 'ID del equipo', format: 'uuid' })
   @IsUUID()
   equipo_id: string;
@@ -386,11 +390,39 @@ export class CreateProgramacionDto {
   @Type(() => Number)
   @IsNumber()
   proxima_horas?: number;
+  @ApiPropertyOptional({
+    description:
+      'Modo de programación. DINAMICA recalcula por frecuencia; CALENDARIO respeta la fecha u hora cargada.',
+  })
+  @IsOptional()
+  @IsString()
+  modo_programacion?: string;
+  @ApiPropertyOptional({
+    description: 'Origen de la programación, por ejemplo MANUAL o MENSUAL_IMPORT',
+  })
+  @IsOptional()
+  @IsString()
+  origen_programacion?: string;
+  @ApiPropertyOptional({ description: 'Documento origen o nombre del archivo importado' })
+  @IsOptional()
+  @IsString()
+  documento_origen?: string;
+  @ApiPropertyOptional({ description: 'Payload auxiliar de la programación' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
   @ApiPropertyOptional({ description: 'Indica si la programación está activa' })
   @IsOptional()
   activo?: boolean;
 }
 export class UpdateProgramacionDto extends CreateProgramacionDto {}
+
+export class ProgramacionMensualQueryDto {
+  @ApiPropertyOptional({ description: 'Periodo YYYY-MM a consultar' })
+  @IsOptional()
+  @IsString()
+  periodo?: string;
+}
 
 export class ComponenteQueryDto {
   @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })

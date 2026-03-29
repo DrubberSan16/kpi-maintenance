@@ -216,8 +216,11 @@ export class PlanTareaEntity {
 @Entity({ schema: 'kpi_maintenance', name: 'tb_programacion_plan' })
 export class ProgramacionPlanEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'text', nullable: true }) codigo?: string | null;
   @Column({ type: 'uuid' }) equipo_id: string;
   @Column({ type: 'uuid' }) plan_id: string;
+  @Column({ type: 'text', default: 'DINAMICA' }) modo_programacion: string;
+  @Column({ type: 'text', default: 'MANUAL' }) origen_programacion: string;
   @Column({ type: 'date', nullable: true }) ultima_ejecucion_fecha?:
     | string
     | null;
@@ -226,6 +229,11 @@ export class ProgramacionPlanEntity {
   @Column({ type: 'date', nullable: true }) proxima_fecha?: string | null;
   @Column('numeric', { precision: 18, scale: 2, nullable: true })
   proxima_horas?: number | null;
+  @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
   @Column({ default: true }) activo: boolean;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
@@ -444,6 +452,57 @@ export class CronogramaSemanalDetalleEntity {
   @Column({ type: 'text', nullable: true }) equipo_codigo?: string | null;
   @Column({ type: 'text', nullable: true }) observacion?: string | null;
   @Column({ default: 1 }) orden: number;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_programacion_mensual' })
+export class ProgramacionMensualEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column({ type: 'date', nullable: true }) fecha_inicio?: string | null;
+  @Column({ type: 'date', nullable: true }) fecha_fin?: string | null;
+  @Column({ type: 'text', nullable: true }) locacion?: string | null;
+  @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
+  @Column({ type: 'text', nullable: true }) nombre_archivo?: string | null;
+  @Column({ type: 'text', nullable: true }) resumen?: string | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_programacion_mensual_det' })
+export class ProgramacionMensualDetalleEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) programacion_mensual_id: string;
+  @Column({ type: 'uuid', nullable: true }) programacion_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
+  @Column({ type: 'text' }) equipo_codigo: string;
+  @Column({ type: 'text', nullable: true }) equipo_nombre?: string | null;
+  @Column({ type: 'date' }) fecha_programada: string;
+  @Column({ type: 'integer', nullable: true }) dia_mes?: number | null;
+  @Column({ type: 'text' }) valor_crudo: string;
+  @Column({ type: 'text', nullable: true }) valor_normalizado?: string | null;
+  @Column({ type: 'text', nullable: true }) tipo_mantenimiento?: string | null;
+  @Column({ type: 'integer', nullable: true }) frecuencia_horas?: number | null;
+  @Column({ type: 'uuid', nullable: true }) procedimiento_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) plan_id?: string | null;
+  @Column({ default: false }) es_sincronizable: boolean;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 1 }) orden: number;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) payload_json: Record<
+    string,
+    unknown
+  >;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
