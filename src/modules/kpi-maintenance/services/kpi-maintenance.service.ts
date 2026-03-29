@@ -97,6 +97,7 @@ import {
   CreatePlanTareaDto,
   CreateProcedimientoPlantillaDto,
   CreateProgramacionDto,
+  CreateProgramacionMensualDetalleDto,
   CreateReporteOperacionDiariaDto,
   CreateWorkOrderDto,
   CreateWorkOrderTareaDto,
@@ -123,6 +124,8 @@ import {
   UpdatePlanTareaDto,
   UpdateProcedimientoPlantillaDto,
   UpdateProgramacionDto,
+  UpdateProgramacionMensualConfigDto,
+  UpdateProgramacionMensualDetalleDto,
   UpdateReporteOperacionDiariaDto,
   UpdateWorkOrderDto,
   UpdateWorkOrderTareaDto,
@@ -315,6 +318,16 @@ const PROGRAMACION_MPG_FREQUENCIES = new Set([
   1000,
   1300,
 ]);
+
+const DEFAULT_PROGRAMACION_MONTHLY_COLOR_PALETTE = {
+  MPG: '#F4DD6B',
+  HORAS_PROGRAMADAS: '#F4DD6B',
+  MANTENIMIENTO: '#F4DD6B',
+  OTRO: '#D7E0EA',
+  SEMANAL: '#9EC5FE',
+  SINCRONIZADO: '#8ED1A5',
+  DEFAULT: '#D7E0EA',
+} as const;
 
 const LUBRICANT_IMPORT_PARAMETER_ROWS = [
   { row: 22, label: 'Viscosidad a 100ºC, cSt' },
@@ -3861,6 +3874,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private calculateTimeRangeDurationHours(
+    start?: string | null,
+    end?: string | null,
+  ) {
+    const startRaw = String(start || '').slice(0, 5);
+    const endRaw = String(end || '').slice(0, 5);
+    if (!startRaw || !endRaw) return 0;
+    const [startHour = 0, startMinute = 0] = startRaw.split(':').map(Number);
+    const [endHour = 0, endMinute = 0] = endRaw.split(':').map(Number);
+    const duration =
+      (endHour * 60 + endMinute - (startHour * 60 + startMinute)) / 60;
+    return Number(Math.max(duration, 0).toFixed(2));
+  }
+
+  private resolveProgramacionMensualColorPalette(
+    payload?: Record<string, unknown> | null,
+  ) {
+    const source = (payload ?? {}) as Record<string, unknown>;
+    const rawPalette = (source.color_palette ?? {}) as Record<string, unknown>;
+    const palette = {
+      ...DEFAULT_PROGRAMACION_MONTHLY_COLOR_PALETTE,
+    } as Record<string, string>;
+    for (const [key, value] of Object.entries(rawPalette)) {
+      const normalizedKey = String(key || '').trim().toUpperCase();
+      const normalizedValue = String(value || '').trim();
+      if (!normalizedKey || !normalizedValue) continue;
+      palette[normalizedKey] = normalizedValue;
+    }
+    return palette;
+  }
+
   private parseCronogramaDateRangeLabel(value: unknown) {
     const raw = String(value ?? '').trim();
     const normalized = this.normalizeWorkbookToken(raw);
@@ -3940,24 +3984,93 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where: { cronograma_id: row.id, is_deleted: false },
       order: { orden: 'ASC', created_at: 'ASC' },
     });
-    const dailyHours = detalles.reduce((acc: Record<string, number>, item) => {
-      const key = String(item.fecha_actividad || '');
-      if (!key || !item.hora_inicio || !item.hora_fin) return acc;
-      const [startHour, startMinute] = String(item.hora_inicio)
-        .slice(0, 5)
-        .split(':')
-        .map((value) => Number(value || 0));
-      const [endHour, endMinute] = String(item.hora_fin)
-        .slice(0, 5)
-        .split(':')
-        .map((value) => Number(value || 0));
-      const duration =
-        (endHour * 60 + endMinute - (startHour * 60 + startMinute)) / 60;
-      acc[key] = Number(((acc[key] ?? 0) + Math.max(duration, 0)).toFixed(2));
-      return acc;
-    }, {});
+    const equipos = await this.equipoRepo.find({ where: { is_deleted: false } });
+    const detallesEnriquecidos = detalles.map((item) => {
+      const matchedEquipment = item.equipo_codigo
+        ? this.matchEquipoByCodeOrName(item.equipo_codigo, equipos)
+        : null;
+      const duracionHoras = this.calculateTimeRangeDurationHours(
+        item.hora_inicio,
+        item.hora_fin,
+      );
+      return {
+        ...item,
+        duracion_horas: duracionHoras,
+        equipo_id: matchedEquipment?.id ?? null,
+        equipo_nombre: matchedEquipment?.nombre ?? null,
+        equipo_codigo: matchedEquipment?.codigo ?? item.equipo_codigo ?? null,
+      };
+    });
+    const dailyHours = detallesEnriquecidos.reduce(
+      (acc: Record<string, number>, item) => {
+        const key = String(item.fecha_actividad || '');
+        if (!key) return acc;
+        acc[key] = Number(
+          ((acc[key] ?? 0) + this.toNumeric(item.duracion_horas, 0)).toFixed(2),
+        );
+        return acc;
+      },
+      {},
+    );
+    const dailyEquipmentMap = new Map<
+      string,
+      {
+        key: string;
+        fecha_actividad: string;
+        equipo_id: string | null;
+        equipo_codigo: string | null;
+        equipo_nombre: string | null;
+        total_horas: number;
+        total_actividades: number;
+        cronograma_ids: string[];
+        cronograma_codigos: string[];
+        actividades: Array<{
+          detalle_id: string;
+          actividad: string;
+          tipo_proceso: string | null;
+          hora_inicio: string | null;
+          hora_fin: string | null;
+          duracion_horas: number;
+          responsable_area: string | null;
+          observacion: string | null;
+        }>;
+      }
+    >();
+    for (const item of detallesEnriquecidos) {
+      const fechaActividad = String(item.fecha_actividad || '').slice(0, 10);
+      const equipoCodigo = String(item.equipo_codigo || '').trim();
+      if (!fechaActividad || !equipoCodigo) continue;
+      const key = `${fechaActividad}::${this.normalizeWorkbookToken(equipoCodigo)}`;
+      const current = dailyEquipmentMap.get(key) ?? {
+        key,
+        fecha_actividad: fechaActividad,
+        equipo_id: item.equipo_id ?? null,
+        equipo_codigo: item.equipo_codigo ?? null,
+        equipo_nombre: item.equipo_nombre ?? null,
+        total_horas: 0,
+        total_actividades: 0,
+        cronograma_ids: [row.id],
+        cronograma_codigos: [row.codigo],
+        actividades: [],
+      };
+      current.total_horas = Number(
+        (current.total_horas + this.toNumeric(item.duracion_horas, 0)).toFixed(2),
+      );
+      current.total_actividades += 1;
+      current.actividades.push({
+        detalle_id: item.id,
+        actividad: item.actividad,
+        tipo_proceso: item.tipo_proceso ?? null,
+        hora_inicio: item.hora_inicio ?? null,
+        hora_fin: item.hora_fin ?? null,
+        duracion_horas: this.toNumeric(item.duracion_horas, 0),
+        responsable_area: item.responsable_area ?? null,
+        observacion: item.observacion ?? null,
+      });
+      dailyEquipmentMap.set(key, current);
+    }
 
-    const timeSlots = [...new Set(detalles.map((item) => `${item.hora_inicio || ''}-${item.hora_fin || ''}`))]
+    const timeSlots = [...new Set(detallesEnriquecidos.map((item) => `${item.hora_inicio || ''}-${item.hora_fin || ''}`))]
       .filter(Boolean)
       .map((key) => {
         const [hora_inicio = null, hora_fin = null] = key.split('-');
@@ -3975,8 +4088,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return {
       ...row,
       daily_hours: dailyHours,
+      daily_equipment_hours: [...dailyEquipmentMap.values()].sort((a, b) =>
+        `${a.fecha_actividad}-${a.equipo_codigo || ''}`.localeCompare(
+          `${b.fecha_actividad}-${b.equipo_codigo || ''}`,
+        ),
+      ),
       time_slots: timeSlots,
-      detalles,
+      detalles: detallesEnriquecidos,
     };
   }
 
@@ -7236,6 +7354,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  private matchEquipoByCodeOrName(
+    hint: string,
+    equipos: Pick<EquipoEntity, 'id' | 'codigo' | 'nombre'>[],
+  ) {
+    const normalizedHint = this.normalizeWorkbookToken(hint).replace(
+      /[^A-Z0-9]/g,
+      '',
+    );
+    const numericHint = normalizedHint.replace(/[^0-9]/g, '');
+    return (
+      equipos.find((item) => {
+        const code = this.normalizeWorkbookToken(item.codigo).replace(
+          /[^A-Z0-9]/g,
+          '',
+        );
+        const name = this.normalizeWorkbookToken(item.nombre).replace(
+          /[^A-Z0-9]/g,
+          '',
+        );
+        const numericCode = code.replace(/[^0-9]/g, '');
+        return (
+          code === normalizedHint ||
+          name === normalizedHint ||
+          (numericHint && numericCode === numericHint)
+        );
+      }) ?? null
+    );
+  }
+
   private async resolveProgramacionMensualProcedure(
     rawValue: string,
     frecuenciaHoras: number | null,
@@ -7291,7 +7438,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     buffer: Buffer,
     fileName: string,
   ): Promise<ParsedProgramacionMensualWorkbook> {
-    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    const workbook = XLSX.read(buffer, {
+      type: 'buffer',
+      cellDates: true,
+      cellStyles: true,
+    });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName || ''];
     if (!sheet) {
@@ -7319,32 +7470,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const details: ParsedProgramacionMensualWorkbook['detalles'] = [];
     const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
 
-    const resolveEquipo = (hint: string) => {
-      const normalizedHint = this.normalizeWorkbookToken(hint).replace(
-        /[^A-Z0-9]/g,
-        '',
-      );
-      const numericHint = normalizedHint.replace(/[^0-9]/g, '');
-      return (
-        equipos.find((item) => {
-          const code = this.normalizeWorkbookToken(item.codigo).replace(
-            /[^A-Z0-9]/g,
-            '',
-          );
-          const name = this.normalizeWorkbookToken(item.nombre).replace(
-            /[^A-Z0-9]/g,
-            '',
-          );
-          const numericCode = code.replace(/[^0-9]/g, '');
-          return (
-            code === normalizedHint ||
-            name === normalizedHint ||
-            (numericHint && numericCode === numericHint)
-          );
-        }) ?? null
-      );
-    };
-
     let order = 1;
     for (let rowNumber = 3; rowNumber <= range.e.r + 1; rowNumber += 1) {
       if (!this.isProgramacionMensualEquipmentRow(sheet, rowNumber)) continue;
@@ -7353,7 +7478,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       const horometroUltimo = this.getWorkbookCellNumber(sheet, rowNumber, 2);
       const horometroActual = this.getWorkbookCellNumber(sheet, rowNumber, 3);
-      const equipo = resolveEquipo(equipoCodigo);
+      const equipo = this.matchEquipoByCodeOrName(equipoCodigo, equipos);
       if (!equipo) {
         warnings.push(
           `No se encontró un equipo del sistema para la fila ${rowNumber} (${equipoCodigo}).`,
@@ -7393,16 +7518,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             Boolean(mapping.es_sincronizable) && Boolean(equipo?.id),
           observacion: null,
           orden: order,
-          payload_json: {
-            hoja_origen: sheetName,
-            fila_excel: rowNumber,
-            columna_excel: column.column,
-            horometro_ultimo: horometroUltimo,
-            horometro_actual: horometroActual,
-            horometro_programado: horometroProgramado,
-            horas_programadas: descriptor.frecuencia_horas ?? null,
-          },
-        });
+        payload_json: {
+          hoja_origen: sheetName,
+          fila_excel: rowNumber,
+          columna_excel: column.column,
+          horometro_ultimo: horometroUltimo,
+          horometro_actual: horometroActual,
+          horometro_programado: horometroProgramado,
+          horas_programadas: descriptor.frecuencia_horas ?? null,
+          color_key: descriptor.tipo_mantenimiento,
+        },
+      });
         order += 1;
       }
     }
@@ -7430,6 +7556,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           hoja_origen: sheetName,
           total_detalles: details.length,
           columnas_calendario: columns.length,
+          color_palette: {
+            ...DEFAULT_PROGRAMACION_MONTHLY_COLOR_PALETTE,
+          },
         },
       },
       detalles: details,
@@ -7497,6 +7626,197 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private resolveProgramacionMensualRange(
+    row: ProgramacionMensualEntity,
+    details: ProgramacionMensualDetalleEntity[],
+    query?: ProgramacionMensualQueryDto,
+  ) {
+    if (query?.periodo) {
+      const [year, month] = String(query.periodo).split('-').map(Number);
+      if (year && month) {
+        const start = `${query.periodo}-01`;
+        const end = new Date(Date.UTC(year, month, 0))
+          .toISOString()
+          .slice(0, 10);
+        return { start, end };
+      }
+    }
+    const orderedDates = details
+      .map((item) => String(item.fecha_programada || '').slice(0, 10))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    return {
+      start:
+        this.toDateOnlyString(row.fecha_inicio) ??
+        orderedDates[0] ??
+        null,
+      end:
+        this.toDateOnlyString(row.fecha_fin) ??
+        orderedDates[orderedDates.length - 1] ??
+        null,
+    };
+  }
+
+  private async buildProgramacionMensualWeeklyAggregates(
+    programacionMensualId: string,
+    startDate?: string | null,
+    endDate?: string | null,
+  ) {
+    if (!startDate || !endDate) return [];
+    const weeklyRows = await this.cronogramaSemanalRepo.find({
+      where: {
+        is_deleted: false,
+      },
+      order: { fecha_inicio: 'ASC', created_at: 'ASC' },
+    });
+    const overlapping = weeklyRows.filter((row) => {
+      const start = this.toDateOnlyString(row.fecha_inicio);
+      const end = this.toDateOnlyString(row.fecha_fin);
+      if (!start || !end) return false;
+      return start <= endDate && end >= startDate;
+    });
+    if (!overlapping.length) return [];
+    const cronogramaIds = overlapping.map((item) => item.id);
+    const scheduleById = new Map(overlapping.map((item) => [item.id, item]));
+    const weeklyDetails = await this.cronogramaSemanalDetRepo.find({
+      where: {
+        cronograma_id: In(cronogramaIds),
+        is_deleted: false,
+      },
+      order: { fecha_actividad: 'ASC', hora_inicio: 'ASC', orden: 'ASC' },
+    });
+    const filtered = weeklyDetails.filter((item) => {
+      const fecha = this.toDateOnlyString(item.fecha_actividad);
+      return Boolean(
+        fecha &&
+          fecha >= startDate &&
+          fecha <= endDate &&
+          String(item.equipo_codigo || '').trim(),
+      );
+    });
+    if (!filtered.length) return [];
+    const equipos = await this.equipoRepo.find({ where: { is_deleted: false } });
+    const aggregates = new Map<
+      string,
+      {
+        id: string;
+        programacion_mensual_id: string;
+        programacion_id: null;
+        equipo_id: string | null;
+        equipo_codigo: string | null;
+        equipo_nombre: string | null;
+        fecha_programada: string;
+        dia_mes: number | null;
+        valor_crudo: string;
+        valor_normalizado: string;
+        tipo_mantenimiento: string;
+        frecuencia_horas: null;
+        procedimiento_id: null;
+        plan_id: null;
+        es_sincronizable: false;
+        observacion: string | null;
+        orden: number;
+        payload_json: Record<string, unknown>;
+      }
+    >();
+
+    for (const item of filtered) {
+      const fecha = this.toDateOnlyString(item.fecha_actividad);
+      const equipo = this.matchEquipoByCodeOrName(
+        String(item.equipo_codigo || ''),
+        equipos,
+      );
+      const equipoCodigo = String(equipo?.codigo || item.equipo_codigo || '').trim();
+      if (!fecha || !equipoCodigo) continue;
+      const duration = this.calculateTimeRangeDurationHours(
+        item.hora_inicio,
+        item.hora_fin,
+      );
+      const key = `${fecha}::${this.normalizeWorkbookToken(equipoCodigo)}`;
+      const current = aggregates.get(key) ?? {
+        id: `weekly:${key}`,
+        programacion_mensual_id: programacionMensualId,
+        programacion_id: null,
+        equipo_id: equipo?.id ?? null,
+        equipo_codigo: equipoCodigo,
+        equipo_nombre: equipo?.nombre ?? null,
+        fecha_programada: fecha,
+        dia_mes: Number(fecha.slice(-2)),
+        valor_crudo: '0.00 h',
+        valor_normalizado: '0.00 H',
+        tipo_mantenimiento: 'SEMANAL',
+        frecuencia_horas: null,
+        procedimiento_id: null,
+        plan_id: null,
+        es_sincronizable: false as const,
+        observacion: null,
+        orden: 9999,
+        payload_json: {
+          fuente_programacion: 'SEMANAL',
+          color_key: 'SEMANAL',
+          total_horas_agendadas: 0,
+          total_actividades: 0,
+          cronograma_ids: [],
+          cronograma_codigos: [],
+          weekly_items: [],
+        },
+      };
+      const nextTotal = Number(
+        (
+          this.toNumeric(current.payload_json.total_horas_agendadas, 0) + duration
+        ).toFixed(2),
+      );
+      const nextActivities =
+        this.toNumeric(current.payload_json.total_actividades, 0) + 1;
+      const cronograma = scheduleById.get(item.cronograma_id);
+      const cronogramaIds = Array.isArray(current.payload_json.cronograma_ids)
+        ? [...(current.payload_json.cronograma_ids as string[])]
+        : [];
+      const cronogramaCodigos = Array.isArray(current.payload_json.cronograma_codigos)
+        ? [...(current.payload_json.cronograma_codigos as string[])]
+        : [];
+      if (cronograma?.id && !cronogramaIds.includes(cronograma.id)) {
+        cronogramaIds.push(cronograma.id);
+      }
+      if (cronograma?.codigo && !cronogramaCodigos.includes(cronograma.codigo)) {
+        cronogramaCodigos.push(cronograma.codigo);
+      }
+      const weeklyItems = Array.isArray(current.payload_json.weekly_items)
+        ? [...(current.payload_json.weekly_items as Record<string, unknown>[])]
+        : [];
+      weeklyItems.push({
+        detalle_id: item.id,
+        cronograma_id: item.cronograma_id,
+        cronograma_codigo: cronograma?.codigo ?? null,
+        actividad: item.actividad,
+        tipo_proceso: item.tipo_proceso ?? null,
+        hora_inicio: item.hora_inicio ?? null,
+        hora_fin: item.hora_fin ?? null,
+        responsable_area: item.responsable_area ?? null,
+        observacion: item.observacion ?? null,
+        duracion_horas: duration,
+      });
+      current.valor_crudo = `${nextTotal.toFixed(2)} h`;
+      current.valor_normalizado = `${nextTotal.toFixed(2)} H`;
+      current.observacion = `${nextActivities} actividad(es) semanal(es) para ${equipoCodigo}`;
+      current.payload_json = {
+        ...current.payload_json,
+        total_horas_agendadas: nextTotal,
+        total_actividades: nextActivities,
+        cronograma_ids: cronogramaIds,
+        cronograma_codigos: cronogramaCodigos,
+        weekly_items: weeklyItems,
+      };
+      aggregates.set(key, current);
+    }
+
+    return [...aggregates.values()].sort((a, b) =>
+      `${a.fecha_programada}-${a.equipo_codigo || ''}`.localeCompare(
+        `${b.fecha_programada}-${b.equipo_codigo || ''}`,
+      ),
+    );
+  }
+
   private async buildProgramacionMensualPayload(
     row: ProgramacionMensualEntity,
     query?: ProgramacionMensualQueryDto,
@@ -7505,11 +7825,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where: { programacion_mensual_id: row.id, is_deleted: false },
       order: { fecha_programada: 'ASC', orden: 'ASC', created_at: 'ASC' },
     });
+    const { start, end } = this.resolveProgramacionMensualRange(row, details, query);
+    const weeklyAggregates = await this.buildProgramacionMensualWeeklyAggregates(
+      row.id,
+      start,
+      end,
+    );
+    const combinedDetails = [...details, ...weeklyAggregates];
     const periodsMap = new Map<
       string,
       { period: string; total: number; sincronizados: number; label: string }
     >();
-    for (const detail of details) {
+    for (const detail of combinedDetails) {
       const period = String(detail.fecha_programada || '').slice(0, 7);
       if (!period) continue;
       const parsed = new Date(`${period}-01T00:00:00Z`);
@@ -7534,15 +7861,294 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           String(item.fecha_programada || '').startsWith(query.periodo || ''),
         )
       : details;
+    const filteredCombinedDetails = query?.periodo
+      ? combinedDetails.filter((item) =>
+          String(item.fecha_programada || '').startsWith(query.periodo || ''),
+        )
+      : combinedDetails;
+    const palette = this.resolveProgramacionMensualColorPalette(
+      (row.payload_json ?? {}) as Record<string, unknown>,
+    );
 
     return {
       ...row,
       total_detalles: details.length,
+      total_detalles_consolidados: combinedDetails.length,
       periodos: [...periodsMap.values()].sort((a, b) =>
         String(a.period).localeCompare(String(b.period)),
       ),
       detalles: filteredDetails,
+      detalles_consolidados: filteredCombinedDetails,
+      color_palette: palette,
     };
+  }
+
+  private async disableProgramacionLink(programacionId?: string | null) {
+    if (!programacionId) return;
+    const row = await this.programacionRepo.findOne({
+      where: { id: programacionId, is_deleted: false },
+    });
+    if (!row) return;
+    row.activo = false;
+    row.origen_programacion = 'MENSUAL_EDIT';
+    await this.programacionRepo.save(row);
+  }
+
+  private async prepareProgramacionMensualDetailInput(
+    dto: CreateProgramacionMensualDetalleDto | UpdateProgramacionMensualDetalleDto,
+    current?: ProgramacionMensualDetalleEntity | null,
+  ) {
+    const rawValue = this.normalizeProgramacionWorkbookValue(
+      dto.valor_crudo ?? current?.valor_crudo ?? '',
+    );
+    if (!rawValue) {
+      throw new BadRequestException(
+        'Debes indicar el valor mensual a programar, por ejemplo 325, 650, 975, R20 o una cantidad de horas.',
+      );
+    }
+    const equipos = await this.equipoRepo.find({ where: { is_deleted: false } });
+    let equipo: Pick<EquipoEntity, 'id' | 'codigo' | 'nombre'> | null =
+      dto.equipo_id != null
+        ? await this.findEquipoOrFail(dto.equipo_id)
+        : null;
+    if (!equipo && dto.equipo_codigo) {
+      equipo =
+        this.matchEquipoByCodeOrName(
+          String(dto.equipo_codigo || ''),
+          equipos,
+        ) ?? null;
+    }
+    if (!equipo && current?.equipo_id) {
+      equipo = await this.findEquipoOrFail(current.equipo_id);
+    }
+    if (!equipo) {
+      throw new BadRequestException(
+        'Debes seleccionar un equipo válido del sistema para el bloque mensual.',
+      );
+    }
+
+    const descriptor = this.resolveProgramacionMaintenanceDescriptor(rawValue);
+    const procedimientos = await this.procedimientoRepo.find({
+      where: { is_deleted: false },
+    });
+    const syncCache = new Map<
+      string,
+      { plan: PlanMantenimientoEntity; procedimiento: ProcedimientoPlantillaEntity }
+    >();
+
+    let mapping = {
+      procedimiento_id: null as string | null,
+      plan_id: null as string | null,
+      es_sincronizable: false,
+    };
+    if (dto.procedimiento_id) {
+      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
+      mapping = {
+        procedimiento_id: dto.procedimiento_id,
+        plan_id: synced.plan.id,
+        es_sincronizable: true,
+      };
+    } else {
+      mapping = await this.resolveProgramacionMensualProcedure(
+        descriptor.raw,
+        descriptor.frecuencia_horas,
+        procedimientos,
+        syncCache,
+      );
+    }
+
+    const fechaProgramada = this.toDateOnlyString(
+      dto.fecha_programada ?? current?.fecha_programada,
+    );
+    if (!fechaProgramada) {
+      throw new BadRequestException(
+        'Debes indicar la fecha del bloque mensual.',
+      );
+    }
+    const previousPayload = (current?.payload_json ?? {}) as Record<string, unknown>;
+    const nextPayload = {
+      ...previousPayload,
+      ...((dto.payload_json ?? {}) as Record<string, unknown>),
+      color_key:
+        String(
+          ((dto.payload_json ?? {}) as Record<string, unknown>).color_key ??
+            descriptor.tipo_mantenimiento,
+        ).toUpperCase(),
+    } as Record<string, unknown>;
+    const horometroUltimo =
+      nextPayload.horometro_ultimo != null
+        ? this.toNumeric(nextPayload.horometro_ultimo, 0)
+        : current?.payload_json?.horometro_ultimo != null
+          ? this.toNumeric(current.payload_json.horometro_ultimo, 0)
+          : null;
+    const proximaHoras =
+      descriptor.frecuencia_horas != null && horometroUltimo != null
+        ? Number((horometroUltimo + descriptor.frecuencia_horas).toFixed(2))
+        : null;
+    if (proximaHoras != null) {
+      nextPayload.horometro_programado = proximaHoras;
+    }
+    nextPayload.horas_programadas = descriptor.frecuencia_horas ?? null;
+
+    return {
+      equipo,
+      fechaProgramada,
+      descriptor,
+      mapping,
+      nextPayload,
+      observacion: dto.observacion ?? current?.observacion ?? null,
+      proximaHoras,
+    };
+  }
+
+  async createProgramacionMensualDetalle(
+    programacionMensualId: string,
+    dto: CreateProgramacionMensualDetalleDto,
+  ) {
+    const header = await this.findOneOrFail(this.programacionMensualRepo, {
+      id: programacionMensualId,
+      is_deleted: false,
+    });
+    const prepared = await this.prepareProgramacionMensualDetailInput(dto);
+    let programacionId: string | null = null;
+    if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id) {
+      const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
+        equipo_id: prepared.equipo.id,
+        plan_id: prepared.mapping.plan_id,
+        fecha_programada: prepared.fechaProgramada,
+        documento_origen: header.documento_origen || 'MENSUAL_MANUAL',
+        valor_crudo: prepared.descriptor.raw,
+        frecuencia_horas: prepared.descriptor.frecuencia_horas,
+        ultima_ejecucion_horas:
+          prepared.nextPayload.horometro_ultimo != null
+            ? this.toNumeric(prepared.nextPayload.horometro_ultimo, 0)
+            : null,
+        proxima_horas: prepared.proximaHoras,
+        payload_json: {
+          programacion_mensual_codigo: header.codigo,
+          tipo_mantenimiento: prepared.descriptor.tipo_mantenimiento,
+          valor_normalizado: prepared.descriptor.normalized,
+          ...prepared.nextPayload,
+        },
+      });
+      programacionId = programacion.id;
+    }
+    await this.programacionMensualDetRepo.save(
+      this.programacionMensualDetRepo.create({
+        programacion_mensual_id: header.id,
+        programacion_id: programacionId,
+        equipo_id: prepared.equipo.id,
+        equipo_codigo: prepared.equipo.codigo,
+        equipo_nombre: prepared.equipo.nombre,
+        fecha_programada: prepared.fechaProgramada,
+        dia_mes: Number(prepared.fechaProgramada.slice(-2)),
+        valor_crudo: prepared.descriptor.raw,
+        valor_normalizado: prepared.descriptor.normalized,
+        tipo_mantenimiento: prepared.descriptor.tipo_mantenimiento,
+        frecuencia_horas: prepared.descriptor.frecuencia_horas,
+        procedimiento_id: prepared.mapping.procedimiento_id,
+        plan_id: prepared.mapping.plan_id,
+        es_sincronizable:
+          Boolean(prepared.mapping.es_sincronizable) &&
+          Boolean(prepared.equipo.id),
+        observacion: prepared.observacion,
+        payload_json: prepared.nextPayload,
+      }),
+    );
+    return this.wrap(
+      await this.buildProgramacionMensualPayload(header),
+      'Detalle mensual creado',
+    );
+  }
+
+  async updateProgramacionMensualDetalle(
+    detailId: string,
+    dto: UpdateProgramacionMensualDetalleDto,
+  ) {
+    const detail = await this.findOneOrFail(this.programacionMensualDetRepo, {
+      id: detailId,
+      is_deleted: false,
+    });
+    const header = await this.findOneOrFail(this.programacionMensualRepo, {
+      id: detail.programacion_mensual_id,
+      is_deleted: false,
+    });
+    const prepared = await this.prepareProgramacionMensualDetailInput(dto, detail);
+    let programacionId = detail.programacion_id ?? null;
+    if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id) {
+      const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
+        equipo_id: prepared.equipo.id,
+        plan_id: prepared.mapping.plan_id,
+        fecha_programada: prepared.fechaProgramada,
+        documento_origen: header.documento_origen || 'MENSUAL_EDIT',
+        valor_crudo: prepared.descriptor.raw,
+        frecuencia_horas: prepared.descriptor.frecuencia_horas,
+        ultima_ejecucion_horas:
+          prepared.nextPayload.horometro_ultimo != null
+            ? this.toNumeric(prepared.nextPayload.horometro_ultimo, 0)
+            : null,
+        proxima_horas: prepared.proximaHoras,
+        payload_json: {
+          programacion_mensual_codigo: header.codigo,
+          tipo_mantenimiento: prepared.descriptor.tipo_mantenimiento,
+          valor_normalizado: prepared.descriptor.normalized,
+          ...prepared.nextPayload,
+        },
+      });
+      programacionId = programacion.id;
+    } else if (detail.programacion_id) {
+      await this.disableProgramacionLink(detail.programacion_id);
+      programacionId = null;
+    }
+
+    Object.assign(detail, {
+      programacion_id: programacionId,
+      equipo_id: prepared.equipo.id,
+      equipo_codigo: prepared.equipo.codigo,
+      equipo_nombre: prepared.equipo.nombre,
+      fecha_programada: prepared.fechaProgramada,
+      dia_mes: Number(prepared.fechaProgramada.slice(-2)),
+      valor_crudo: prepared.descriptor.raw,
+      valor_normalizado: prepared.descriptor.normalized,
+      tipo_mantenimiento: prepared.descriptor.tipo_mantenimiento,
+      frecuencia_horas: prepared.descriptor.frecuencia_horas,
+      procedimiento_id: prepared.mapping.procedimiento_id,
+      plan_id: prepared.mapping.plan_id,
+      es_sincronizable:
+        Boolean(prepared.mapping.es_sincronizable) &&
+        Boolean(prepared.equipo.id),
+      observacion: prepared.observacion,
+      payload_json: prepared.nextPayload,
+    });
+    await this.programacionMensualDetRepo.save(detail);
+    return this.wrap(
+      await this.buildProgramacionMensualPayload(header),
+      'Detalle mensual actualizado',
+    );
+  }
+
+  async updateProgramacionMensualConfig(
+    id: string,
+    dto: UpdateProgramacionMensualConfigDto,
+  ) {
+    const header = await this.findOneOrFail(this.programacionMensualRepo, {
+      id,
+      is_deleted: false,
+    });
+    const currentPayload = (header.payload_json ?? {}) as Record<string, unknown>;
+    header.payload_json = {
+      ...currentPayload,
+      ...((dto.payload_json ?? {}) as Record<string, unknown>),
+      color_palette: {
+        ...this.resolveProgramacionMensualColorPalette(currentPayload),
+        ...((dto.color_palette ?? {}) as Record<string, string>),
+      },
+    };
+    await this.programacionMensualRepo.save(header);
+    return this.wrap(
+      await this.buildProgramacionMensualPayload(header),
+      'Configuración del mensual actualizada',
+    );
   }
 
   async listProgramacionesMensuales(query?: ProgramacionMensualQueryDto) {

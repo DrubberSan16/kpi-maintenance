@@ -32,6 +32,7 @@ import {
   CreateConsumoDto,
   CreateCronogramaSemanalDto,
   CreateEquipoDto,
+  CreateProgramacionMensualDetalleDto,
   CreateEventoDto,
   CreateFallaCatalogoDto,
   CreateLecturaEquipoDto,
@@ -52,6 +53,8 @@ import {
   PurgeAnalisisLubricanteDto,
   UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
+  UpdateProgramacionMensualConfigDto,
+  UpdateProgramacionMensualDetalleDto,
   UpdateEquipoDto,
   UpdatePlanDto,
   UpdatePlanTareaDto,
@@ -543,6 +546,42 @@ export class KpiMaintenanceController {
     @Query() query: ProgramacionMensualQueryDto,
   ) {
     return this.service.getProgramacionMensual(id, query);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({
+    summary: 'Crear un detalle manual dentro del calendario mensual importado',
+  })
+  @Post('programaciones/mensuales/:id/detalles')
+  createProgramacionMensualDetalle(
+    @Param('id') id: string,
+    @Body() dto: CreateProgramacionMensualDetalleDto,
+  ) {
+    return this.service.createProgramacionMensualDetalle(id, dto);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({
+    summary: 'Actualizar un detalle manual dentro del calendario mensual importado',
+  })
+  @Patch('programaciones/mensuales/detalles/:detailId')
+  updateProgramacionMensualDetalle(
+    @Param('detailId') detailId: string,
+    @Body() dto: UpdateProgramacionMensualDetalleDto,
+  ) {
+    return this.service.updateProgramacionMensualDetalle(detailId, dto);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({
+    summary: 'Actualizar configuración visual y payload del calendario mensual',
+  })
+  @Patch('programaciones/mensuales/:id/config')
+  updateProgramacionMensualConfig(
+    @Param('id') id: string,
+    @Body() dto: UpdateProgramacionMensualConfigDto,
+  ) {
+    return this.service.updateProgramacionMensualConfig(id, dto);
   }
 
   @ApiTags('Programaciones')

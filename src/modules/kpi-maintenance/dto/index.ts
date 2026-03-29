@@ -424,6 +424,106 @@ export class ProgramacionMensualQueryDto {
   periodo?: string;
 }
 
+export class CreateProgramacionMensualDetalleDto {
+  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+
+  @ApiPropertyOptional({ description: 'Código del equipo' })
+  @IsOptional()
+  @IsString()
+  equipo_codigo?: string;
+
+  @ApiProperty({ description: 'Fecha programada (ISO 8601)' })
+  @IsDateString()
+  fecha_programada: string;
+
+  @ApiProperty({
+    description:
+      'Valor crudo del calendario, por ejemplo 325, 650, 975, R20 o una cantidad de horas',
+  })
+  @IsString()
+  @IsNotEmpty()
+  valor_crudo: string;
+
+  @ApiPropertyOptional({
+    description: 'ID de la plantilla MPG a asociar explícitamente',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  procedimiento_id?: string;
+
+  @ApiPropertyOptional({ description: 'Observación del bloque mensual' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+
+  @ApiPropertyOptional({ description: 'Payload auxiliar del detalle mensual' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+}
+
+export class UpdateProgramacionMensualDetalleDto {
+  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+
+  @ApiPropertyOptional({ description: 'Código del equipo' })
+  @IsOptional()
+  @IsString()
+  equipo_codigo?: string;
+
+  @ApiPropertyOptional({ description: 'Fecha programada (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha_programada?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Valor crudo del calendario, por ejemplo 325, 650, 975, R20 o una cantidad de horas',
+  })
+  @IsOptional()
+  @IsString()
+  valor_crudo?: string;
+
+  @ApiPropertyOptional({
+    description: 'ID de la plantilla MPG a asociar explícitamente',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  procedimiento_id?: string;
+
+  @ApiPropertyOptional({ description: 'Observación del bloque mensual' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+
+  @ApiPropertyOptional({ description: 'Payload auxiliar del detalle mensual' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+}
+
+export class UpdateProgramacionMensualConfigDto {
+  @ApiPropertyOptional({ description: 'Payload auxiliar del encabezado mensual' })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description:
+      'Paleta de colores editable para renderizar el mensual. Las llaves recomendadas son MPG, HORAS_PROGRAMADAS, MANTENIMIENTO, SEMANAL, SINCRONIZADO y DEFAULT',
+  })
+  @IsOptional()
+  @IsObject()
+  color_palette?: Record<string, string>;
+}
+
 export class ComponenteQueryDto {
   @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
   @IsOptional()
