@@ -1095,6 +1095,13 @@ export class CreateProcedimientoPlantillaDto {
   @ValidateNested({ each: true })
   @Type(() => ProcedimientoActividadDto)
   actividades?: ProcedimientoActividadDto[];
+  @ApiPropertyOptional({
+    description: 'Bodega asociada a la plantilla',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  bodega_id?: string;
 }
 
 export class UpdateProcedimientoPlantillaDto extends CreateProcedimientoPlantillaDto {}

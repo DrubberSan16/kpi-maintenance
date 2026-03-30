@@ -805,6 +805,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return nombre || codigo || null;
   }
 
+  private async ensureInventoryWarehouseExists(bodegaId?: string | null) {
+    const normalized = String(bodegaId ?? '').trim();
+    if (!normalized) return null;
+    const bodega = await this.bodegaRepo.findOne({
+      where: { id: normalized, is_deleted: false },
+    });
+    if (!bodega) {
+      throw new NotFoundException('La bodega seleccionada no existe.');
+    }
+    return bodega;
+  }
+
   private async buildInventoryCatalogMaps(productIds: string[], warehouseIds: string[]) {
     const uniqueProductIds = [...new Set(productIds.filter(Boolean))];
     const uniqueWarehouseIds = [...new Set(warehouseIds.filter(Boolean))];
@@ -2612,6 +2624,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           id: material.id,
           codigo: material.codigo ?? null,
           nombre: material.nombre ?? null,
+          bodega_id: material.bodega_id ?? null,
           label: this.buildProductoLabel(material) ?? material.id,
         })),
     };
@@ -6615,6 +6628,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createProcedimientoPlantilla(dto: CreateProcedimientoPlantillaDto) {
+    await this.ensureInventoryWarehouseExists(dto.bodega_id ?? null);
     let resolution = await this.resolveRequestedProcedimientoPlantillaCode(
       dto.codigo,
     );
@@ -6635,6 +6649,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               codigo: resolution.resolvedCode,
               nombre: dto.nombre,
               tipo_proceso: dto.tipo_proceso,
+              bodega_id: dto.bodega_id ?? null,
               documento_referencia: dto.documento_referencia ?? null,
               version: dto.version ?? null,
               clase_mantenimiento: dto.clase_mantenimiento ?? null,
@@ -6721,6 +6736,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async updateProcedimientoPlantilla(id: string, dto: UpdateProcedimientoPlantillaDto) {
+    await this.ensureInventoryWarehouseExists(dto.bodega_id ?? null);
     await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
 
     await this.dataSource.transaction(async (manager) => {
@@ -6735,6 +6751,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         codigo: row.codigo,
         nombre: dto.nombre ?? row.nombre,
         tipo_proceso: dto.tipo_proceso ?? row.tipo_proceso,
+        bodega_id: dto.bodega_id ?? row.bodega_id ?? null,
         documento_referencia: dto.documento_referencia ?? row.documento_referencia ?? null,
         version: dto.version ?? row.version ?? null,
         clase_mantenimiento: dto.clase_mantenimiento ?? row.clase_mantenimiento ?? null,
