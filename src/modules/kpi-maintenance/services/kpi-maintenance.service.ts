@@ -2177,6 +2177,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
     const recipients = await this.resolveAlertNotificationRecipients(payload);
     if (!recipients.length) {
+      this.logger.warn(
+        `[AlertEmail:${row.id}] Sin destinatarios resueltos para la alerta.`,
+      );
       return {
         recipients: [],
         userIds: [] as string[],
@@ -2193,6 +2196,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (item) => item.type === 'TRANSACTION_OWNER',
     );
 
+    this.logger.log(
+      `[AlertEmail:${row.id}] Preparando envio desde=${this.alertMailFromAddress} replyTo=${transactionOwner?.email ?? 'N/A'} destinatarios=${recipients
+        .map((item) => `${item.type}:${item.email}`)
+        .join(', ')}`,
+    );
+
     if (transporter) {
       for (const recipient of recipients) {
         try {
@@ -2205,14 +2214,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             text: this.buildAlertEmailText(row, recipient),
           });
           sent.push(recipient.email);
+          this.logger.log(
+            `[AlertEmail:${row.id}] Enviado desde=${this.alertMailFromAddress} hacia=${recipient.email} tipo=${recipient.type}`,
+          );
         } catch (error: any) {
           failed.push(recipient.email);
           this.logger.warn(
-            `No se pudo enviar correo de alerta a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+            `[AlertEmail:${row.id}] Fallo envio desde=${this.alertMailFromAddress} hacia=${recipient.email} tipo=${recipient.type}: ${error?.message ?? 'desconocido'}`,
           );
         }
       }
+    } else {
+      this.logger.warn(
+        `[AlertEmail:${row.id}] SMTP no configurado. from=${this.alertMailFromAddress} destinatarios=${recipients
+          .map((item) => item.email)
+          .join(', ')}`,
+      );
     }
+
+    this.logger.log(
+      `[AlertEmail:${row.id}] Resultado envio desde=${this.alertMailFromAddress} exitosos=${sent.length} fallidos=${failed.length}`,
+    );
 
     return {
       recipients,
