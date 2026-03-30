@@ -177,11 +177,92 @@ describe('KpiMaintenanceService alerts', () => {
     });
 
     expect(sendMail).toHaveBeenCalledTimes(3);
+    expect(sendMail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyTo: 'operador@example.com',
+      }),
+    );
     expect(result.sent).toEqual([
       'operador@example.com',
       'gerencia@example.com',
       'admin@example.com',
     ]);
+  });
+
+  it('resuelve el correo del usuario transaccionante desde usuarios y expande la lista de gerencia general', async () => {
+    jest.spyOn(service as any, 'fetchSecurityUsers').mockResolvedValue([
+      {
+        id: 'u-actor',
+        nameUser: 'operador',
+        nameSurname: 'Operador Uno',
+        email: 'operador.real@example.com',
+        roleName: 'SUPERVISOR',
+        roleNames: ['SUPERVISOR'],
+        status: 'ACTIVE',
+        isDeleted: false,
+      },
+      {
+        id: 'u-g1',
+        nameUser: 'gerencia1',
+        nameSurname: 'Gerente Uno',
+        email: 'gerente1@example.com',
+        roleName: 'GERENTE GENERAL',
+        roleNames: ['GERENTE GENERAL'],
+        status: 'ACTIVE',
+        isDeleted: false,
+      },
+      {
+        id: 'u-g2',
+        nameUser: 'gerencia2',
+        nameSurname: 'Gerente Dos',
+        email: 'gerente2@example.com',
+        roleName: 'GERENCIA GENERAL',
+        roleNames: ['GERENCIA GENERAL'],
+        status: 'ACTIVE',
+        isDeleted: false,
+      },
+      {
+        id: 'u-admin',
+        nameUser: 'admin',
+        nameSurname: 'Admin Uno',
+        email: 'admin@example.com',
+        roleName: 'ADMINISTRADOR',
+        roleNames: ['ADMINISTRADOR'],
+        status: 'ACTIVE',
+        isDeleted: false,
+      },
+    ]);
+
+    const recipients = await (service as any).resolveAlertNotificationRecipients({
+      actor_user_id: 'u-actor',
+      actor_username: 'operador',
+      actor_email: 'correo-stale@example.com',
+    });
+
+    expect(recipients).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'TRANSACTION_OWNER',
+          email: 'operador.real@example.com',
+          userId: 'u-actor',
+        }),
+        expect.objectContaining({
+          type: 'GENERAL_MANAGER',
+          email: 'gerente1@example.com',
+          userId: 'u-g1',
+        }),
+        expect.objectContaining({
+          type: 'GENERAL_MANAGER',
+          email: 'gerente2@example.com',
+          userId: 'u-g2',
+        }),
+        expect.objectContaining({
+          type: 'ADMINISTRATOR',
+          email: 'admin@example.com',
+          userId: 'u-admin',
+        }),
+      ]),
+    );
   });
 
   it('crea una alerta nueva y dispara notificaciones en el recálculo', async () => {

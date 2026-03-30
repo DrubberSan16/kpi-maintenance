@@ -202,6 +202,7 @@ type SecurityUserDirectoryItem = {
   nameSurname: string | null;
   email: string | null;
   roleName: string | null;
+  roleNames: string[];
   status: string | null;
   isDeleted: boolean;
 };
@@ -1736,19 +1737,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       const items = this.unwrapServiceData<any[]>(raw);
       const normalized = Array.isArray(items)
-        ? items.map((item) => ({
-            id: this.firstNonEmptyString(item?.id),
-            nameUser: this.firstNonEmptyString(item?.nameUser),
-            nameSurname: this.firstNonEmptyString(item?.nameSurname),
-            email: this.normalizeEmail(item?.email),
-            roleName: this.firstNonEmptyString(
+        ? items.map((item) => {
+            const rawRoleNames = [
               item?.role?.nombre,
               item?.roleName,
               item?.role_nombre,
-            ),
-            status: this.firstNonEmptyString(item?.status),
-            isDeleted: Boolean(item?.isDeleted ?? item?.is_deleted ?? false),
-          }))
+              ...(Array.isArray(item?.roles)
+                ? item.roles.flatMap((role: any) => [
+                    role?.nombre,
+                    role?.name,
+                    role?.roleName,
+                  ])
+                : []),
+            ]
+              .map((value) => this.firstNonEmptyString(value))
+              .filter((value): value is string => Boolean(value));
+
+            return {
+              id: this.firstNonEmptyString(item?.id),
+              nameUser: this.firstNonEmptyString(item?.nameUser),
+              nameSurname: this.firstNonEmptyString(item?.nameSurname),
+              email: this.normalizeEmail(item?.email),
+              roleName: rawRoleNames[0] ?? null,
+              roleNames: [...new Set(rawRoleNames)],
+              status: this.firstNonEmptyString(item?.status),
+              isDeleted: Boolean(item?.isDeleted ?? item?.is_deleted ?? false),
+            };
+          })
         : [];
       this.securityUsersCache = {
         expiresAt: now + 5 * 60 * 1000,
@@ -1788,19 +1803,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private findSecurityUserByRole(
+  private isActiveSecurityUser(item: SecurityUserDirectoryItem) {
+    return (
+      !item.isDeleted &&
+      String(item.status || 'ACTIVE').trim().toUpperCase() === 'ACTIVE'
+    );
+  }
+
+  private findSecurityUsersByRole(
     users: SecurityUserDirectoryItem[],
     matcher: (roleName: string) => boolean,
   ) {
-    return (
-      users.find((item) => {
-        if (item.isDeleted) return false;
-        if (String(item.status || 'ACTIVE').trim().toUpperCase() !== 'ACTIVE') {
-          return false;
-        }
-        return matcher(this.normalizeRoleName(item.roleName));
-      }) ?? null
-    );
+    return users.filter((item) => {
+      if (!this.isActiveSecurityUser(item)) return false;
+      const roleNames = [
+        item.roleName,
+        ...(Array.isArray(item.roleNames) ? item.roleNames : []),
+      ]
+        .map((value) => this.normalizeRoleName(value))
+        .filter(Boolean);
+      return roleNames.some((roleName) => matcher(roleName));
+    });
   }
 
   private getAlertNotificationRecipientsUserIds(
@@ -1821,12 +1844,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const users = await this.fetchSecurityUsers();
     const actorHints = this.extractAlertActorHints(payload);
     const actorUser = this.findSecurityUserByHints(users, actorHints);
-    const managerUser = this.findSecurityUserByRole(users, (roleName) =>
+    const managerUsers = this.findSecurityUsersByRole(users, (roleName) =>
       ['GERENTE GENERAL', 'GERENCIA GENERAL'].some((expected) =>
         roleName.includes(expected),
       ),
     );
-    const adminUser = this.findSecurityUserByRole(users, (roleName) =>
+    const adminUsers = this.findSecurityUsersByRole(users, (roleName) =>
       ['ADMINISTRADOR', 'ADMIN', 'SUPER ADMIN', 'SUPERADMIN'].some((expected) =>
         roleName.includes(expected),
       ),
@@ -1873,36 +1896,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             roleName: actorHints.roleName,
           },
     );
-    pushRecipient(
-      'GENERAL_MANAGER',
-      this.alertGeneralManagerEmail || managerUser?.email,
-      managerUser
-        ? {
-            userId: managerUser.id,
-            username: managerUser.nameUser,
-            displayName: managerUser.nameSurname ?? managerUser.nameUser,
-            roleName: managerUser.roleName,
-          }
-        : {
-            displayName: 'Gerencia General',
-            roleName: 'GERENTE GENERAL',
-          },
-    );
-    pushRecipient(
-      'ADMINISTRATOR',
-      this.alertAdministratorEmail || adminUser?.email,
-      adminUser
-        ? {
-            userId: adminUser.id,
-            username: adminUser.nameUser,
-            displayName: adminUser.nameSurname ?? adminUser.nameUser,
-            roleName: adminUser.roleName,
-          }
-        : {
-            displayName: 'Administrador',
-            roleName: 'ADMINISTRADOR',
-          },
-    );
+    if (managerUsers.length) {
+      for (const managerUser of managerUsers) {
+        pushRecipient('GENERAL_MANAGER', managerUser.email, {
+          userId: managerUser.id,
+          username: managerUser.nameUser,
+          displayName: managerUser.nameSurname ?? managerUser.nameUser,
+          roleName: managerUser.roleName,
+        });
+      }
+    } else {
+      pushRecipient('GENERAL_MANAGER', this.alertGeneralManagerEmail, {
+        displayName: 'Gerencia General',
+        roleName: 'GERENTE GENERAL',
+      });
+    }
+
+    if (adminUsers.length) {
+      for (const adminUser of adminUsers) {
+        pushRecipient('ADMINISTRATOR', adminUser.email, {
+          userId: adminUser.id,
+          username: adminUser.nameUser,
+          displayName: adminUser.nameSurname ?? adminUser.nameUser,
+          roleName: adminUser.roleName,
+        });
+      }
+    } else {
+      pushRecipient('ADMINISTRATOR', this.alertAdministratorEmail, {
+        displayName: 'Administrador',
+        roleName: 'ADMINISTRADOR',
+      });
+    }
 
     const deduped = new Map<string, AlertNotificationRecipient>();
     for (const item of candidates) {
@@ -2165,6 +2189,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const transporter = await this.getAlertMailTransporter();
     const sent: string[] = [];
     const failed: string[] = [];
+    const transactionOwner = recipients.find(
+      (item) => item.type === 'TRANSACTION_OWNER',
+    );
 
     if (transporter) {
       for (const recipient of recipients) {
@@ -2172,6 +2199,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           await transporter.sendMail({
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
+            replyTo: transactionOwner?.email || undefined,
             subject: this.buildAlertEmailSubject(row, recipient),
             html: this.buildAlertEmailHtml(row, recipient),
             text: this.buildAlertEmailText(row, recipient),
