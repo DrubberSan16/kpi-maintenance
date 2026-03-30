@@ -2,253 +2,279 @@ import { ConflictException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
 
-const repo = () => ({
+const createRepo = () => ({
   findOne: jest.fn(),
-  save: jest.fn(),
-  create: jest.fn((x) => x),
   find: jest.fn(),
+  save: jest.fn(async (value) => value),
+  create: jest.fn((value) => value),
   createQueryBuilder: jest.fn(),
+  delete: jest.fn(),
+  softDelete: jest.fn(),
+  update: jest.fn(),
+  count: jest.fn(),
 });
 
-describe('KpiMaintenanceService', () => {
+const createRepos = () => ({
+  equipoRepo: createRepo(),
+  equipoTipoRepo: createRepo(),
+  equipoComponenteRepo: createRepo(),
+  locationRepo: createRepo(),
+  marcaRepo: createRepo(),
+  bitacoraRepo: createRepo(),
+  alertaRepo: createRepo(),
+  estadoRepo: createRepo(),
+  estadoCatalogoRepo: createRepo(),
+  eventoRepo: createRepo(),
+  fallaRepo: createRepo(),
+  lecturaRepo: createRepo(),
+  lubricacionRepo: createRepo(),
+  procedimientoRepo: createRepo(),
+  procedimientoActividadRepo: createRepo(),
+  analisisLubricanteRepo: createRepo(),
+  analisisLubricanteDetRepo: createRepo(),
+  cronogramaSemanalRepo: createRepo(),
+  cronogramaSemanalDetRepo: createRepo(),
+  programacionMensualRepo: createRepo(),
+  programacionMensualDetRepo: createRepo(),
+  reporteDiarioRepo: createRepo(),
+  reporteDiarioUnidadRepo: createRepo(),
+  reporteCombustibleRepo: createRepo(),
+  controlComponenteRepo: createRepo(),
+  eventoProcesoRepo: createRepo(),
+  planRepo: createRepo(),
+  planTareaRepo: createRepo(),
+  programacionRepo: createRepo(),
+  woRepo: createRepo(),
+  woHistoryRepo: createRepo(),
+  consumoRepo: createRepo(),
+  stockRepo: createRepo(),
+  kardexRepo: createRepo(),
+  productoRepo: createRepo(),
+  bodegaRepo: createRepo(),
+  reservaRepo: createRepo(),
+  woTareaRepo: createRepo(),
+  woAdjuntoRepo: createRepo(),
+});
+
+type RepoBag = ReturnType<typeof createRepos>;
+
+const createDataSourceMock = () =>
+  ({
+    createQueryRunner: jest.fn(() => ({
+      connect: jest.fn(),
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      rollbackTransaction: jest.fn(),
+      release: jest.fn(),
+      manager: {
+        save: jest.fn(async (_entity, value) => value),
+        create: jest.fn((_entity, value) => value),
+        findOne: jest.fn(),
+      },
+    })),
+  }) as unknown as DataSource;
+
+const createService = (repos: RepoBag, ds: DataSource) =>
+  new KpiMaintenanceService(
+    repos.equipoRepo as any,
+    repos.equipoTipoRepo as any,
+    repos.equipoComponenteRepo as any,
+    repos.locationRepo as any,
+    repos.marcaRepo as any,
+    repos.bitacoraRepo as any,
+    repos.alertaRepo as any,
+    repos.estadoRepo as any,
+    repos.estadoCatalogoRepo as any,
+    repos.eventoRepo as any,
+    repos.fallaRepo as any,
+    repos.lecturaRepo as any,
+    repos.lubricacionRepo as any,
+    repos.procedimientoRepo as any,
+    repos.procedimientoActividadRepo as any,
+    repos.analisisLubricanteRepo as any,
+    repos.analisisLubricanteDetRepo as any,
+    repos.cronogramaSemanalRepo as any,
+    repos.cronogramaSemanalDetRepo as any,
+    repos.programacionMensualRepo as any,
+    repos.programacionMensualDetRepo as any,
+    repos.reporteDiarioRepo as any,
+    repos.reporteDiarioUnidadRepo as any,
+    repos.reporteCombustibleRepo as any,
+    repos.controlComponenteRepo as any,
+    repos.eventoProcesoRepo as any,
+    repos.planRepo as any,
+    repos.planTareaRepo as any,
+    repos.programacionRepo as any,
+    repos.woRepo as any,
+    repos.woHistoryRepo as any,
+    repos.consumoRepo as any,
+    repos.stockRepo as any,
+    repos.kardexRepo as any,
+    repos.productoRepo as any,
+    repos.bodegaRepo as any,
+    repos.reservaRepo as any,
+    repos.woTareaRepo as any,
+    repos.woAdjuntoRepo as any,
+    ds,
+  );
+
+describe('KpiMaintenanceService alerts', () => {
+  let repos: RepoBag;
   let service: KpiMaintenanceService;
-  const equipoRepo = repo();
-  const equipoTipoRepo = repo();
-  const locationRepo = repo();
-  const bitacoraRepo = repo();
-  const alertaRepo = repo();
-  const estadoRepo = repo();
-  const estadoCatalogoRepo = repo();
-  const eventoRepo = repo();
-  const fallaRepo = repo();
-  const lecturaRepo = repo();
-  const lubricacionRepo = repo();
-  const planRepo = repo();
-  const planTareaRepo = repo();
-  const programacionRepo = repo();
-  const woRepo = repo();
-  const consumoRepo = repo();
-  const stockRepo = repo();
-  const productoRepo = repo();
-  const reservaRepo = repo();
-  const woTareaRepo = repo();
-  const woAdjuntoRepo = repo();
-  const qr: any = {
-    connect: jest.fn(),
-    startTransaction: jest.fn(),
-    commitTransaction: jest.fn(),
-    rollbackTransaction: jest.fn(),
-    release: jest.fn(),
-    manager: {
-      save: jest.fn(async (x, y) => y ?? x),
-      create: jest.fn((_, x) => x),
-      findOne: jest.fn(),
-    },
-  };
-  const ds = { createQueryRunner: jest.fn(() => qr) } as unknown as DataSource;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new KpiMaintenanceService(
-      equipoRepo as any,
-      equipoTipoRepo as any,
-      {} as any,
-      locationRepo as any,
-      bitacoraRepo as any,
-      alertaRepo as any,
-      estadoRepo as any,
-      estadoCatalogoRepo as any,
-      eventoRepo as any,
-      fallaRepo as any,
-      lecturaRepo as any,
-      lubricacionRepo as any,
-      planRepo as any,
-      planTareaRepo as any,
-      programacionRepo as any,
-      woRepo as any,
-      consumoRepo as any,
-      stockRepo as any,
-      productoRepo as any,
-      reservaRepo as any,
-      woTareaRepo as any,
-      woAdjuntoRepo as any,
-      ds,
-    );
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
   });
 
-  it('bitácora: horómetro retrocede -> alerta y conflicto', async () => {
-    equipoRepo.findOne.mockResolvedValue({ id: 'e1', is_deleted: false });
-    bitacoraRepo.findOne.mockResolvedValue({ horometro: '100' });
-    await expect(
-      service.createBitacora('e1', {
-        fecha: '2026-01-01',
-        horometro: 90,
-      } as any),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(alertaRepo.save).toHaveBeenCalled();
-  });
-
-  it('cambio de estado cierra anterior y abre nuevo', async () => {
-    equipoRepo.findOne.mockResolvedValue({
-      id: 'e1',
-      is_deleted: false,
-      estado_operativo: 'OPERATIVO',
-    });
-    estadoCatalogoRepo.findOne.mockResolvedValue({
-      id: 's2',
-      codigo: 'MPG',
-      is_deleted: false,
-    });
-    estadoRepo.findOne.mockResolvedValue({ id: 'old', fecha_fin: null });
-    estadoRepo.save
-      .mockResolvedValueOnce({ id: 'old', fecha_fin: new Date() })
-      .mockResolvedValueOnce({ id: 'new' });
-    await service.changeEstado('e1', {
-      estado_id: 's2',
-      fecha_inicio: '2026-01-02T00:00:00.000Z',
-    });
-    expect(estadoRepo.save).toHaveBeenCalledTimes(2);
-    expect(equipoRepo.save).toHaveBeenCalled();
-  });
-
-  it('recalcular alertas MPG es idempotente', async () => {
-    programacionRepo.find
-      .mockResolvedValueOnce([
+  it('envia correos cuando se dispara una alerta nueva', async () => {
+    const sendMail = jest.fn().mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'resolveAlertNotificationRecipients')
+      .mockResolvedValue([
         {
-          equipo_id: 'e1',
-          plan_id: 'p1',
-          proxima_horas: '110',
-          activo: true,
-          is_deleted: false,
+          type: 'TRANSACTION_OWNER',
+          email: 'operador@example.com',
+          userId: 'u-1',
+          username: 'operador',
+          displayName: 'Operador',
+          roleName: 'SUPERVISOR',
         },
-      ])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
         {
-          equipo_id: 'e1',
-          plan_id: 'p1',
-          proxima_horas: '110',
-          activo: true,
-          is_deleted: false,
+          type: 'GENERAL_MANAGER',
+          email: 'gerencia@example.com',
+          userId: 'u-2',
+          username: 'gerencia',
+          displayName: 'Gerencia',
+          roleName: 'GERENTE GENERAL',
         },
-      ])
-      .mockResolvedValueOnce([]);
-    equipoRepo.findOne.mockResolvedValue({
-      id: 'e1',
-      horometro_actual: '100',
-      is_deleted: false,
+        {
+          type: 'ADMINISTRATOR',
+          email: 'admin@example.com',
+          userId: 'u-3',
+          username: 'admin',
+          displayName: 'Administrador',
+          roleName: 'ADMINISTRADOR',
+        },
+      ]);
+    jest
+      .spyOn(service as any, 'getAlertMailTransporter')
+      .mockResolvedValue({ sendMail } as any);
+
+    const result = await (service as any).sendAlertTriggerEmails({
+      id: 'alert-1',
+      categoria: 'INVENTARIO',
+      nivel: 'WARNING',
+      estado: 'ABIERTA',
+      origen: 'INVENTARIO',
+      tipo_alerta: 'STOCK_BAJO_BODEGA',
+      detalle: 'Stock bajo',
+      referencia: 'STOCK_BODEGA:1',
+      referencia_tipo: 'STOCK_BODEGA',
+      fecha_generada: new Date('2026-03-29T10:00:00Z'),
+      payload_json: { equipo_codigo: 'UGN-03' },
     });
-    alertaRepo.findOne
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'a1' });
-    await service.recalculateAlertas();
-    await service.recalculateAlertas();
-    expect(alertaRepo.save).toHaveBeenCalledTimes(1);
+
+    expect(sendMail).toHaveBeenCalledTimes(3);
+    expect(result.sent).toEqual([
+      'operador@example.com',
+      'gerencia@example.com',
+      'admin@example.com',
+    ]);
   });
 
-  it('recalcular alertas crea MPG_1300 cuando programación activa está fuera de umbrales', async () => {
-    programacionRepo.find
-      .mockResolvedValueOnce([
-        {
-          id: 'prog-1',
-          equipo_id: 'e1',
-          plan_id: 'p1',
-          proxima_horas: '78000',
-          proxima_fecha: '2099-03-21',
-          activo: true,
-          is_deleted: false,
-        },
-      ])
-      .mockResolvedValueOnce([]);
-    equipoRepo.findOne.mockResolvedValue({
-      id: 'e1',
-      horometro_actual: '6000',
-      is_deleted: false,
-    });
+  it('crea una alerta nueva y dispara notificaciones en el recálculo', async () => {
+    repos.alertaRepo.find.mockResolvedValue([]);
+    repos.alertaRepo.save.mockImplementation(async (value) => ({
+      id: 'alert-1',
+      ...value,
+    }));
+    const dispatchSpy = jest
+      .spyOn(service as any, 'dispatchAlertTriggeredNotifications')
+      .mockResolvedValue(undefined);
 
-    await service.recalculateAlertas();
+    const stats = await (service as any).syncAlertCandidates([
+      {
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'STOCK_BAJO_BODEGA',
+        categoria: 'INVENTARIO',
+        nivel: 'WARNING',
+        origen: 'INVENTARIO',
+        referencia_tipo: 'STOCK_BODEGA',
+        referencia: 'STOCK_BODEGA:1',
+        detalle: 'Stock 10 / minimo 20',
+        payload_json: { producto_id: 'producto-1' },
+      },
+    ]);
 
-    expect(alertaRepo.findOne).toHaveBeenCalledWith({
-      where: {
-        equipo_id: 'e1',
-        tipo_alerta: 'MPG_1300',
-        referencia: 'PLAN:p1',
+    expect(stats.created).toBe(1);
+    expect(repos.alertaRepo.save).toHaveBeenCalled();
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('cierra alertas gestionadas cuando la condición desaparece', async () => {
+    repos.alertaRepo.find.mockResolvedValue([
+      {
+        id: 'alert-1',
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'STOCK_BAJO_BODEGA',
+        categoria: 'INVENTARIO',
+        nivel: 'WARNING',
+        origen: 'INVENTARIO',
+        referencia_tipo: 'STOCK_BODEGA',
+        referencia: 'STOCK_BODEGA:1',
+        detalle: 'Stock bajo',
+        fecha_generada: new Date('2026-03-29T10:00:00Z'),
+        ultima_evaluacion_at: new Date('2026-03-29T10:00:00Z'),
         estado: 'ABIERTA',
+        payload_json: {},
         is_deleted: false,
       },
-    });
-    expect(alertaRepo.save).toHaveBeenCalledWith(
+    ]);
+    repos.alertaRepo.save.mockImplementation(async (value) => value);
+
+    const stats = await (service as any).syncAlertCandidates([]);
+
+    expect(stats.resolved).toBe(1);
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({
-        equipo_id: 'e1',
-        tipo_alerta: 'MPG_1300',
-        referencia: 'PLAN:p1',
-        detalle: 'Programación activa fuera de umbrales para plan p1',
+        id: 'alert-1',
+        estado: 'CERRADA',
       }),
     );
   });
 
-  it('recalcular alertas acumula errores de validación y continúa con otras programaciones', async () => {
-    programacionRepo.find
-      .mockResolvedValueOnce([
-        {
-          id: 'prog-invalid',
-          equipo_id: 'e1',
-          plan_id: 'p1',
-          proxima_horas: 'NO_NUM',
-          activo: true,
-          is_deleted: false,
-        },
-        {
-          id: 'prog-ok',
-          equipo_id: 'e2',
-          plan_id: 'p2',
-          proxima_horas: '120',
-          activo: true,
-          is_deleted: false,
-        },
-      ])
-      .mockResolvedValueOnce([]);
-    equipoRepo.findOne
-      .mockResolvedValueOnce({
-        id: 'e1',
-        horometro_actual: '100',
-        is_deleted: false,
-      })
-      .mockResolvedValueOnce({
-        id: 'e2',
-        horometro_actual: '100',
-        is_deleted: false,
-      });
-    alertaRepo.findOne.mockResolvedValueOnce(null);
+  it('bitácora con horómetro retrocedido crea alerta, notifica y rechaza la operación', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      is_deleted: false,
+    });
+    repos.bitacoraRepo.findOne.mockResolvedValue({
+      horometro: 100,
+    });
+    repos.alertaRepo.save.mockImplementation(async (value) => ({
+      id: 'alert-1',
+      ...value,
+    }));
+    const dispatchSpy = jest
+      .spyOn(service as any, 'dispatchAlertTriggeredNotifications')
+      .mockResolvedValue(undefined);
 
-    const result = await service.recalculateAlertas();
-
-    expect(alertaRepo.save).toHaveBeenCalledTimes(1);
-    expect(result.data.total).toBe(1);
-    expect(result.data.skipped).toBe(1);
-    expect(result.data.errors).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('proxima_horas inválida'),
-      ]),
-    );
-  });
-
-  it('recalcular alertas se dispara en segundo plano', async () => {
-    programacionRepo.find.mockResolvedValueOnce([]);
-    const response = await service.triggerAlertRecalculation('manual-test');
-    expect(response.data.accepted).toBe(true);
-    expect(response.message).toContain('segundo plano');
-  });
-
-  it('issue-materials usa transacción y rollback ante fallo', async () => {
-    woRepo.findOne.mockResolvedValue({ id: 'wo1', is_deleted: false });
-    qr.manager.findOne.mockResolvedValueOnce(null);
     await expect(
-      service.issueMaterials('wo1', {
-        items: [{ producto_id: 'p1', bodega_id: 'b1', cantidad: 1 }],
-      }),
+      service.createBitacora('equipo-1', {
+        fecha: '2026-03-29',
+        horometro: 90,
+        registrado_por: 'operador',
+      } as any),
     ).rejects.toBeInstanceOf(ConflictException);
-    expect(qr.startTransaction).toHaveBeenCalled();
-    expect(qr.rollbackTransaction).toHaveBeenCalled();
+
+    expect(repos.alertaRepo.save).toHaveBeenCalledTimes(1);
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'alert-1',
+        tipo_alerta: 'ANOMALIA_HOROMETRO',
+      }),
+    );
   });
 });

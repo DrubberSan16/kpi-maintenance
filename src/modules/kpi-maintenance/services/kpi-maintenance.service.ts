@@ -21,6 +21,7 @@ import {
 } from 'fs/promises';
 import { basename, extname, join } from 'path';
 import * as XLSX from 'xlsx';
+import nodemailer, { type Transporter } from 'nodemailer';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
@@ -193,6 +194,25 @@ type AlertCandidate = {
   referencia?: string | null;
   detalle: string;
   payload_json: Record<string, unknown>;
+};
+
+type SecurityUserDirectoryItem = {
+  id: string | null;
+  nameUser: string | null;
+  nameSurname: string | null;
+  email: string | null;
+  roleName: string | null;
+  status: string | null;
+  isDeleted: boolean;
+};
+
+type AlertNotificationRecipient = {
+  type: 'TRANSACTION_OWNER' | 'GENERAL_MANAGER' | 'ADMINISTRATOR';
+  email: string;
+  userId?: string | null;
+  username?: string | null;
+  displayName?: string | null;
+  roleName?: string | null;
 };
 
 type AnalisisLubricanteSaveOptions = {
@@ -790,10 +810,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const [productos, bodegas] = await Promise.all([
       uniqueProductIds.length
-        ? this.productoRepo.find({ where: { id: In(uniqueProductIds) } })
+        ? this.productoRepo.find({
+            where: { id: In(uniqueProductIds), is_deleted: false },
+          })
         : Promise.resolve([] as ProductoEntity[]),
       uniqueWarehouseIds.length
-        ? this.bodegaRepo.find({ where: { id: In(uniqueWarehouseIds) } })
+        ? this.bodegaRepo.find({
+            where: { id: In(uniqueWarehouseIds), is_deleted: false },
+          })
         : Promise.resolve([] as BodegaEntity[]),
     ]);
 
@@ -1230,6 +1254,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     process.env.PUBLIC_BASE_URL || process.env.APP_PUBLIC_URL || ''
   ).replace(/\/$/, '');
 
+  private readonly alertMailFromAddress = String(
+    process.env.ALERT_EMAIL_FROM ||
+      process.env.MAIL_FROM_ADDRESS ||
+      process.env.SMTP_FROM_EMAIL ||
+      '',
+  ).trim();
+
+  private readonly alertMailFromName = String(
+    process.env.ALERT_EMAIL_FROM_NAME ||
+      process.env.MAIL_FROM_NAME ||
+      'Justice KPI Alerts',
+  ).trim();
+
+  private readonly alertGeneralManagerEmail = String(
+    process.env.ALERT_GENERAL_MANAGER_EMAIL ||
+      process.env.GENERAL_MANAGER_EMAIL ||
+      '',
+  ).trim();
+
+  private readonly alertAdministratorEmail = String(
+    process.env.ALERT_ADMINISTRATOR_EMAIL ||
+      process.env.ADMINISTRATOR_EMAIL ||
+      '',
+  ).trim();
+
+  private securityUsersCache:
+    | { expiresAt: number; items: SecurityUserDirectoryItem[] }
+    | null = null;
+  private mailTransporter: Transporter | null = null;
+  private mailTransportVerified = false;
+
   private toNumeric(value: unknown, fallback = 0) {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
@@ -1576,6 +1631,617 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
     } catch (error: any) {
       this.logger.warn(`No se pudo registrar log transaccional: ${error?.message ?? 'desconocido'}`);
+    }
+  }
+
+  private async getJson(url: string) {
+    const response = await fetch(url, { method: 'GET' });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
+    }
+    return response.json().catch(() => null);
+  }
+
+  private unwrapServiceData<T>(input: any): T {
+    if (input && typeof input === 'object' && 'data' in input) {
+      return input.data as T;
+    }
+    return input as T;
+  }
+
+  private firstNonEmptyString(...values: unknown[]) {
+    for (const value of values) {
+      const normalized = String(value ?? '').trim();
+      if (normalized) return normalized;
+    }
+    return null;
+  }
+
+  private normalizeEmail(value: unknown) {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (!normalized) return null;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : null;
+  }
+
+  private normalizeUsername(value: unknown) {
+    return String(value ?? '').trim().toLowerCase() || null;
+  }
+
+  private normalizeRoleName(value: unknown) {
+    return String(value ?? '')
+      .trim()
+      .toUpperCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+  }
+
+  private extractAlertActorHints(payload: Record<string, unknown>) {
+    const sampleInfo =
+      payload.sample_info && typeof payload.sample_info === 'object'
+        ? (payload.sample_info as Record<string, unknown>)
+        : {};
+    return {
+      userId: this.firstNonEmptyString(
+        payload.actor_user_id,
+        payload.user_id,
+        payload.requested_user_id,
+        sampleInfo.actor_user_id,
+      ),
+      username: this.firstNonEmptyString(
+        payload.actor_username,
+        payload.updated_by,
+        payload.created_by,
+        payload.requested_by,
+        payload.registrado_por,
+        payload.source_updated_by,
+        payload.source_created_by,
+        sampleInfo.actor_username,
+      ),
+      email: this.normalizeEmail(
+        this.firstNonEmptyString(
+          payload.actor_email,
+          payload.updated_by_email,
+          payload.created_by_email,
+          payload.requested_by_email,
+          payload.source_updated_by_email,
+          payload.source_created_by_email,
+          sampleInfo.actor_email,
+        ),
+      ),
+      displayName: this.firstNonEmptyString(
+        payload.actor_name,
+        payload.requested_by_name,
+        sampleInfo.actor_name,
+      ),
+      roleName: this.firstNonEmptyString(payload.actor_role, sampleInfo.actor_role),
+    };
+  }
+
+  private async fetchSecurityUsers(force = false) {
+    const now = Date.now();
+    if (
+      !force &&
+      this.securityUsersCache &&
+      this.securityUsersCache.expiresAt > now
+    ) {
+      return this.securityUsersCache.items;
+    }
+    if (!this.securityServiceUrl) return [];
+
+    try {
+      const separator = this.securityServiceUrl.includes('?') ? '&' : '?';
+      const raw = await this.getJson(
+        `${this.securityServiceUrl}/users${separator}includeDeleted=true`,
+      );
+      const items = this.unwrapServiceData<any[]>(raw);
+      const normalized = Array.isArray(items)
+        ? items.map((item) => ({
+            id: this.firstNonEmptyString(item?.id),
+            nameUser: this.firstNonEmptyString(item?.nameUser),
+            nameSurname: this.firstNonEmptyString(item?.nameSurname),
+            email: this.normalizeEmail(item?.email),
+            roleName: this.firstNonEmptyString(
+              item?.role?.nombre,
+              item?.roleName,
+              item?.role_nombre,
+            ),
+            status: this.firstNonEmptyString(item?.status),
+            isDeleted: Boolean(item?.isDeleted ?? item?.is_deleted ?? false),
+          }))
+        : [];
+      this.securityUsersCache = {
+        expiresAt: now + 5 * 60 * 1000,
+        items: normalized,
+      };
+      return normalized;
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo consultar usuarios de seguridad: ${error?.message ?? 'desconocido'}`,
+      );
+      return [];
+    }
+  }
+
+  private findSecurityUserByHints(
+    users: SecurityUserDirectoryItem[],
+    hints: {
+      userId?: string | null;
+      username?: string | null;
+      email?: string | null;
+    },
+  ) {
+    const userId = this.firstNonEmptyString(hints.userId);
+    const username = this.normalizeUsername(hints.username);
+    const email = this.normalizeEmail(hints.email);
+
+    return (
+      users.find(
+        (item) =>
+          !item.isDeleted &&
+          String(item.status || 'ACTIVE').trim().toUpperCase() === 'ACTIVE' &&
+          ((userId && item.id === userId) ||
+            (username &&
+              this.normalizeUsername(item.nameUser) === username) ||
+            (email && this.normalizeEmail(item.email) === email)),
+      ) ?? null
+    );
+  }
+
+  private findSecurityUserByRole(
+    users: SecurityUserDirectoryItem[],
+    matcher: (roleName: string) => boolean,
+  ) {
+    return (
+      users.find((item) => {
+        if (item.isDeleted) return false;
+        if (String(item.status || 'ACTIVE').trim().toUpperCase() !== 'ACTIVE') {
+          return false;
+        }
+        return matcher(this.normalizeRoleName(item.roleName));
+      }) ?? null
+    );
+  }
+
+  private getAlertNotificationRecipientsUserIds(
+    recipients: AlertNotificationRecipient[],
+  ) {
+    return [
+      ...new Set(
+        recipients
+          .map((item) => String(item.userId || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+  }
+
+  private async resolveAlertNotificationRecipients(
+    payload: Record<string, unknown>,
+  ) {
+    const users = await this.fetchSecurityUsers();
+    const actorHints = this.extractAlertActorHints(payload);
+    const actorUser = this.findSecurityUserByHints(users, actorHints);
+    const managerUser = this.findSecurityUserByRole(users, (roleName) =>
+      ['GERENTE GENERAL', 'GERENCIA GENERAL'].some((expected) =>
+        roleName.includes(expected),
+      ),
+    );
+    const adminUser = this.findSecurityUserByRole(users, (roleName) =>
+      ['ADMINISTRADOR', 'ADMIN', 'SUPER ADMIN', 'SUPERADMIN'].some((expected) =>
+        roleName.includes(expected),
+      ),
+    );
+
+    const candidates: AlertNotificationRecipient[] = [];
+
+    const pushRecipient = (
+      type: AlertNotificationRecipient['type'],
+      emailValue: unknown,
+      options?: {
+        userId?: string | null;
+        username?: string | null;
+        displayName?: string | null;
+        roleName?: string | null;
+      },
+    ) => {
+      const email = this.normalizeEmail(emailValue);
+      if (!email) return;
+      candidates.push({
+        type,
+        email,
+        userId: options?.userId ?? null,
+        username: options?.username ?? null,
+        displayName: options?.displayName ?? null,
+        roleName: options?.roleName ?? null,
+      });
+    };
+
+    pushRecipient(
+      'TRANSACTION_OWNER',
+      actorUser?.email ?? actorHints.email,
+      actorUser
+        ? {
+            userId: actorUser.id,
+            username: actorUser.nameUser,
+            displayName: actorUser.nameSurname ?? actorUser.nameUser,
+            roleName: actorUser.roleName,
+          }
+        : {
+            userId: actorHints.userId,
+            username: actorHints.username,
+            displayName: actorHints.displayName,
+            roleName: actorHints.roleName,
+          },
+    );
+    pushRecipient(
+      'GENERAL_MANAGER',
+      this.alertGeneralManagerEmail || managerUser?.email,
+      managerUser
+        ? {
+            userId: managerUser.id,
+            username: managerUser.nameUser,
+            displayName: managerUser.nameSurname ?? managerUser.nameUser,
+            roleName: managerUser.roleName,
+          }
+        : {
+            displayName: 'Gerencia General',
+            roleName: 'GERENTE GENERAL',
+          },
+    );
+    pushRecipient(
+      'ADMINISTRATOR',
+      this.alertAdministratorEmail || adminUser?.email,
+      adminUser
+        ? {
+            userId: adminUser.id,
+            username: adminUser.nameUser,
+            displayName: adminUser.nameSurname ?? adminUser.nameUser,
+            roleName: adminUser.roleName,
+          }
+        : {
+            displayName: 'Administrador',
+            roleName: 'ADMINISTRADOR',
+          },
+    );
+
+    const deduped = new Map<string, AlertNotificationRecipient>();
+    for (const item of candidates) {
+      if (!deduped.has(item.email)) {
+        deduped.set(item.email, item);
+      }
+    }
+    return [...deduped.values()];
+  }
+
+  private getAlertEmailLevelColor(level: string) {
+    const normalized = this.normalizeAlertLevel(level);
+    if (normalized === 'CRITICAL') return '#C62828';
+    if (normalized === 'WARNING') return '#F57C00';
+    return '#1565C0';
+  }
+
+  private getAlertEmailLevelLabel(level: string) {
+    const normalized = this.normalizeAlertLevel(level);
+    if (normalized === 'CRITICAL') return 'Critica';
+    if (normalized === 'WARNING') return 'Preventiva';
+    return 'Informativa';
+  }
+
+  private escapeHtml(value: unknown) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  private formatAlertEmailDate(value: unknown) {
+    const date = value instanceof Date ? value : new Date(String(value || ''));
+    if (Number.isNaN(date.getTime())) return 'No disponible';
+    return new Intl.DateTimeFormat('es-EC', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'America/Guayaquil',
+    }).format(date);
+  }
+
+  private buildAlertConsoleUrl() {
+    if (!this.publicBaseUrl) return null;
+    return `${this.publicBaseUrl}/alertas`;
+  }
+
+  private buildAlertEmailSubject(
+    row: AlertaMantenimientoEntity,
+    recipient: AlertNotificationRecipient,
+  ) {
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const equipo = this.firstNonEmptyString(
+      payload.equipo_codigo,
+      payload.equipo_nombre,
+      row.equipo_id,
+      'General',
+    );
+    const kind =
+      recipient.type === 'TRANSACTION_OWNER'
+        ? 'Proceso transaccionado'
+        : recipient.type === 'GENERAL_MANAGER'
+          ? 'Gerencia general'
+          : 'Administrador';
+    return `[Alerta ${this.getAlertEmailLevelLabel(row.nivel)}] ${equipo} · ${row.categoria} · ${kind}`;
+  }
+
+  private buildAlertEmailHtml(
+    row: AlertaMantenimientoEntity,
+    recipient: AlertNotificationRecipient,
+  ) {
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const accent = this.getAlertEmailLevelColor(row.nivel);
+    const recipientLabel =
+      recipient.displayName ||
+      recipient.username ||
+      (recipient.type === 'TRANSACTION_OWNER'
+        ? 'equipo operativo'
+        : recipient.type === 'GENERAL_MANAGER'
+          ? 'gerencia general'
+          : 'administracion');
+    const equipo = this.firstNonEmptyString(
+      payload.equipo_codigo,
+      payload.equipo_nombre,
+      row.equipo_id,
+      'General',
+    );
+    const consoleUrl = this.buildAlertConsoleUrl();
+    const reference = this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id);
+
+    return `
+      <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
+        <div style="max-width:760px;margin:0 auto;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(21,49,75,0.12);">
+          <div style="padding:28px 32px;background:${accent};color:#ffffff;">
+            <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.9;">Justice KPI · Alertas operativas</div>
+            <h1 style="margin:10px 0 6px;font-size:26px;line-height:1.2;">${this.escapeHtml(
+              row.categoria,
+            )} · ${this.escapeHtml(this.getAlertEmailLevelLabel(row.nivel))}</h1>
+            <div style="font-size:15px;opacity:0.95;">Se genero una alerta que requiere seguimiento oportuno.</div>
+          </div>
+          <div style="padding:28px 32px;">
+            <p style="margin:0 0 18px;font-size:15px;line-height:1.6;">Hola ${this.escapeHtml(
+              recipientLabel,
+            )}, el sistema detecto una condicion operativa y te comparte el resumen para que puedas actuar con claridad.</p>
+            <div style="border:1px solid #dbe4f0;border-radius:16px;padding:18px 20px;background:#f9fbff;">
+              <div style="font-size:13px;color:#5f7388;text-transform:uppercase;letter-spacing:0.08em;">Detalle principal</div>
+              <div style="margin-top:10px;font-size:20px;font-weight:700;color:#10263c;">${this.escapeHtml(
+                row.detalle || 'Alerta operativa',
+              )}</div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:18px;">
+              ${[
+                ['Estado', row.estado],
+                ['Origen', row.origen],
+                ['Equipo', equipo],
+                ['Tipo', row.tipo_alerta],
+                ['Referencia', reference],
+                ['Generada', this.formatAlertEmailDate(row.fecha_generada)],
+              ]
+                .map(
+                  ([label, value]) => `
+                    <div style="border:1px solid #e4ebf3;border-radius:14px;padding:14px 16px;">
+                      <div style="font-size:12px;color:#71859b;text-transform:uppercase;letter-spacing:0.08em;">${this.escapeHtml(
+                        label,
+                      )}</div>
+                      <div style="margin-top:8px;font-size:15px;font-weight:600;color:#193550;">${this.escapeHtml(
+                        value,
+                      )}</div>
+                    </div>`,
+                )
+                .join('')}
+            </div>
+            ${
+              consoleUrl
+                ? `<div style="margin-top:24px;">
+                    <a href="${this.escapeHtml(
+                      consoleUrl,
+                    )}" style="display:inline-block;padding:13px 22px;border-radius:999px;background:${accent};color:#ffffff;text-decoration:none;font-weight:700;">
+                      Abrir modulo de alertas
+                    </a>
+                  </div>`
+                : ''
+            }
+            <div style="margin-top:24px;padding-top:18px;border-top:1px solid #e7edf5;color:#5f7388;font-size:13px;line-height:1.6;">
+              Este correo se envio automaticamente desde el modulo de alertas de mantenimiento para mantener alineados al usuario transaccionante, gerencia general y administracion.
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private buildAlertEmailText(
+    row: AlertaMantenimientoEntity,
+    recipient: AlertNotificationRecipient,
+  ) {
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const equipo = this.firstNonEmptyString(
+      payload.equipo_codigo,
+      payload.equipo_nombre,
+      row.equipo_id,
+      'General',
+    );
+    return [
+      `Hola ${recipient.displayName || recipient.username || 'usuario'},`,
+      '',
+      'Se genero una alerta operativa en Justice KPI.',
+      '',
+      `Categoria: ${row.categoria}`,
+      `Nivel: ${this.getAlertEmailLevelLabel(row.nivel)}`,
+      `Estado: ${row.estado}`,
+      `Origen: ${row.origen}`,
+      `Equipo: ${equipo}`,
+      `Tipo: ${row.tipo_alerta}`,
+      `Detalle: ${row.detalle || 'Alerta operativa'}`,
+      `Referencia: ${this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id)}`,
+      `Fecha: ${this.formatAlertEmailDate(row.fecha_generada)}`,
+      '',
+      this.buildAlertConsoleUrl()
+        ? `Revisa el modulo de alertas en: ${this.buildAlertConsoleUrl()}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private async getAlertMailTransporter() {
+    if (this.mailTransporter) return this.mailTransporter;
+
+    const host = String(
+      process.env.ALERT_SMTP_HOST ||
+        process.env.SMTP_HOST ||
+        process.env.MAIL_HOST ||
+        '',
+    ).trim();
+    const port = Number(
+      process.env.ALERT_SMTP_PORT ||
+        process.env.SMTP_PORT ||
+        process.env.MAIL_PORT ||
+        587,
+    );
+    const user = String(
+      process.env.ALERT_SMTP_USER ||
+        process.env.SMTP_USER ||
+        process.env.MAIL_USER ||
+        '',
+    ).trim();
+    const pass = String(
+      process.env.ALERT_SMTP_PASS ||
+        process.env.SMTP_PASS ||
+        process.env.MAIL_PASS ||
+        '',
+    ).trim();
+    const secure = this.coerceBoolean(
+      process.env.ALERT_SMTP_SECURE ||
+        process.env.SMTP_SECURE ||
+        process.env.MAIL_SECURE,
+      port === 465,
+    );
+
+    if (!host || !port || !this.alertMailFromAddress) {
+      return null;
+    }
+
+    this.mailTransporter = nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth: user ? { user, pass } : undefined,
+    });
+
+    if (!this.mailTransportVerified) {
+      try {
+        await this.mailTransporter.verify();
+        this.mailTransportVerified = true;
+      } catch (error: any) {
+        this.logger.warn(
+          `No se pudo verificar transporte SMTP de alertas: ${error?.message ?? 'desconocido'}`,
+        );
+      }
+    }
+
+    return this.mailTransporter;
+  }
+
+  private async sendAlertTriggerEmails(row: AlertaMantenimientoEntity) {
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const recipients = await this.resolveAlertNotificationRecipients(payload);
+    if (!recipients.length) {
+      return {
+        recipients: [],
+        userIds: [] as string[],
+        sent: [] as string[],
+        failed: [] as string[],
+        skippedReason: 'No se encontraron destinatarios para la alerta.',
+      };
+    }
+
+    const transporter = await this.getAlertMailTransporter();
+    const sent: string[] = [];
+    const failed: string[] = [];
+
+    if (transporter) {
+      for (const recipient of recipients) {
+        try {
+          await transporter.sendMail({
+            from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+            to: recipient.email,
+            subject: this.buildAlertEmailSubject(row, recipient),
+            html: this.buildAlertEmailHtml(row, recipient),
+            text: this.buildAlertEmailText(row, recipient),
+          });
+          sent.push(recipient.email);
+        } catch (error: any) {
+          failed.push(recipient.email);
+          this.logger.warn(
+            `No se pudo enviar correo de alerta a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+          );
+        }
+      }
+    }
+
+    return {
+      recipients,
+      userIds: this.getAlertNotificationRecipientsUserIds(recipients),
+      sent,
+      failed,
+      skippedReason: transporter
+        ? null
+        : 'SMTP no configurado para envio de alertas.',
+    };
+  }
+
+  private async dispatchAlertTriggeredNotifications(
+    row: AlertaMantenimientoEntity,
+  ) {
+    try {
+      const emailResult = await this.sendAlertTriggerEmails(row);
+      const inAppRecipients = emailResult.userIds;
+
+      if (inAppRecipients.length) {
+        await this.publishInAppNotification({
+          title: `Alerta ${this.getAlertEmailLevelLabel(row.nivel)} · ${row.categoria}`,
+          body: row.detalle || 'Se genero una nueva alerta operativa.',
+          module: 'maintenance',
+          entityType: 'alerta',
+          entityId: row.id,
+          level: this.normalizeAlertLevel(row.nivel).toLowerCase(),
+          recipients: inAppRecipients,
+        });
+      }
+
+      row.payload_json = {
+        ...((row.payload_json ?? {}) as Record<string, unknown>),
+        alert_notification: {
+          triggered_at: new Date().toISOString(),
+          recipients: emailResult.recipients.map((item) => ({
+            type: item.type,
+            email: item.email,
+            user_id: item.userId ?? null,
+            username: item.username ?? null,
+          })),
+          email_sent: emailResult.sent,
+          email_failed: emailResult.failed,
+          in_app_recipients: inAppRecipients,
+          skipped_reason: emailResult.skippedReason,
+        },
+      };
+      await this.alertaRepo.save(row);
+
+      await this.writeSecurityLog({
+        typeLog: 'ALERTA_NOTIFICADA',
+        description: `[ALERTA:${row.id}] Notificacion enviada. Exitosas=${emailResult.sent.length}, fallidas=${emailResult.failed.length}`,
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudieron emitir notificaciones de alerta ${row.id}: ${error?.message ?? 'desconocido'}`,
+      );
     }
   }
 
@@ -4150,6 +4816,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
 
     return programaciones.flatMap((row: any) => {
+      const sourcePayload = (row.payload_json ?? {}) as Record<string, unknown>;
       const estado = String(row.estado_programacion || '').toUpperCase();
       if (!['VENCIDA', 'PROXIMA'].includes(estado)) return [];
 
@@ -4214,6 +4881,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             dias_restantes: daysRemaining,
             proxima_horas: row.proxima_horas ?? null,
             proxima_fecha: row.proxima_fecha ?? null,
+            actor_user_id: this.firstNonEmptyString(
+              sourcePayload.actor_user_id,
+              sourcePayload.user_id,
+            ),
+            actor_username: this.firstNonEmptyString(
+              sourcePayload.actor_username,
+              sourcePayload.updated_by,
+              sourcePayload.created_by,
+              sourcePayload.requested_by,
+            ),
+            actor_email: this.normalizeEmail(
+              this.firstNonEmptyString(
+                sourcePayload.actor_email,
+                sourcePayload.updated_by_email,
+                sourcePayload.created_by_email,
+                sourcePayload.requested_by_email,
+              ),
+            ),
+            actor_name: this.firstNonEmptyString(sourcePayload.actor_name),
+            actor_role: this.firstNonEmptyString(sourcePayload.actor_role),
           },
         },
       ];
@@ -4259,6 +4946,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!dueNow && !dueSoon) return [];
 
       const reporte = row.reporte_id ? reportMap.get(row.reporte_id) : null;
+      const reportPayload = ((reporte?.payload_json ?? {}) ||
+        {}) as Record<string, unknown>;
       const equipoLabel = row.equipo_codigo || row.equipo_id || 'Unidad';
       const mpgLabel = row.proximo_mpg ? ` · ${row.proximo_mpg}` : '';
       const timing: string[] = [];
@@ -4306,6 +4995,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             dias_faltantes: daysRemaining,
             fecha_proxima: row.fecha_proxima ?? null,
             nota: row.nota ?? null,
+            actor_username: this.firstNonEmptyString(
+              reporte?.updated_by,
+              reporte?.created_by,
+              reportPayload.actor_username,
+              reportPayload.updated_by,
+              reportPayload.created_by,
+            ),
+            actor_email: this.normalizeEmail(
+              this.firstNonEmptyString(
+                reportPayload.actor_email,
+                reportPayload.updated_by_email,
+                reportPayload.created_by_email,
+              ),
+            ),
+            actor_user_id: this.firstNonEmptyString(reportPayload.actor_user_id),
+            actor_name: this.firstNonEmptyString(reportPayload.actor_name),
+            actor_role: this.firstNonEmptyString(reportPayload.actor_role),
           },
         },
       ];
@@ -4346,6 +5052,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     return latestRows.flatMap((row) => {
+      const sourcePayload = (row.payload_json ?? {}) as Record<string, unknown>;
       const rowDetails = detailsMap.get(row.id) ?? [];
       const abnormalDetails = rowDetails.filter(
         (detalle) => this.normalizeAlertLevel(detalle.nivel_alerta) !== 'INFO',
@@ -4399,6 +5106,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             estado_diagnostico: row.estado_diagnostico,
             diagnostico: row.diagnostico ?? null,
             documento_origen: row.documento_origen ?? null,
+            actor_username: this.firstNonEmptyString(
+              row.updated_by,
+              row.created_by,
+              sourcePayload.actor_username,
+              sourcePayload.updated_by,
+              sourcePayload.created_by,
+            ),
+            actor_email: this.normalizeEmail(
+              this.firstNonEmptyString(
+                sourcePayload.actor_email,
+                sourcePayload.updated_by_email,
+                sourcePayload.created_by_email,
+              ),
+            ),
+            actor_user_id: this.firstNonEmptyString(sourcePayload.actor_user_id),
+            actor_name: this.firstNonEmptyString(sourcePayload.actor_name),
+            actor_role: this.firstNonEmptyString(sourcePayload.actor_role),
             parametros_alerta: abnormalDetails.map((detalle) => ({
               parametro: detalle.parametro,
               nivel_alerta: detalle.nivel_alerta,
@@ -4450,6 +5174,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!isCritical && !isWarning) return [];
 
       const reporte = row.reporte_id ? reportMap.get(row.reporte_id) : null;
+      const reportPayload = ((reporte?.payload_json ?? {}) ||
+        {}) as Record<string, unknown>;
       return [
         {
           equipo_id: null,
@@ -4480,6 +5206,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 ? null
                 : this.toNumeric(row.consumo_galones),
             observacion: row.observacion ?? null,
+            actor_username: this.firstNonEmptyString(
+              reporte?.updated_by,
+              reporte?.created_by,
+              reportPayload.actor_username,
+              reportPayload.updated_by,
+              reportPayload.created_by,
+            ),
+            actor_email: this.normalizeEmail(
+              this.firstNonEmptyString(
+                reportPayload.actor_email,
+                reportPayload.updated_by_email,
+                reportPayload.created_by_email,
+              ),
+            ),
+            actor_user_id: this.firstNonEmptyString(reportPayload.actor_user_id),
+            actor_name: this.firstNonEmptyString(reportPayload.actor_name),
+            actor_role: this.firstNonEmptyString(reportPayload.actor_role),
           },
         },
       ];
@@ -4487,7 +5230,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async buildInventoryAlertCandidates(): Promise<AlertCandidate[]> {
-    const rows = await this.stockRepo.find();
+    const rows = await this.stockRepo.find({ where: { is_deleted: false } });
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       rows.map((row) => row.producto_id),
       rows.map((row) => row.bodega_id),
@@ -4530,6 +5273,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             stock_min_bodega: stockMinimo,
             stock_max_bodega: this.toNumeric(row.stock_max_bodega),
             costo_promedio_bodega: this.toNumeric(row.costo_promedio_bodega),
+            actor_username: this.firstNonEmptyString(
+              row.updated_by,
+              row.created_by,
+            ),
+            actor_email: null,
+            actor_user_id: null,
           },
         },
       ];
@@ -4598,6 +5347,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const nextDetalle = String(candidate.detalle || '').trim() || null;
         const preservedWorkOrders = this.extractAlertWorkOrderSnapshots(existing);
         const nextPayload = {
+          ...((existing.payload_json ?? {}) as Record<string, unknown>),
           ...(candidate.payload_json ?? {}),
           ...(preservedWorkOrders.length
             ? { work_orders: preservedWorkOrders }
@@ -4630,7 +5380,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
 
-      await this.alertaRepo.save(
+      const createdRow = await this.alertaRepo.save(
         this.alertaRepo.create({
           equipo_id: candidate.equipo_id ?? null,
           tipo_alerta: candidate.tipo_alerta,
@@ -4647,6 +5397,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           estado: 'ABIERTA',
         }),
       );
+      await this.dispatchAlertTriggeredNotifications(createdRow);
       created += 1;
     }
 
@@ -5248,7 +5999,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       order: { fecha: 'DESC', created_at: 'DESC' },
     });
     if (last && Number(dto.horometro) < Number(last.horometro)) {
-      await this.alertaRepo.save(
+      const createdAlert = await this.alertaRepo.save(
         this.alertaRepo.create({
           equipo_id: equipoId,
           tipo_alerta: 'ANOMALIA_HOROMETRO',
@@ -5262,10 +6013,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             fecha: dto.fecha,
             nuevo_horometro: this.toNumeric(dto.horometro),
             ultimo_horometro: this.toNumeric(last.horometro),
+            actor_username: this.firstNonEmptyString(dto.registrado_por),
           },
           detalle: `Horómetro ${dto.horometro} menor al último ${last.horometro}`,
         }),
       );
+      await this.dispatchAlertTriggeredNotifications(createdAlert);
       throw new ConflictException('El horómetro no puede retroceder');
     }
     const saved = await this.bitacoraRepo.save(
@@ -6475,11 +7228,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               compartimento_principal: dto.compartimento_principal ?? null,
               fecha_muestra: this.toDateOnlyString(dto.fecha_muestra),
               fecha_reporte: this.toDateOnlyString(dto.fecha_reporte),
-              diagnostico: resolvedDiagnostic,
-              estado_diagnostico: inferredState,
-              documento_origen: dto.documento_origen ?? null,
-              payload_json: finalPayloadJson,
-            }),
+            diagnostico: resolvedDiagnostic,
+            estado_diagnostico: inferredState,
+            documento_origen: dto.documento_origen ?? null,
+            payload_json: finalPayloadJson,
+            created_by: this.firstNonEmptyString(
+              finalPayloadJson.actor_username,
+              finalPayloadJson.created_by,
+              finalPayloadJson.updated_by,
+            ),
+            updated_by: this.firstNonEmptyString(
+              finalPayloadJson.actor_username,
+              finalPayloadJson.updated_by,
+              finalPayloadJson.created_by,
+            ),
+          }),
           );
 
           if (preparedDetalles.length) {
@@ -6665,6 +7428,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           lubricante: lubricanteIdentity.lubricante,
           marca_lubricante: lubricanteIdentity.marca_lubricante,
         }),
+        updated_by: this.firstNonEmptyString(
+          finalPayloadJson.actor_username,
+          finalPayloadJson.updated_by,
+          finalPayloadJson.created_by,
+          row.updated_by,
+          row.created_by,
+        ),
       });
       await analisisRepo.save(row);
 
@@ -8177,10 +8947,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async importProgramacionMensualWorkbook(file?: {
-    buffer?: Buffer;
-    originalname?: string;
-  } | null) {
+  async importProgramacionMensualWorkbook(
+    file?: {
+      buffer?: Buffer;
+      originalname?: string;
+    } | null,
+    options?: {
+      requested_by?: string | null;
+      requested_by_email?: string | null;
+      requested_user_id?: string | null;
+    },
+  ) {
     if (!file?.buffer) {
       throw new BadRequestException(
         'Debes adjuntar el archivo Excel de programación mensual.',
@@ -8192,6 +8969,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       String(file.originalname || 'programacion_mensual.xlsx'),
     );
 
+    const requestedBy = this.firstNonEmptyString(options?.requested_by);
+    const requestedByEmail = this.normalizeEmail(options?.requested_by_email);
+    const requestedUserId = this.firstNonEmptyString(options?.requested_user_id);
+
     const savedId = await this.dataSource.transaction(async (manager) => {
       const headerRepo = manager.getRepository(ProgramacionMensualEntity);
       const detailRepo = manager.getRepository(ProgramacionMensualDetalleEntity);
@@ -8199,6 +8980,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const header = await headerRepo.save(
         headerRepo.create({
           ...parsed.header,
+          created_by: requestedBy,
+          updated_by: requestedBy,
+          payload_json: {
+            ...((parsed.header.payload_json ?? {}) as Record<string, unknown>),
+            actor_username: requestedBy,
+            actor_email: requestedByEmail,
+            actor_user_id: requestedUserId,
+            requested_by: requestedBy,
+            requested_by_email: requestedByEmail,
+          },
         }),
       );
 
@@ -8230,6 +9021,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 detail.payload_json?.horometro_actual ?? null,
               horometro_programado:
                 detail.payload_json?.horometro_programado ?? null,
+              actor_username: requestedBy,
+              actor_email: requestedByEmail,
+              actor_user_id: requestedUserId,
             },
           });
           programacionId = programacion.id;
@@ -8240,6 +9034,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             programacion_mensual_id: header.id,
             programacion_id: programacionId,
             ...detail,
+            payload_json: {
+              ...(detail.payload_json ?? {}),
+              actor_username: requestedBy,
+              actor_email: requestedByEmail,
+              actor_user_id: requestedUserId,
+            },
           }),
         );
       }
@@ -8376,10 +9176,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async importCronogramaSemanalWorkbook(file?: {
-    buffer?: Buffer;
-    originalname?: string;
-  } | null) {
+  async importCronogramaSemanalWorkbook(
+    file?: {
+      buffer?: Buffer;
+      originalname?: string;
+    } | null,
+    options?: {
+      requested_by?: string | null;
+      requested_by_email?: string | null;
+      requested_user_id?: string | null;
+    },
+  ) {
     if (!file?.buffer) {
       throw new BadRequestException(
         'Debes adjuntar el archivo Excel del cronograma semanal.',
@@ -8390,7 +9197,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       file.buffer,
       String(file.originalname || 'cronograma_semanal.xlsx'),
     );
-    const created = await this.createCronogramaSemanal(parsed.dto);
+    const created = await this.createCronogramaSemanal({
+      ...parsed.dto,
+      payload_json: {
+        ...((parsed.dto.payload_json ?? {}) as Record<string, unknown>),
+        actor_username: this.firstNonEmptyString(options?.requested_by),
+        actor_email: this.normalizeEmail(options?.requested_by_email),
+        actor_user_id: this.firstNonEmptyString(options?.requested_user_id),
+      },
+    });
     return this.wrap(
       {
         cronograma: created.data,
@@ -8427,6 +9242,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const cronogramaRepo = manager.getRepository(CronogramaSemanalEntity);
       const detalleRepo = manager.getRepository(CronogramaSemanalDetalleEntity);
       const row = cronogramaRepo.create();
+      const payloadJson = ((dto.payload_json ?? {}) ||
+        {}) as Record<string, unknown>;
       Object.assign(row, {
         codigo: dto.codigo,
         fecha_inicio: dto.fecha_inicio.slice(0, 10),
@@ -8435,7 +9252,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         referencia_orden: dto.referencia_orden ?? null,
         documento_origen: dto.documento_origen ?? null,
         resumen: dto.resumen ?? null,
-        payload_json: dto.payload_json ?? {},
+        payload_json: payloadJson,
+        created_by: this.firstNonEmptyString(
+          payloadJson.actor_username,
+          payloadJson.created_by,
+          payloadJson.updated_by,
+        ),
+        updated_by: this.firstNonEmptyString(
+          payloadJson.actor_username,
+          payloadJson.updated_by,
+          payloadJson.created_by,
+        ),
       });
       await cronogramaRepo.save(row);
 
@@ -8592,6 +9419,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const combustibleRepo = manager.getRepository(ReporteCombustibleEntity);
       const componenteRepo = manager.getRepository(ControlComponenteEntity);
 
+      const payloadJson = ((dto.payload_json ?? {}) ||
+        {}) as Record<string, unknown>;
       const row = reporteRepo.create();
       Object.assign(row, {
         codigo: dto.codigo,
@@ -8600,7 +9429,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         turno: dto.turno ?? null,
         documento_origen: dto.documento_origen ?? null,
         resumen: dto.resumen ?? null,
-        payload_json: dto.payload_json ?? {},
+        payload_json: payloadJson,
+        created_by: this.firstNonEmptyString(
+          payloadJson.actor_username,
+          payloadJson.created_by,
+          payloadJson.updated_by,
+        ),
+        updated_by: this.firstNonEmptyString(
+          payloadJson.actor_username,
+          payloadJson.updated_by,
+          payloadJson.created_by,
+        ),
       });
       await reporteRepo.save(row);
 
@@ -8726,6 +9565,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
         resumen: dto.resumen ?? row.resumen ?? null,
         payload_json: dto.payload_json ?? row.payload_json ?? {},
+        updated_by: this.firstNonEmptyString(
+          (dto.payload_json ?? {})?.['actor_username'],
+          (dto.payload_json ?? {})?.['updated_by'],
+          (dto.payload_json ?? {})?.['created_by'],
+          row.updated_by,
+          row.created_by,
+        ),
       });
       await reporteRepo.save(row);
 

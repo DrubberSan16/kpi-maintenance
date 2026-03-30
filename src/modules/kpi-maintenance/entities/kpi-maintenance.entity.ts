@@ -719,6 +719,9 @@ export class StockBodegaEntity {
   stock_contenedores: number;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   costo_promedio_bodega: number;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_reserva_stock' })
@@ -809,6 +812,7 @@ export class ProductoEntity {
   @Column({ type: 'varchar', length: 250, nullable: true }) nombre?: string | null;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   ultimo_costo: number;
+  @Column({ default: false }) is_deleted: boolean;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_bodega' })
@@ -816,4 +820,5 @@ export class BodegaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 150, nullable: true }) nombre?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
 }

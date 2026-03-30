@@ -600,8 +600,17 @@ export class KpiMaintenanceController {
   })
   @UseInterceptors(FileInterceptor('file'))
   @Post('programaciones/import/mensual/upload')
-  importProgramacionMensualWorkbook(@UploadedFile() file: any) {
-    return this.service.importProgramacionMensualWorkbook(file);
+  importProgramacionMensualWorkbook(
+    @UploadedFile() file: any,
+    @Body('requested_by') requestedBy?: string,
+    @Body('requested_by_email') requestedByEmail?: string,
+    @Body('requested_user_id') requestedUserId?: string,
+  ) {
+    return this.service.importProgramacionMensualWorkbook(file, {
+      requested_by: requestedBy,
+      requested_by_email: requestedByEmail,
+      requested_user_id: requestedUserId,
+    });
   }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Obtener programación por ID' })
@@ -1038,8 +1047,17 @@ export class KpiMaintenanceController {
   })
   @UseInterceptors(FileInterceptor('file'))
   @Post('inteligencia/cronogramas-semanales/import/upload')
-  importCronogramaSemanalWorkbook(@UploadedFile() file: any) {
-    return this.service.importCronogramaSemanalWorkbook(file);
+  importCronogramaSemanalWorkbook(
+    @UploadedFile() file: any,
+    @Body('requested_by') requestedBy?: string,
+    @Body('requested_by_email') requestedByEmail?: string,
+    @Body('requested_user_id') requestedUserId?: string,
+  ) {
+    return this.service.importCronogramaSemanalWorkbook(file, {
+      requested_by: requestedBy,
+      requested_by_email: requestedByEmail,
+      requested_user_id: requestedUserId,
+    });
   }
 
   @ApiTags('Inteligencia Operativa')
