@@ -2624,7 +2624,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           id: material.id,
           codigo: material.codigo ?? null,
           nombre: material.nombre ?? null,
-          bodega_id: material.bodega_id ?? null,
           label: this.buildProductoLabel(material) ?? material.id,
         })),
     };
