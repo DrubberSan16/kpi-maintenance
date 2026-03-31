@@ -10,6 +10,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   Min,
   ValidateIf,
   ValidateNested,
@@ -1693,4 +1694,21 @@ export class EventoProcesoQueryDto {
   @IsNumber()
   @Min(1)
   limit?: number;
+}
+
+export class IntelligencePeriodQueryDto {
+  @ApiPropertyOptional({ description: 'Año a consultar', type: Number, minimum: 2000 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(2000)
+  year?: number;
+
+  @ApiPropertyOptional({ description: 'Mes a consultar (1-12)', type: Number, minimum: 1, maximum: 12 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  @Max(12)
+  month?: number;
 }

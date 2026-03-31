@@ -48,6 +48,7 @@ import {
   EquipoQueryDto,
   IssueMaterialsDto,
   EventoProcesoQueryDto,
+  IntelligencePeriodQueryDto,
   ImportAnalisisLubricanteBatchDto,
   ProgramacionMensualQueryDto,
   PurgeAnalisisLubricanteDto,
@@ -1132,8 +1133,8 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener resumen KPI documental y operativo' })
   @Get('inteligencia/summary')
-  getIntelligenceSummary() {
-    return this.service.getIntelligenceSummary();
+  getIntelligenceSummary(@Query() query: IntelligencePeriodQueryDto) {
+    return this.service.getIntelligenceSummary(query);
   }
 
   @ApiTags('Work Orders')

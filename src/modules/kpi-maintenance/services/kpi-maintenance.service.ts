@@ -106,6 +106,7 @@ import {
   EquipoQueryDto,
   EquipoTipoQueryDto,
   EventoProcesoQueryDto,
+  IntelligencePeriodQueryDto,
   ImportAnalisisLubricanteBatchDto,
   IssueMaterialsDto,
   PurgeAnalisisLubricanteDto,
@@ -9823,60 +9824,89 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async getIntelligenceSummary() {
+  private buildIntelligencePeriodRange(query?: IntelligencePeriodQueryDto) {
+    const year = Number(query?.year ?? 0);
+    const month = Number(query?.month ?? 0);
+    if (!year || !month || month < 1 || month > 12) return null;
+    const start = new Date(Date.UTC(year, month - 1, 1));
+    const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    return { year, month, start, end };
+  }
+
+  private valueMatchesIntelligencePeriod(
+    value: unknown,
+    range: ReturnType<KpiMaintenanceService['buildIntelligencePeriodRange']>,
+  ) {
+    if (!range) return true;
+    const raw = this.safeDateOnlyString(value) ?? String(value || '').trim();
+    if (!raw) return false;
+    const parsed = new Date(
+      /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw,
+    );
+    if (Number.isNaN(parsed.getTime())) return false;
+    return parsed >= range.start && parsed <= range.end;
+  }
+
+  private rangeOverlapsIntelligencePeriod(
+    fromValue: unknown,
+    toValue: unknown,
+    range: ReturnType<KpiMaintenanceService['buildIntelligencePeriodRange']>,
+  ) {
+    if (!range) return true;
+    const fromRaw =
+      this.safeDateOnlyString(fromValue) ?? String(fromValue || '').trim();
+    const toRaw =
+      this.safeDateOnlyString(toValue) ??
+      this.safeDateOnlyString(fromValue) ??
+      String(toValue || '').trim();
+    if (!fromRaw && !toRaw) return false;
+    const from = new Date(
+      /^\d{4}-\d{2}-\d{2}$/.test(fromRaw) ? `${fromRaw}T00:00:00Z` : fromRaw,
+    );
+    const to = new Date(
+      /^\d{4}-\d{2}-\d{2}$/.test(toRaw) ? `${toRaw}T23:59:59.999Z` : toRaw,
+    );
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return false;
+    return from <= range.end && to >= range.start;
+  }
+
+  async getIntelligenceSummary(query?: IntelligencePeriodQueryDto) {
+    const periodRange = this.buildIntelligencePeriodRange(query);
     const [
       procedimientos,
-      analisisTotal,
-      cronogramasTotal,
-      reportesTotal,
-      eventosTotal,
       analisisRows,
       cronogramas,
       reportes,
       eventos,
       overdueProgramaciones,
       pendingWorkOrders,
-      componentesTotal,
       componentesRecientes,
-      allAnalysesForLubricants,
     ] = await Promise.all([
       this.procedimientoRepo.count({ where: { is_deleted: false } }),
-      this.analisisLubricanteRepo.count({ where: { is_deleted: false } }),
-      this.cronogramaSemanalRepo.count({ where: { is_deleted: false } }),
-      this.reporteDiarioRepo.count({ where: { is_deleted: false } }),
-      this.eventoProcesoRepo.count({ where: { is_deleted: false } }),
       this.analisisLubricanteRepo.find({
         where: { is_deleted: false },
         order: { fecha_reporte: 'DESC', created_at: 'DESC' },
-        take: 10,
       }),
       this.cronogramaSemanalRepo.find({
         where: { is_deleted: false },
         order: { fecha_inicio: 'DESC', created_at: 'DESC' },
-        take: 10,
       }),
       this.reporteDiarioRepo.find({
         where: { is_deleted: false },
         order: { fecha_reporte: 'DESC', created_at: 'DESC' },
-        take: 10,
       }),
       this.eventoProcesoRepo.find({
         where: { is_deleted: false },
         order: { fecha_evento: 'DESC', created_at: 'DESC' },
-        take: 20,
       }),
       this.programacionRepo.find({ where: { is_deleted: false, activo: true } }),
-      this.woRepo.count({
+      this.woRepo.find({
         where: { is_deleted: false, status_workflow: In(['PLANNED', 'IN_PROGRESS']) },
+        order: { scheduled_start: 'DESC' },
       }),
-      this.controlComponenteRepo.count({ where: { is_deleted: false } }),
       this.controlComponenteRepo.find({
         where: { is_deleted: false },
         order: { updated_at: 'DESC', created_at: 'DESC' },
-        take: 10,
-      }),
-      this.analisisLubricanteRepo.find({
-        where: { is_deleted: false },
       }),
     ]);
 
@@ -9885,17 +9915,71 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         this.recalculateProgramacionFields(row, { persist: false }),
       ),
     );
-    const vencidas = programaciones.filter(
-      (row: any) => String(row.estado_programacion || '').toUpperCase() === 'VENCIDA',
+
+    const filteredAnalyses = analisisRows.filter((row) =>
+      this.valueMatchesIntelligencePeriod(
+        row.fecha_reporte || row.fecha_muestra || row.created_at,
+        periodRange,
+      ),
+    );
+    const filteredCronogramas = cronogramas.filter((row) =>
+      this.rangeOverlapsIntelligencePeriod(
+        row.fecha_inicio || row.created_at,
+        row.fecha_fin || row.fecha_inicio || row.created_at,
+        periodRange,
+      ),
+    );
+    const filteredReportes = reportes.filter((row) =>
+      this.valueMatchesIntelligencePeriod(
+        row.fecha_reporte || row.created_at,
+        periodRange,
+      ),
+    );
+    const filteredEventos = eventos.filter((row) =>
+      this.valueMatchesIntelligencePeriod(
+        row.fecha_evento || row.created_at,
+        periodRange,
+      ),
+    );
+    const filteredProgramaciones = programaciones.filter((row: any) =>
+      this.valueMatchesIntelligencePeriod(
+        row.proxima_fecha || row.updated_at || row.created_at,
+        periodRange,
+      ),
+    );
+    const vencidas = filteredProgramaciones.filter(
+      (row: any) =>
+        String(row.estado_programacion || '').toUpperCase() === 'VENCIDA',
     );
 
-    const breakdown = eventos.reduce<Record<string, number>>((acc, event) => {
+    const filteredPendingWorkOrders = pendingWorkOrders.filter((row) =>
+      this.valueMatchesIntelligencePeriod(
+        row.scheduled_start ||
+          row.started_at ||
+          row.closed_at,
+        periodRange,
+      ),
+    );
+
+    const reportIds = new Set(
+      filteredReportes.map((row) => String(row.id || '')).filter(Boolean),
+    );
+    const filteredComponents = componentesRecientes.filter((row) =>
+      row.reporte_id
+        ? reportIds.has(String(row.reporte_id))
+        : this.valueMatchesIntelligencePeriod(
+            row.updated_at || row.created_at,
+            periodRange,
+          ),
+    );
+
+    const breakdown = filteredEventos.reduce<Record<string, number>>((acc, event) => {
       const key = String(event.tipo_proceso || 'SIN_TIPO');
       acc[key] = (acc[key] ?? 0) + 1;
       return acc;
     }, {});
     const lubricantesRegistrados = new Set(
-      allAnalysesForLubricants
+      filteredAnalyses
         .map(
           (item) =>
             this.resolveLubricantIdentity(item).lubricante_lookup_key || null,
@@ -9906,26 +9990,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(
       {
         generated_at: new Date().toISOString(),
+        filters: periodRange
+          ? {
+              year: periodRange.year,
+              month: periodRange.month,
+              from: periodRange.start.toISOString().slice(0, 10),
+              to: periodRange.end.toISOString().slice(0, 10),
+            }
+          : null,
         kpis: {
           procedimientos,
-          analisis_lubricante: analisisTotal,
+          analisis_lubricante: filteredAnalyses.length,
           lubricantes_registrados: lubricantesRegistrados,
-          cronogramas_semanales: cronogramasTotal,
-          reportes_diarios: reportesTotal,
-          eventos_proceso: eventosTotal,
+          cronogramas_semanales: filteredCronogramas.length,
+          reportes_diarios: filteredReportes.length,
+          eventos_proceso: filteredEventos.length,
           programaciones_vencidas: vencidas.length,
-          work_orders_pendientes: pendingWorkOrders,
-          componentes_monitoreados: componentesTotal,
+          work_orders_pendientes: filteredPendingWorkOrders.length,
+          componentes_monitoreados: filteredComponents.length,
         },
         process_breakdown: Object.entries(breakdown).map(([tipo_proceso, total]) => ({
           tipo_proceso,
           total,
         })),
-        recent_events: eventos.slice(0, 8),
-        recent_analyses: analisisRows.slice(0, 5),
-        recent_weekly_schedules: cronogramas.slice(0, 5),
-        recent_daily_reports: reportes.slice(0, 5),
-        component_highlights: componentesRecientes.slice(0, 5),
+        recent_events: filteredEventos.slice(0, 8),
+        recent_analyses: filteredAnalyses.slice(0, 5),
+        recent_weekly_schedules: filteredCronogramas.slice(0, 5),
+        recent_daily_reports: filteredReportes.slice(0, 5),
+        component_highlights: filteredComponents.slice(0, 5),
       },
       'Resumen de inteligencia operativa generado',
     );
