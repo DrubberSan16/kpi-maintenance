@@ -5,6 +5,9 @@ export class EquipoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column() codigo: string;
   @Column() nombre: string;
+  @Column({ type: 'text', nullable: true }) nombre_real?: string | null;
+  @Column({ type: 'text', nullable: true }) modelo?: string | null;
+  @Column({ type: 'text', nullable: true }) codigo_lubricante?: string | null;
   @Column() equipo_tipo_id: string;
   @Column({ type: 'uuid', nullable: true }) location_id?: string | null;
   @Column({ default: 'MEDIA' }) criticidad: string;

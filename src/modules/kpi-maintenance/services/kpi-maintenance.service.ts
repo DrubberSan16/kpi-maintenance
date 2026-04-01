@@ -5953,12 +5953,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const estado_operativo = this.normalizeEquipoEstadoOperativo(
       dto.estado_operativo ?? EquipoEstadoOperativoEnum.OPERATIVO,
     );
+    const nombre_real = String(dto.nombre_real ?? '').trim() || null;
+    const modelo = String(dto.modelo ?? '').trim() || null;
+    const codigo_lubricante =
+      String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null;
     return this.wrap(
       await this.equipoRepo.save(
         this.equipoRepo.create({
           ...dto,
           criticidad,
           estado_operativo,
+          nombre_real,
+          modelo,
+          codigo_lubricante,
           horometro_actual: dto.horometro_actual ?? 0,
         }),
       ),
@@ -5977,6 +5984,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.estado_operativo !== undefined
           ? this.normalizeEquipoEstadoOperativo(dto.estado_operativo)
           : e.estado_operativo,
+      nombre_real:
+        dto.nombre_real !== undefined
+          ? String(dto.nombre_real ?? '').trim() || null
+          : e.nombre_real,
+      modelo:
+        dto.modelo !== undefined ? String(dto.modelo ?? '').trim() || null : e.modelo,
+      codigo_lubricante:
+        dto.codigo_lubricante !== undefined
+          ? String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null
+          : e.codigo_lubricante,
     });
     return this.wrap(await this.equipoRepo.save(e), 'Equipo actualizado');
   }

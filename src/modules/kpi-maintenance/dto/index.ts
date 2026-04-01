@@ -94,6 +94,18 @@ export class CreateEquipoDto {
   @IsString()
   @IsNotEmpty()
   nombre: string;
+  @ApiPropertyOptional({ description: 'Nombre real o denominaciÃ³n completa del equipo' })
+  @IsOptional()
+  @IsString()
+  nombre_real?: string;
+  @ApiPropertyOptional({ description: 'Modelo del equipo' })
+  @IsOptional()
+  @IsString()
+  modelo?: string;
+  @ApiPropertyOptional({ description: 'CÃ³digo o referencia del lubricante esperado para el equipo' })
+  @IsOptional()
+  @IsString()
+  codigo_lubricante?: string;
   @ApiProperty({ description: 'ID del tipo de equipo', format: 'uuid' })
   @IsUUID()
   equipo_tipo_id: string;
