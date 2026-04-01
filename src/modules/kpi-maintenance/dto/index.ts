@@ -17,6 +17,21 @@ import {
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+export enum EquipoCriticidadEnum {
+  BAJA = 'BAJA',
+  MEDIA = 'MEDIA',
+  ALTA = 'ALTA',
+  CRITICA = 'CRITICA',
+}
+
+export enum EquipoEstadoOperativoEnum {
+  OPERATIVO = 'OPERATIVO',
+  RESERVA = 'RESERVA',
+  MPG = 'MPG',
+  CORRECTIVO = 'CORRECTIVO',
+  BLOQUEADA = 'BLOQUEADA',
+}
+
 export class EquipoQueryDto {
   @ApiPropertyOptional({ description: 'Código del equipo' })
   @IsOptional()
@@ -34,11 +49,17 @@ export class EquipoQueryDto {
   @IsOptional()
   @IsUUID()
   marca_id?: string;
-  @ApiPropertyOptional({ description: 'Estado operativo del equipo' })
+  @ApiPropertyOptional({
+    description: 'Estado operativo del equipo',
+    enum: EquipoEstadoOperativoEnum,
+  })
   @IsOptional()
   @IsString()
   estado_operativo?: string;
-  @ApiPropertyOptional({ description: 'Nivel de criticidad del equipo' })
+  @ApiPropertyOptional({
+    description: 'Nivel de criticidad del equipo',
+    enum: EquipoCriticidadEnum,
+  })
   @IsOptional()
   @IsString()
   criticidad?: string;
@@ -84,11 +105,17 @@ export class CreateEquipoDto {
   @IsOptional()
   @IsUUID()
   marca_id?: string;
-  @ApiPropertyOptional({ description: 'Nivel de criticidad' })
+  @ApiPropertyOptional({
+    description: 'Nivel de criticidad',
+    enum: EquipoCriticidadEnum,
+  })
   @IsOptional()
   @IsString()
   criticidad?: string;
-  @ApiPropertyOptional({ description: 'Estado operativo actual' })
+  @ApiPropertyOptional({
+    description: 'Estado operativo actual',
+    enum: EquipoEstadoOperativoEnum,
+  })
   @IsOptional()
   @IsString()
   estado_operativo?: string;

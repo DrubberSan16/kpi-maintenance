@@ -103,7 +103,9 @@ import {
   CreateWorkOrderDto,
   CreateWorkOrderTareaDto,
   DateRangeDto,
+  EquipoCriticidadEnum,
   EquipoQueryDto,
+  EquipoEstadoOperativoEnum,
   EquipoTipoQueryDto,
   EventoProcesoQueryDto,
   IntelligencePeriodQueryDto,
@@ -350,6 +352,9 @@ const DEFAULT_PROGRAMACION_MONTHLY_COLOR_PALETTE = {
   SINCRONIZADO: '#8ED1A5',
   DEFAULT: '#D7E0EA',
 } as const;
+
+const EQUIPO_CRITICIDAD_VALUES = Object.values(EquipoCriticidadEnum);
+const EQUIPO_ESTADO_OPERATIVO_VALUES = Object.values(EquipoEstadoOperativoEnum);
 
 const LUBRICANT_IMPORT_PARAMETER_ROWS = [
   { row: 22, label: 'Viscosidad a 100ºC, cSt' },
@@ -1087,6 +1092,49 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private normalizeMaterialIdArray(values: unknown) {
     if (!Array.isArray(values)) return [];
     return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+  }
+
+  private normalizeEquipoCriticidad(value: unknown): string | undefined {
+    const raw = String(value ?? '').trim().toUpperCase();
+    if (!raw) return undefined;
+    if (['BAJA', 'LOW', 'BAJO'].includes(raw)) {
+      return EquipoCriticidadEnum.BAJA;
+    }
+    if (['MEDIA', 'MEDIO', 'MEDIUM'].includes(raw)) {
+      return EquipoCriticidadEnum.MEDIA;
+    }
+    if (['ALTA', 'ALTO', 'HIGH'].includes(raw)) {
+      return EquipoCriticidadEnum.ALTA;
+    }
+    if (['CRITICA', 'CRÍTICA', 'CRITICO', 'CRÍTICO', 'CRITICAL'].includes(raw)) {
+      return EquipoCriticidadEnum.CRITICA;
+    }
+    throw new BadRequestException(
+      `La criticidad del equipo no es válida. Valores permitidos: ${EQUIPO_CRITICIDAD_VALUES.join(', ')}.`,
+    );
+  }
+
+  private normalizeEquipoEstadoOperativo(value: unknown): string | undefined {
+    const raw = String(value ?? '').trim().toUpperCase();
+    if (!raw) return undefined;
+    if (['OPERATIVO', 'OPERANDO', 'DISPONIBLE'].includes(raw)) {
+      return EquipoEstadoOperativoEnum.OPERATIVO;
+    }
+    if (['RESERVA', 'STANDBY'].includes(raw)) {
+      return EquipoEstadoOperativoEnum.RESERVA;
+    }
+    if (['MPG', 'PREVENTIVO'].includes(raw)) {
+      return EquipoEstadoOperativoEnum.MPG;
+    }
+    if (['CORRECTIVO', 'REPARACION', 'REPARACIÓN'].includes(raw)) {
+      return EquipoEstadoOperativoEnum.CORRECTIVO;
+    }
+    if (['BLOQUEADA', 'BLOQUEADO', 'NO_OPERATIVO', 'NO OPERATIVO'].includes(raw)) {
+      return EquipoEstadoOperativoEnum.BLOQUEADA;
+    }
+    throw new BadRequestException(
+      `El estado operativo del equipo no es válido. Valores permitidos: ${EQUIPO_ESTADO_OPERATIVO_VALUES.join(', ')}.`,
+    );
   }
 
   private normalizePlanTaskFieldType(value: unknown) {
@@ -5858,6 +5906,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async listEquipos(query: EquipoQueryDto) {
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 10, 100);
+    const estadoOperativo = query.estado_operativo
+      ? this.normalizeEquipoEstadoOperativo(query.estado_operativo)
+      : undefined;
+    const criticidad = query.criticidad
+      ? this.normalizeEquipoCriticidad(query.criticidad)
+      : undefined;
     const qb = this.equipoRepo
       .createQueryBuilder('e')
       .where('e.is_deleted = false');
@@ -5873,13 +5927,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       qb.andWhere('e.equipo_tipo_id = :equipo_tipo_id', {
         equipo_tipo_id: query.equipo_tipo_id,
       });
-    if (query.estado_operativo)
+    if (estadoOperativo)
       qb.andWhere('e.estado_operativo = :estado_operativo', {
-        estado_operativo: query.estado_operativo,
+        estado_operativo: estadoOperativo,
       });
-    if (query.criticidad)
+    if (criticidad)
       qb.andWhere('e.criticidad = :criticidad', {
-        criticidad: query.criticidad,
+        criticidad,
       });
     const [data, total] = await qb
       .orderBy('e.created_at', 'DESC')
@@ -5893,10 +5947,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(await this.findEquipoOrFail(id), 'Equipo obtenido');
   }
   async createEquipo(dto: CreateEquipoDto) {
+    const criticidad = this.normalizeEquipoCriticidad(
+      dto.criticidad ?? EquipoCriticidadEnum.MEDIA,
+    );
+    const estado_operativo = this.normalizeEquipoEstadoOperativo(
+      dto.estado_operativo ?? EquipoEstadoOperativoEnum.OPERATIVO,
+    );
     return this.wrap(
       await this.equipoRepo.save(
         this.equipoRepo.create({
           ...dto,
+          criticidad,
+          estado_operativo,
           horometro_actual: dto.horometro_actual ?? 0,
         }),
       ),
@@ -5905,7 +5967,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
   async updateEquipo(id: string, dto: UpdateEquipoDto) {
     const e = await this.findEquipoOrFail(id);
-    Object.assign(e, dto);
+    Object.assign(e, {
+      ...dto,
+      criticidad:
+        dto.criticidad !== undefined
+          ? this.normalizeEquipoCriticidad(dto.criticidad)
+          : e.criticidad,
+      estado_operativo:
+        dto.estado_operativo !== undefined
+          ? this.normalizeEquipoEstadoOperativo(dto.estado_operativo)
+          : e.estado_operativo,
+    });
     return this.wrap(await this.equipoRepo.save(e), 'Equipo actualizado');
   }
   async deleteEquipo(id: string) {
