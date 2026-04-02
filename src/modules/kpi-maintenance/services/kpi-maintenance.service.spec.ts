@@ -359,3 +359,162 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 });
+
+describe('KpiMaintenanceService work orders', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
+
+    jest
+      .spyOn(service as any, 'appendWorkOrderHistory')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'syncAlertWorkOrderLink')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'syncAlertsForWorkOrder')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'publishInAppNotification')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'writeSecurityLog')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'registerProcessEvent')
+      .mockResolvedValue(undefined);
+  });
+
+  it('crea la OT sincronizando plantilla y guardando la cabecera correctamente', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    repos.woRepo.save.mockImplementation(async (value) => ({
+      id: 'wo-1',
+      ...value,
+    }));
+
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-1' } });
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockResolvedValue({
+        id: 'wo-1',
+        code: 'OT-A00001',
+        title: 'Orden (PMP-A00001)',
+        status_workflow: 'PLANNED',
+        plan_id: 'plan-1',
+        procedimiento_id: 'proc-1',
+      });
+
+    await service.createWorkOrder({
+      code: 'OT-A00001',
+      type: 'MANTENIMIENTO',
+      title: 'Orden (PMP-A00001)',
+      equipment_id: 'equipo-1',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      procedimiento_id: 'proc-1',
+      valor_json: {
+        causa: 'Fuga detectada',
+      },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'OT-A00001',
+        type: 'MANTENIMIENTO',
+        equipment_id: 'equipo-1',
+        plan_id: 'plan-1',
+        maintenance_kind: 'CORRECTIVO',
+        status_workflow: 'PLANNED',
+        valor_json: expect.objectContaining({
+          causa: 'Fuga detectada',
+          procedimiento_id: 'proc-1',
+        }),
+      }),
+    );
+    expect((service as any).appendWorkOrderHistory).toHaveBeenCalledWith(
+      'wo-1',
+      'PLANNED',
+      'Orden de trabajo creada',
+    );
+  });
+
+  it('actualiza la OT preservando el estado y mezclando valor_json de forma correcta', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00001',
+      type: 'MANTENIMIENTO',
+      equipment_id: 'equipo-1',
+      plan_id: 'plan-old',
+      title: 'Orden (PMP-A00001)',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      valor_json: {
+        causa: 'Fuga detectada',
+        prevencion: 'Revisión semanal',
+      },
+      is_deleted: false,
+    });
+    repos.woRepo.save.mockImplementation(async (value) => value);
+
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-new' } });
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockResolvedValue({
+        id: 'wo-1',
+        code: 'OT-A00001',
+        title: 'Orden (PMP-A00001)',
+        status_workflow: 'PLANNED',
+        plan_id: 'plan-new',
+        procedimiento_id: 'proc-2',
+      });
+
+    await service.updateWorkOrder('wo-1', {
+      maintenance_kind: 'PREVENTIVO',
+      status_workflow: 'PLANNED',
+      procedimiento_id: 'proc-2',
+      valor_json: {
+        accion: 'Cambio de componente',
+      },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'wo-1',
+        maintenance_kind: 'PREVENTIVO',
+        plan_id: 'plan-new',
+        status_workflow: 'PLANNED',
+        valor_json: expect.objectContaining({
+          causa: 'Fuga detectada',
+          prevencion: 'Revisión semanal',
+          accion: 'Cambio de componente',
+          procedimiento_id: 'proc-2',
+        }),
+      }),
+    );
+    expect((service as any).appendWorkOrderHistory).toHaveBeenCalledWith(
+      'wo-1',
+      'PLANNED',
+      'Cabecera de OT actualizada',
+      { fromStatus: 'PLANNED' },
+    );
+  });
+});
