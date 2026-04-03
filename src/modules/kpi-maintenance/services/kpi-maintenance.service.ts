@@ -1030,21 +1030,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    const reservaAccessor = manager ?? this.reservaRepo;
-    const existing = await reservaAccessor.findOne({
-      where: {
-        work_order_id: workOrderId,
-        producto_id: productoId,
-        bodega_id: bodegaId,
-        estado: 'RESERVADO',
-        is_deleted: false,
-      },
-    });
+    const where = {
+      work_order_id: workOrderId,
+      producto_id: productoId,
+      bodega_id: bodegaId,
+      estado: 'RESERVADO',
+      is_deleted: false,
+    };
+
+    const existing = manager
+      ? await manager.findOne(ReservaStockEntity, { where })
+      : await this.reservaRepo.findOne({ where });
 
     if (existing) {
       existing.cantidad = totals.pendingQty;
       existing.estado = 'RESERVADO';
-      return reservaAccessor.save(existing);
+      return manager
+        ? manager.save(ReservaStockEntity, existing)
+        : this.reservaRepo.save(existing);
     }
 
     const created = manager
@@ -1063,7 +1066,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           estado: 'RESERVADO',
         });
 
-    return reservaAccessor.save(created);
+    return manager
+      ? manager.save(ReservaStockEntity, created)
+      : this.reservaRepo.save(created);
   }
 
   onModuleInit() {
