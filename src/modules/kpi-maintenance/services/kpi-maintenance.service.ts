@@ -861,6 +861,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       bodega_codigo: bodega?.codigo ?? null,
       bodega_nombre: bodega?.nombre ?? null,
       bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id ?? null,
+      cantidad_reservada: null,
+      cantidad_emitida: null,
+      cantidad_pendiente: null,
     };
   }
 
@@ -931,6 +934,136 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       kardex_id: kardex?.id ?? null,
       fecha_kardex: kardex?.fecha ?? null,
     };
+  }
+
+  private async calculatePlannedAndIssuedMaterialTotals(
+    workOrderId: string,
+    productoId: string,
+    bodegaId: string,
+  ) {
+    const consumos = await this.consumoRepo.find({
+      where: {
+        work_order_id: workOrderId,
+        producto_id: productoId,
+        bodega_id: bodegaId,
+        is_deleted: false,
+      },
+    });
+    const plannedQty = consumos.reduce(
+      (acc, row) => acc + this.toNumeric(row.cantidad, 0),
+      0,
+    );
+
+    const entregas = await this.dataSource.getRepository(EntregaMaterialEntity).find({
+      where: { work_order_id: workOrderId, is_deleted: false },
+    });
+    const entregaIds = entregas.map((item) => item.id);
+    const detalles = entregaIds.length
+      ? await this.dataSource.getRepository(EntregaMaterialDetEntity).find({
+          where: {
+            entrega_id: In(entregaIds),
+            producto_id: productoId,
+            bodega_id: bodegaId,
+          },
+        })
+      : [];
+    const issuedQty = detalles.reduce(
+      (acc, row) => acc + this.toNumeric(row.cantidad, 0),
+      0,
+    );
+
+    return {
+      plannedQty,
+      issuedQty,
+      pendingQty: Math.max(plannedQty - issuedQty, 0),
+    };
+  }
+
+  private async upsertReservedMaterial(
+    workOrderId: string,
+    productoId: string,
+    bodegaId: string,
+    quantityDelta: number,
+  ) {
+    const normalizedDelta = this.toNumeric(quantityDelta, 0);
+    if (normalizedDelta <= 0) return null;
+
+    const existing = await this.reservaRepo.findOne({
+      where: {
+        work_order_id: workOrderId,
+        producto_id: productoId,
+        bodega_id: bodegaId,
+        estado: 'RESERVADO',
+        is_deleted: false,
+      },
+    });
+
+    if (existing) {
+      existing.cantidad = this.toNumeric(existing.cantidad, 0) + normalizedDelta;
+      return this.reservaRepo.save(existing);
+    }
+
+    return this.reservaRepo.save(
+      this.reservaRepo.create({
+        work_order_id: workOrderId,
+        producto_id: productoId,
+        bodega_id: bodegaId,
+        cantidad: normalizedDelta,
+        estado: 'RESERVADO',
+      }),
+    );
+  }
+
+  private async rebuildPendingReservaFromConsumos(
+    workOrderId: string,
+    productoId: string,
+    bodegaId: string,
+    manager?: any,
+  ) {
+    const totals = await this.calculatePlannedAndIssuedMaterialTotals(
+      workOrderId,
+      productoId,
+      bodegaId,
+    );
+
+    if (totals.pendingQty <= 0) {
+      return null;
+    }
+
+    const reservaAccessor = manager ?? this.reservaRepo;
+    const existing = await reservaAccessor.findOne({
+      where: {
+        work_order_id: workOrderId,
+        producto_id: productoId,
+        bodega_id: bodegaId,
+        estado: 'RESERVADO',
+        is_deleted: false,
+      },
+    });
+
+    if (existing) {
+      existing.cantidad = totals.pendingQty;
+      existing.estado = 'RESERVADO';
+      return reservaAccessor.save(existing);
+    }
+
+    const created = manager
+      ? manager.create(ReservaStockEntity, {
+          work_order_id: workOrderId,
+          producto_id: productoId,
+          bodega_id: bodegaId,
+          cantidad: totals.pendingQty,
+          estado: 'RESERVADO',
+        })
+      : this.reservaRepo.create({
+          work_order_id: workOrderId,
+          producto_id: productoId,
+          bodega_id: bodegaId,
+          cantidad: totals.pendingQty,
+          estado: 'RESERVADO',
+        });
+
+    return reservaAccessor.save(created);
   }
 
   onModuleInit() {
@@ -10833,8 +10966,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       rows.map((row) => row.producto_id),
       rows.map((row) => row.bodega_id || '').filter(Boolean),
     );
+    const groupedTotals = new Map<
+      string,
+      { plannedQty: number; issuedQty: number; pendingQty: number }
+    >();
+    await Promise.all(
+      rows.map(async (row) => {
+        const key = `${row.producto_id}|${row.bodega_id || ''}`;
+        if (groupedTotals.has(key)) return;
+        groupedTotals.set(
+          key,
+          await this.calculatePlannedAndIssuedMaterialTotals(
+            workOrderId,
+            row.producto_id,
+            row.bodega_id || '',
+          ),
+        );
+      }),
+    );
+
     return this.wrap(
-      rows.map((row) => this.mapConsumoWithCatalogs(row, productMap, warehouseMap)),
+      rows.map((row) => {
+        const key = `${row.producto_id}|${row.bodega_id || ''}`;
+        const totals = groupedTotals.get(key);
+        return {
+          ...this.mapConsumoWithCatalogs(row, productMap, warehouseMap),
+          cantidad_reservada: totals?.plannedQty ?? this.toNumeric(row.cantidad, 0),
+          cantidad_emitida: totals?.issuedQty ?? 0,
+          cantidad_pendiente: totals?.pendingQty ?? this.toNumeric(row.cantidad, 0),
+        };
+      }),
       'Consumos listados',
     );
   }
@@ -10869,13 +11030,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         subtotal,
       }),
     );
+    await this.upsertReservedMaterial(
+      workOrderId,
+      dto.producto_id,
+      dto.bodega_id,
+      dto.cantidad,
+    );
     await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Consumo registrado para producto ${dto.producto_id} por ${dto.cantidad}`, { fromStatus: workOrder.status_workflow });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
     });
     return this.wrap(
-      this.mapConsumoWithCatalogs(saved, new Map([[producto.id, producto]]), new Map([[bodega.id, bodega]])),
+      {
+        ...this.mapConsumoWithCatalogs(
+          saved,
+          new Map([[producto.id, producto]]),
+          new Map([[bodega.id, bodega]]),
+        ),
+        cantidad_reservada: dto.cantidad,
+        cantidad_emitida: 0,
+        cantidad_pendiente: dto.cantidad,
+      },
       'Consumo registrado',
     );
   }
@@ -10941,7 +11117,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       let total = 0;
       for (const item of dto.items) {
-        const reserva = await qr.manager.findOne(ReservaStockEntity, {
+        let reserva = await qr.manager.findOne(ReservaStockEntity, {
           where: {
             work_order_id: workOrderId,
             producto_id: item.producto_id,
@@ -10950,7 +11126,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             is_deleted: false,
           },
         });
-        if (!reserva || Number(reserva.cantidad) < item.cantidad)
+        if (!reserva || this.toNumeric(reserva.cantidad, 0) < item.cantidad) {
+          reserva = await this.rebuildPendingReservaFromConsumos(
+            workOrderId,
+            item.producto_id,
+            item.bodega_id,
+            qr.manager,
+          );
+        }
+        if (!reserva || this.toNumeric(reserva.cantidad, 0) < item.cantidad)
           throw new ConflictException('Reserva insuficiente');
         const stock = await qr.manager.findOne(StockBodegaEntity, {
           where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
@@ -10966,7 +11150,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         total += subtotal;
         stock.stock_actual = Number(stock.stock_actual) - item.cantidad;
         await qr.manager.save(stock);
-        reserva.estado = 'CONSUMIDO';
+        const remainingReserved = this.toNumeric(reserva.cantidad, 0) - item.cantidad;
+        reserva.cantidad = Math.max(remainingReserved, 0);
+        reserva.estado = remainingReserved > 0 ? 'RESERVADO' : 'CONSUMIDO';
         await qr.manager.save(reserva);
         await qr.manager.save(
           EntregaMaterialDetEntity,
@@ -11001,18 +11187,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             costo_total: subtotal,
             saldo_cantidad: stock.stock_actual,
             saldo_costo_promedio: costo,
-            saldo_valorizado: Number(stock.stock_actual) * costo,
-          }),
-        );
-        await qr.manager.save(
-          ConsumoRepuestoEntity,
-          qr.manager.create(ConsumoRepuestoEntity, {
-            work_order_id: workOrderId,
-            producto_id: item.producto_id,
-            bodega_id: item.bodega_id,
-            cantidad: item.cantidad,
-            costo_unitario: costo,
-            subtotal,
+              saldo_valorizado: Number(stock.stock_actual) * costo,
           }),
         );
       }

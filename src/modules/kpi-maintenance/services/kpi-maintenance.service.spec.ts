@@ -517,4 +517,51 @@ describe('KpiMaintenanceService work orders', () => {
       { fromStatus: 'PLANNED' },
     );
   });
+
+  it('registrar consumo crea o incrementa la reserva de stock para la OT', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      status_workflow: 'IN_PROGRESS',
+      is_deleted: false,
+    });
+    repos.productoRepo.findOne.mockResolvedValue({
+      id: 'producto-1',
+      codigo: '175',
+      nombre: 'PROBADOR DE TIERRA DIGITAL',
+      ultimo_costo: 20,
+    });
+    repos.bodegaRepo.findOne.mockResolvedValue({
+      id: 'bodega-1',
+      codigo: 'TPBD',
+      nombre: 'BODEGA',
+    });
+    repos.stockRepo.findOne.mockResolvedValue({
+      producto_id: 'producto-1',
+      bodega_id: 'bodega-1',
+      stock_actual: 100,
+    });
+    repos.kardexRepo.findOne.mockResolvedValue(null);
+    repos.consumoRepo.save.mockImplementation(async (value) => ({
+      id: 'consumo-1',
+      ...value,
+    }));
+    repos.reservaRepo.findOne.mockResolvedValue(null);
+    repos.reservaRepo.save.mockImplementation(async (value) => value);
+
+    await service.createConsumo('wo-1', {
+      producto_id: 'producto-1',
+      bodega_id: 'bodega-1',
+      cantidad: 15,
+    } as any);
+
+    expect(repos.reservaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        work_order_id: 'wo-1',
+        producto_id: 'producto-1',
+        bodega_id: 'bodega-1',
+        cantidad: 15,
+        estado: 'RESERVADO',
+      }),
+    );
+  });
 });
