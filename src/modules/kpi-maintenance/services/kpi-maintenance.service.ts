@@ -1382,6 +1382,170 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return 'CERRADA';
   }
 
+  private resolveAlertReferenceDisplay(
+    row: Pick<AlertaMantenimientoEntity, 'referencia' | 'referencia_tipo'>,
+    payload: Record<string, unknown>,
+  ) {
+    const fallback =
+      String(row.referencia || '').trim() ||
+      String(row.referencia_tipo || '').trim() ||
+      'Sin referencia';
+
+    if (row.referencia_tipo === 'PROGRAMACION') {
+      const label = this.firstNonEmptyString(
+        payload.referencia_label,
+        payload.procedimiento_nombre,
+        payload.plan_nombre,
+        payload.plan_codigo,
+        payload.programacion_codigo,
+      );
+      return label ? `Programación · ${label}` : 'Programación de mantenimiento';
+    }
+
+    if (row.referencia_tipo === 'REPORTE_DIARIO') {
+      const label = this.firstNonEmptyString(
+        payload.reporte_codigo,
+        payload.fecha_reporte,
+      );
+      return label ? `Reporte diario · ${label}` : fallback;
+    }
+
+    if (row.referencia_tipo === 'ANALISIS_LUBRICANTE') {
+      const label = this.firstNonEmptyString(payload.codigo);
+      return label ? `Análisis · ${label}` : fallback;
+    }
+
+    if (row.referencia_tipo === 'COMBUSTIBLE') {
+      const tanque = this.firstNonEmptyString(payload.tanque);
+      return tanque ? `Tanque ${tanque}` : fallback;
+    }
+
+    if (row.referencia_tipo === 'STOCK_BODEGA') {
+      const label = [
+        String(payload.producto_label || '').trim(),
+        String(payload.bodega_label || '').trim(),
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      return label || fallback;
+    }
+
+    return fallback;
+  }
+
+  private buildCompletedAlertDetail(
+    alerta: Pick<AlertaMantenimientoEntity, 'origen' | 'detalle'>,
+    payload: Record<string, unknown>,
+    workOrder: Partial<WorkOrderEntity>,
+  ) {
+    const workOrderLabel =
+      [String(workOrder.code || '').trim(), String(workOrder.title || '').trim()]
+        .filter(Boolean)
+        .join(' · ') ||
+      String(workOrder.id || '').trim() ||
+      'OT';
+
+    if (alerta.origen === 'PROGRAMACION') {
+      const planLabel =
+        this.firstNonEmptyString(
+          payload.procedimiento_nombre,
+          payload.plan_nombre,
+          payload.plan_codigo,
+          payload.programacion_codigo,
+        ) || 'Mantenimiento';
+      return `${planLabel} · se culminó la OT ${workOrderLabel}`;
+    }
+
+    const currentDetail = String(alerta.detalle || '').trim();
+    return currentDetail
+      ? `${currentDetail} · se culminó la OT ${workOrderLabel}`
+      : `Se culminó la OT ${workOrderLabel}`;
+  }
+
+  private async syncProgramacionExecutionFromAlert(
+    alerta: Pick<AlertaMantenimientoEntity, 'origen' | 'payload_json'>,
+    workOrder: Partial<WorkOrderEntity>,
+  ) {
+    if (alerta.origen !== 'PROGRAMACION') return;
+    const payload = (alerta.payload_json ?? {}) as Record<string, unknown>;
+    const programacionId = String(payload.programacion_id || '').trim();
+    if (!programacionId) return;
+
+    const programacion = await this.programacionRepo.findOne({
+      where: { id: programacionId, is_deleted: false },
+    });
+    if (!programacion) return;
+
+    const closedAtRaw =
+      workOrder.closed_at ||
+      (workOrder as Record<string, unknown>).updated_at ||
+      new Date().toISOString();
+    const closedAt = new Date(String(closedAtRaw));
+    const executionDate = Number.isNaN(closedAt.getTime())
+      ? new Date().toISOString().slice(0, 10)
+      : closedAt.toISOString().slice(0, 10);
+
+    programacion.ultima_ejecucion_fecha = executionDate;
+
+    if (workOrder.equipment_id) {
+      const equipo = await this.equipoRepo.findOne({
+        where: { id: workOrder.equipment_id, is_deleted: false },
+      });
+      if (equipo?.horometro_actual != null) {
+        programacion.ultima_ejecucion_horas = this.toNumeric(
+          equipo.horometro_actual,
+          0,
+        );
+      }
+    }
+
+    await this.recalculateProgramacionFields(programacion);
+  }
+
+  private async applyClosedWorkOrderAlertOutcome(
+    alerta: AlertaMantenimientoEntity,
+    workOrder: Partial<WorkOrderEntity>,
+    snapshots: Array<{
+      id: string;
+      code: string | null;
+      title: string | null;
+      status_workflow: string | null;
+    }>,
+  ) {
+    const payload = {
+      ...((alerta.payload_json ?? {}) as Record<string, unknown>),
+    };
+    payload.work_orders = snapshots;
+    payload.completion_status = 'OT_CULMINADA';
+    payload.completed_work_order = {
+      id: String(workOrder.id || '').trim() || null,
+      code: String(workOrder.code || '').trim() || null,
+      title: String(workOrder.title || '').trim() || null,
+      status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
+    };
+    payload.referencia_label =
+      this.firstNonEmptyString(
+        payload.referencia_label,
+        payload.procedimiento_nombre,
+        payload.plan_nombre,
+        payload.plan_codigo,
+        payload.programacion_codigo,
+      ) || null;
+
+    alerta.payload_json = payload;
+    alerta.work_order_id =
+      snapshots[snapshots.length - 1]?.id ||
+      String(workOrder.id || '').trim() ||
+      null;
+    alerta.estado = 'CERRADA';
+    alerta.nivel = 'INFO';
+    alerta.detalle = this.buildCompletedAlertDetail(alerta, payload, workOrder);
+    alerta.ultima_evaluacion_at = new Date();
+    alerta.resolved_at = new Date();
+
+    await this.syncProgramacionExecutionFromAlert(alerta, workOrder);
+  }
+
   private async syncAlertWorkOrderLink(
     alertaId: string,
     workOrder: WorkOrderEntity,
@@ -1403,9 +1567,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     payload.work_orders = snapshots;
     alerta.payload_json = payload;
     alerta.work_order_id = workOrder.id;
-    alerta.estado =
+    const resolvedState =
       nextAlertState ??
       this.resolveAlertStateFromLinkedWorkOrders(snapshots, alerta.estado);
+    alerta.estado = resolvedState;
+    if (resolvedState === 'CERRADA') {
+      await this.applyClosedWorkOrderAlertOutcome(alerta, workOrder, snapshots);
+    }
     return this.alertaRepo.save(alerta);
   }
 
@@ -1433,10 +1601,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       payload.work_orders = snapshots;
       alerta.payload_json = payload;
       alerta.work_order_id = snapshots[snapshots.length - 1]?.id ?? null;
-      alerta.estado = this.resolveAlertStateFromLinkedWorkOrders(
+      const resolvedState = this.resolveAlertStateFromLinkedWorkOrders(
         snapshots,
         alerta.estado,
       );
+      alerta.estado = resolvedState;
+      if (resolvedState === 'CERRADA') {
+        await this.applyClosedWorkOrderAlertOutcome(alerta, workOrder, snapshots);
+      }
       await this.alertaRepo.save(alerta);
     }
   }
@@ -5115,12 +5287,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }`,
           payload_json: {
             programacion_id: row.id,
+            programacion_codigo: row.codigo ?? null,
             plan_id: row.plan_id,
             plan_codigo: row.plan_codigo ?? null,
             plan_nombre: row.plan_nombre ?? null,
             procedimiento_id: row.procedimiento_id ?? null,
             procedimiento_codigo: row.procedimiento_codigo ?? null,
             procedimiento_nombre: row.procedimiento_nombre ?? null,
+            referencia_label:
+              row.procedimiento_nombre ||
+              row.plan_nombre ||
+              row.plan_codigo ||
+              row.codigo ||
+              null,
             equipo_id: row.equipo_id ?? null,
             equipo_codigo: row.equipo_codigo ?? null,
             equipo_nombre: row.equipo_nombre ?? null,
@@ -5743,8 +5922,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? `${workOrder.code} · ${workOrder.title}`
           : null;
 
-        let referenciaResuelta =
-          String(row.referencia || '').trim() || String(row.referencia_tipo || '').trim() || 'Sin referencia';
+        const hasClosedWorkOrders =
+          linkedWorkOrders.length > 0 &&
+          linkedWorkOrders.every(
+            (item) =>
+              this.normalizeWorkflowStatus(item.status_workflow) === 'CLOSED',
+          );
+        let referenciaResuelta = this.resolveAlertReferenceDisplay(row, payload);
         if (row.referencia_tipo === 'PROGRAMACION') {
           referenciaResuelta =
             String(payload.procedimiento_nombre || payload.plan_nombre || payload.plan_codigo || referenciaResuelta);
@@ -5821,17 +6005,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             'Validar la bitácora y corregir la lectura antes de continuar.';
         }
 
+        let effectiveEstado = this.normalizeAlertState(row.estado);
+        let effectiveNivel = this.normalizeAlertLevel(row.nivel);
+        if (hasClosedWorkOrders) {
+          const completedWorkOrderLabel =
+            workOrderLabel ||
+            linkedWorkOrders[linkedWorkOrders.length - 1]?.label ||
+            'OT cerrada';
+          effectiveEstado = 'CERRADA';
+          effectiveNivel = 'INFO';
+          if (row.origen === 'PROGRAMACION') {
+            subtitle = `Se culminó la OT ${completedWorkOrderLabel}.`;
+            accionSugerida =
+              'Mantenimiento culminado. Validar actualización de programación y evidencias finales.';
+          } else if (!subtitle) {
+            subtitle = `Se culminó la OT ${completedWorkOrderLabel}.`;
+            accionSugerida = 'Proceso culminado y registrado correctamente.';
+          }
+        }
+
         if (!subtitle) {
           subtitle = title;
         }
-        if (workOrderLabel) {
+        if (workOrderLabel && !hasClosedWorkOrders) {
           subtitle = `${subtitle} · OT ${workOrderLabel}`;
         }
 
         return {
           ...row,
-          estado: this.normalizeAlertState(row.estado),
-          nivel: this.normalizeAlertLevel(row.nivel),
+          estado: effectiveEstado,
+          nivel: effectiveNivel,
           equipo_codigo: equipoCodigo,
           equipo_nombre: equipoNombre,
           equipo_label: equipoLabel || null,
@@ -10282,9 +10485,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where: { is_deleted: false },
       order: { fecha_generada: 'DESC', id: 'DESC' },
     });
+    const enrichedRows = await this.enrichAlertRows(rows);
 
     const totals = {
-      total: rows.length,
+      total: enrichedRows.length,
       abiertas: 0,
       en_proceso: 0,
       resueltas: 0,
@@ -10296,7 +10500,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const byCategory: Record<string, number> = {};
     const byOrigin: Record<string, number> = {};
 
-    for (const row of rows) {
+    for (const row of enrichedRows) {
       const estado = this.normalizeAlertState(row.estado);
       const nivel = this.normalizeAlertLevel(row.nivel);
       const categoria = String(row.categoria || 'SIN_CATEGORIA')
@@ -11002,6 +11206,121 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         };
       }),
       'Consumos listados',
+    );
+  }
+
+  async listMaterialReservations(productoId: string, bodegaId: string) {
+    const normalizedProductoId = String(productoId || '').trim();
+    const normalizedBodegaId = String(bodegaId || '').trim();
+
+    if (!normalizedProductoId) {
+      throw new BadRequestException('producto_id es obligatorio');
+    }
+    if (!normalizedBodegaId) {
+      throw new BadRequestException('bodega_id es obligatorio');
+    }
+
+    const [producto, bodega, reservas] = await Promise.all([
+      this.findOneOrFail(this.productoRepo, {
+        id: normalizedProductoId,
+        is_deleted: false,
+      }),
+      this.findOneOrFail(this.bodegaRepo, {
+        id: normalizedBodegaId,
+        is_deleted: false,
+      }),
+      this.reservaRepo.find({
+        where: {
+          producto_id: normalizedProductoId,
+          bodega_id: normalizedBodegaId,
+          is_deleted: false,
+        },
+        order: { id: 'DESC' },
+      }),
+    ]);
+
+    const workOrderIds = [
+      ...new Set(
+        reservas
+          .map((row) => String(row.work_order_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+
+    const workOrders = workOrderIds.length
+      ? await this.woRepo.find({
+          where: { id: In(workOrderIds), is_deleted: false },
+        })
+      : [];
+    const workOrderMap = new Map(workOrders.map((row) => [row.id, row]));
+
+    const equipmentIds = [
+      ...new Set(
+        workOrders
+          .map((row) => String(row.equipment_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const equipments = equipmentIds.length
+      ? await this.equipoRepo.find({
+          where: { id: In(equipmentIds), is_deleted: false },
+        })
+      : [];
+    const equipmentMap = new Map(equipments.map((row) => [row.id, row]));
+
+    const items = reservas.map((row) => {
+      const workOrder = workOrderMap.get(row.work_order_id);
+      const equipment = workOrder?.equipment_id
+        ? equipmentMap.get(workOrder.equipment_id)
+        : null;
+      const workOrderLabel = workOrder
+        ? [workOrder.code, workOrder.title].filter(Boolean).join(' - ')
+        : `OT ${row.work_order_id}`;
+
+      return {
+        id: row.id,
+        work_order_id: row.work_order_id,
+        producto_id: row.producto_id,
+        bodega_id: row.bodega_id,
+        cantidad: this.toNumeric(row.cantidad, 0),
+        estado: String(row.estado || 'RESERVADO').trim().toUpperCase(),
+        work_order_code: workOrder?.code ?? null,
+        work_order_title: workOrder?.title ?? null,
+        work_order_status: workOrder
+          ? this.normalizeWorkflowStatus(workOrder.status_workflow)
+          : null,
+        work_order_label: workOrderLabel,
+        equipment_id: workOrder?.equipment_id ?? null,
+        equipment_code: equipment?.codigo ?? null,
+        equipment_name: equipment?.nombre ?? null,
+        equipment_label:
+          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
+          null,
+      };
+    });
+
+    const totalCantidad = items.reduce(
+      (acc, item) => acc + this.toNumeric(item.cantidad, 0),
+      0,
+    );
+    const activeCount = items.filter((item) => item.estado === 'RESERVADO').length;
+
+    return this.wrap(
+      {
+        producto_id: producto.id,
+        producto_codigo: producto.codigo ?? null,
+        producto_nombre: producto.nombre ?? null,
+        producto_label: this.buildProductoLabel(producto),
+        bodega_id: bodega.id,
+        bodega_codigo: bodega.codigo ?? null,
+        bodega_nombre: bodega.nombre ?? null,
+        bodega_label: this.buildBodegaLabel(bodega),
+        total_reservas: items.length,
+        reservas_activas: activeCount,
+        total_cantidad: totalCantidad,
+        items,
+      },
+      'Reservas de material listadas',
     );
   }
 

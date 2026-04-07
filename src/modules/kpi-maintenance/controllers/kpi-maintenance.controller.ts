@@ -1153,6 +1153,29 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({
+    summary:
+      'Listar reservas de stock de un material en una bodega y la OT a la que están ligadas',
+  })
+  @ApiQuery({
+    name: 'producto_id',
+    required: true,
+    description: 'ID del material/producto',
+  })
+  @ApiQuery({
+    name: 'bodega_id',
+    required: true,
+    description: 'ID de la bodega',
+  })
+  @Get('work-orders/material-reservations')
+  listMaterialReservations(
+    @Query('producto_id') productoId: string,
+    @Query('bodega_id') bodegaId: string,
+  ) {
+    return this.service.listMaterialReservations(productoId, bodegaId);
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Obtener orden de trabajo por ID' })
   @ApiParam({
     name: 'id',

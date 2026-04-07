@@ -358,6 +358,82 @@ describe('KpiMaintenanceService alerts', () => {
       }),
     );
   });
+  it('marca la alerta de programación como informativa cuando la OT vinculada culmina', async () => {
+    const recalcSpy = jest
+      .spyOn(service as any, 'recalculateProgramacionFields')
+      .mockResolvedValue({});
+
+    repos.alertaRepo.find.mockResolvedValue([
+      {
+        id: 'alert-1',
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'MANTENIMIENTO_VENCIDO',
+        categoria: 'MANTENIMIENTO',
+        nivel: 'CRITICAL',
+        origen: 'PROGRAMACION',
+        referencia_tipo: 'PROGRAMACION',
+        referencia: 'PROGRAMACION:prog-1',
+        detalle: 'UGN - 03 · MPG 325H · atrasada 0 d',
+        fecha_generada: new Date('2026-04-02T10:00:00Z'),
+        ultima_evaluacion_at: new Date('2026-04-02T10:00:00Z'),
+        estado: 'EN_PROCESO',
+        payload_json: {
+          programacion_id: 'prog-1',
+          plan_nombre: 'MPG 325H',
+          work_orders: [
+            {
+              id: 'wo-1',
+              code: 'OT-A00005',
+              title: 'Cambio de aceite',
+              status_workflow: 'IN_PROGRESS',
+            },
+          ],
+        },
+        work_order_id: 'wo-1',
+        is_deleted: false,
+      },
+    ]);
+    repos.alertaRepo.save.mockImplementation(async (value) => value);
+    repos.programacionRepo.findOne.mockResolvedValue({
+      id: 'prog-1',
+      equipo_id: 'equipo-1',
+      plan_id: 'plan-1',
+      is_deleted: false,
+      payload_json: {},
+      ultima_ejecucion_fecha: null,
+      ultima_ejecucion_horas: null,
+    });
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      is_deleted: false,
+      horometro_actual: 15432,
+    });
+
+    await (service as any).syncAlertsForWorkOrder({
+      id: 'wo-1',
+      code: 'OT-A00005',
+      title: 'Cambio de aceite',
+      status_workflow: 'CLOSED',
+      equipment_id: 'equipo-1',
+      closed_at: new Date('2026-04-02T16:30:00Z'),
+    });
+
+    expect(recalcSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'prog-1',
+        ultima_ejecucion_fecha: '2026-04-02',
+        ultima_ejecucion_horas: 15432,
+      }),
+    );
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'alert-1',
+        estado: 'CERRADA',
+        nivel: 'INFO',
+        detalle: expect.stringContaining('OT-A00005'),
+      }),
+    );
+  });
 });
 
 describe('KpiMaintenanceService work orders', () => {
