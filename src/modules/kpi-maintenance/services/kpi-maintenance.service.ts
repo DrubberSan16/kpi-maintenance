@@ -199,6 +199,25 @@ type AlertCandidate = {
   payload_json: Record<string, unknown>;
 };
 
+type InventoryAlertItem = {
+  stock_id: string;
+  producto_id: string;
+  producto_codigo: string | null;
+  producto_nombre: string | null;
+  producto_label: string;
+  bodega_id: string;
+  bodega_codigo: string | null;
+  bodega_nombre: string | null;
+  bodega_label: string;
+  stock_actual: number;
+  stock_min_bodega: number;
+  stock_max_bodega: number;
+  costo_promedio_bodega: number;
+  nivel: AlertLevel;
+  observacion: string;
+  actor_username: string | null;
+};
+
 type SecurityUserDirectoryItem = {
   id: string | null;
   nameUser: string | null;
@@ -683,6 +702,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KpiMaintenanceService.name);
   private recalculationInterval: NodeJS.Timeout | null = null;
   private recalculationRunning = false;
+  private inventoryImportSuppressed = false;
 
   private readonly RECALCULATION_INTERVAL_MS = 60 * 1000;
   private readonly RECALCULATION_BATCH_SIZE = 100;
@@ -1107,7 +1127,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.recalculationRunning = true;
-    void this.recalculateAlertas()
+    void this.recalculateAlertas(source)
       .then((result) => {
         const stats = result.data as { total?: number; skipped?: number };
         this.logger.log(
@@ -1130,6 +1150,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async recalculateAlertasNow(source = 'manual') {
+    const normalizedSource = String(source || 'manual').trim().toLowerCase();
+    if (normalizedSource === 'inventory-kardex-import-started') {
+      this.inventoryImportSuppressed = true;
+      return this.wrap(
+        { accepted: true, source, inventory_import_running: true },
+        'Importacion de inventario marcada en proceso',
+      );
+    }
+    if (
+      normalizedSource === 'inventory-kardex-import-completed' ||
+      normalizedSource === 'inventory-kardex-import-failed'
+    ) {
+      this.inventoryImportSuppressed = false;
+    }
+
     if (this.recalculationRunning) {
       return this.wrap(
         { accepted: false, source },
@@ -2346,6 +2381,107 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return `${this.publicBaseUrl}/alertas`;
   }
 
+  private getInventoryServiceBaseUrl() {
+    return String(
+      process.env.KPI_INVENTORY_URL || process.env.INVENTORY_SERVICE_URL || '',
+    )
+      .trim()
+      .replace(/\/$/, '');
+  }
+
+  private async isInventoryImportRunning() {
+    const baseUrl = this.getInventoryServiceBaseUrl();
+    if (!baseUrl) return false;
+    try {
+      const response = await fetch(`${baseUrl}/kardex/import/active/summary`);
+      if (!response.ok) {
+        this.logger.warn(
+          `No se pudo consultar el estado global de importacion de inventario: ${response.status}`,
+        );
+        return false;
+      }
+      const payload = (await response.json()) as {
+        data?: { active?: boolean };
+      };
+      return Boolean(payload?.data?.active);
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo validar importacion de inventario en curso: ${error?.message ?? 'desconocido'}`,
+      );
+      return false;
+    }
+  }
+
+  private getInventoryAlertItems(payload: Record<string, unknown>) {
+    return Array.isArray(payload.inventory_items)
+      ? payload.inventory_items.filter(
+          (item): item is InventoryAlertItem =>
+            Boolean(item) && typeof item === 'object',
+        )
+      : [];
+  }
+
+  private buildInventoryAlertTableHtml(payload: Record<string, unknown>) {
+    const items = this.getInventoryAlertItems(payload);
+    if (!items.length) return '';
+    const rows = items
+      .map(
+        (item) => `
+          <tr>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(
+              item.producto_label,
+            )}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(
+              item.bodega_label,
+            )}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;text-align:right;">${this.escapeHtml(
+              item.stock_actual.toFixed(2),
+            )}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;text-align:right;">${this.escapeHtml(
+              item.stock_min_bodega.toFixed(2),
+            )}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(
+              item.observacion,
+            )}</td>
+          </tr>`,
+      )
+      .join('');
+
+    return `
+      <div style="margin-top:22px;">
+        <div style="font-size:13px;color:#5f7388;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Materiales afectados</div>
+        <div style="border:1px solid #dbe4f0;border-radius:16px;overflow:hidden;background:#fbfdff;">
+          <table style="width:100%;border-collapse:collapse;font-size:14px;color:#193550;">
+            <thead style="background:#eef4fb;">
+              <tr>
+                <th style="padding:12px;text-align:left;">Material</th>
+                <th style="padding:12px;text-align:left;">Bodega</th>
+                <th style="padding:12px;text-align:right;">Stock actual</th>
+                <th style="padding:12px;text-align:right;">Stock minimo</th>
+                <th style="padding:12px;text-align:left;">Observacion</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  private buildInventoryAlertTableText(payload: Record<string, unknown>) {
+    const items = this.getInventoryAlertItems(payload);
+    if (!items.length) return [];
+    return [
+      'Materiales afectados:',
+      ...items.map(
+        (item) =>
+          `- ${item.producto_label} | ${item.bodega_label} | actual ${item.stock_actual.toFixed(
+            2,
+          )} | minimo ${item.stock_min_bodega.toFixed(2)} | ${item.observacion}`,
+      ),
+    ];
+  }
+
   private buildAlertEmailSubject(
     row: AlertaMantenimientoEntity,
     recipient: AlertNotificationRecipient,
@@ -2387,7 +2523,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'General',
     );
     const consoleUrl = this.buildAlertConsoleUrl();
-    const reference = this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id);
+    const reference =
+      row.origen === 'INVENTARIO' && this.getInventoryAlertItems(payload).length
+        ? 'Resumen general de inventario'
+        : this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id);
+    const inventoryTableHtml = this.buildInventoryAlertTableHtml(payload);
 
     return `
       <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
@@ -2431,6 +2571,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 )
                 .join('')}
             </div>
+            ${inventoryTableHtml}
             ${
               consoleUrl
                 ? `<div style="margin-top:24px;">
@@ -2474,9 +2615,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       `Equipo: ${equipo}`,
       `Tipo: ${row.tipo_alerta}`,
       `Detalle: ${row.detalle || 'Alerta operativa'}`,
-      `Referencia: ${this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id)}`,
+      `Referencia: ${
+        row.origen === 'INVENTARIO' && this.getInventoryAlertItems(payload).length
+          ? 'Resumen general de inventario'
+          : this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id)
+      }`,
       `Fecha: ${this.formatAlertEmailDate(row.fecha_generada)}`,
       '',
+      ...this.buildInventoryAlertTableText(payload),
+      ...(this.getInventoryAlertItems(payload).length ? [''] : []),
       this.buildAlertConsoleUrl()
         ? `Revisa el modulo de alertas en: ${this.buildAlertConsoleUrl()}`
         : '',
@@ -5664,63 +5811,88 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       rows.map((row) => row.bodega_id),
     );
 
-    return rows.flatMap((row) => {
-      const stockActual = this.toNumeric(row.stock_actual);
-      const stockMinimo = this.toNumeric(row.stock_min_bodega);
-      if (stockMinimo <= 0 || stockActual > stockMinimo) return [];
+    const items = rows
+      .map((row): InventoryAlertItem | null => {
+        const stockActual = this.toNumeric(row.stock_actual);
+        const stockMinimo = this.toNumeric(row.stock_min_bodega);
+        if (stockMinimo <= 0 || stockActual > stockMinimo) return null;
 
-      const producto = productMap.get(row.producto_id);
-      const bodega = warehouseMap.get(row.bodega_id);
-      const productoLabel = this.buildProductoLabel(producto) ?? row.producto_id;
-      const bodegaLabel = this.buildBodegaLabel(bodega) ?? row.bodega_id;
-      const isCritical = stockActual <= 0;
+        const producto = productMap.get(row.producto_id);
+        const bodega = warehouseMap.get(row.bodega_id);
+        const productoLabel = this.buildProductoLabel(producto) ?? row.producto_id;
+        const bodegaLabel = this.buildBodegaLabel(bodega) ?? row.bodega_id;
+        const isCritical = stockActual <= 0;
 
-      return [
-        {
-          equipo_id: null,
-          tipo_alerta: isCritical ? 'SIN_STOCK' : 'STOCK_BAJO_BODEGA',
-          categoria: 'INVENTARIO' as AlertCategory,
+        return {
+          stock_id: row.id,
+          producto_id: row.producto_id,
+          producto_codigo: producto?.codigo ?? null,
+          producto_nombre: producto?.nombre ?? null,
+          producto_label: productoLabel,
+          bodega_id: row.bodega_id,
+          bodega_codigo: bodega?.codigo ?? null,
+          bodega_nombre: bodega?.nombre ?? null,
+          bodega_label: bodegaLabel,
+          stock_actual: stockActual,
+          stock_min_bodega: stockMinimo,
+          stock_max_bodega: this.toNumeric(row.stock_max_bodega),
+          costo_promedio_bodega: this.toNumeric(row.costo_promedio_bodega),
           nivel: isCritical ? 'CRITICAL' : 'WARNING',
-          origen: 'INVENTARIO' as AlertOrigin,
-          referencia_tipo: 'STOCK_BODEGA',
-          referencia: `STOCK_BODEGA:${row.id}`,
-          detalle: `${productoLabel} · ${bodegaLabel} · stock ${stockActual.toFixed(
-            2,
-          )} / mínimo ${stockMinimo.toFixed(2)}`,
-          payload_json: {
-            stock_id: row.id,
-            producto_id: row.producto_id,
-            producto_codigo: producto?.codigo ?? null,
-            producto_nombre: producto?.nombre ?? null,
-            producto_label: productoLabel,
-            bodega_id: row.bodega_id,
-            bodega_codigo: bodega?.codigo ?? null,
-            bodega_nombre: bodega?.nombre ?? null,
-            bodega_label: bodegaLabel,
-            stock_actual: stockActual,
-            stock_min_bodega: stockMinimo,
-            stock_max_bodega: this.toNumeric(row.stock_max_bodega),
-            costo_promedio_bodega: this.toNumeric(row.costo_promedio_bodega),
-            actor_username: this.firstNonEmptyString(
-              row.updated_by,
-              row.created_by,
-            ),
-            actor_email: null,
-            actor_user_id: null,
-          },
+          observacion: isCritical
+            ? 'Sin stock. Gestionar reposicion inmediata o traslado entre bodegas.'
+            : 'Bajo minimo. Revisar reabastecimiento antes de afectar mantenimiento u operacion.',
+          actor_username: this.firstNonEmptyString(row.updated_by, row.created_by),
+        };
+      })
+      .filter((item): item is InventoryAlertItem => item !== null)
+      .sort((a, b) => {
+        const levelDiff = this.alertLevelRank(a.nivel) - this.alertLevelRank(b.nivel);
+        if (levelDiff !== 0) return levelDiff;
+        return a.producto_label.localeCompare(b.producto_label);
+      });
+
+    if (!items.length) return [];
+
+    const criticalCount = items.filter((item) => item.nivel === 'CRITICAL').length;
+    const warningCount = items.length - criticalCount;
+
+    return [
+      {
+        equipo_id: null,
+        tipo_alerta: criticalCount > 0 ? 'SIN_STOCK' : 'STOCK_BAJO_BODEGA',
+        categoria: 'INVENTARIO' as AlertCategory,
+        nivel: criticalCount > 0 ? 'CRITICAL' : 'WARNING',
+        origen: 'INVENTARIO' as AlertOrigin,
+        referencia_tipo: 'INVENTARIO_RESUMEN',
+        referencia: 'INVENTARIO:RESUMEN_GENERAL',
+        detalle: `${items.length} material(es) en alerta de inventario.`,
+        payload_json: {
+          inventory_items: items,
+          total_materiales: items.length,
+          materiales_criticos: criticalCount,
+          materiales_preventivos: warningCount,
+          actor_username: this.firstNonEmptyString(
+            ...items.map((item) => item.actor_username),
+          ),
+          actor_email: null,
+          actor_user_id: null,
         },
-      ];
-    });
+      },
+    ];
   }
 
-  private async buildAlertCandidates() {
+  private async buildAlertCandidates(options?: { includeInventory?: boolean }) {
+    const includeInventory = options?.includeInventory !== false;
+
     const [programaciones, reportesDiarios, lubricantes, combustibles, inventario] =
       await Promise.all([
         this.buildProgramacionAlertCandidates(),
         this.buildReporteDiarioAlertCandidates(),
         this.buildLubricanteAlertCandidates(),
         this.buildFuelAlertCandidates(),
-        this.buildInventoryAlertCandidates(),
+        includeInventory
+          ? this.buildInventoryAlertCandidates()
+          : Promise.resolve([] as AlertCandidate[]),
       ]);
 
     return [
@@ -5732,15 +5904,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ];
   }
 
-  private async syncAlertCandidates(candidates: AlertCandidate[]) {
-    const managedOrigins: AlertOrigin[] = [
-      'SYSTEM',
-      'PROGRAMACION',
-      'REPORTE_DIARIO',
-      'ANALISIS_LUBRICANTE',
-      'COMBUSTIBLE',
-      'INVENTARIO',
-    ];
+  private async syncAlertCandidates(
+    candidates: AlertCandidate[],
+    options?: { managedOrigins?: AlertOrigin[] },
+  ) {
+    const managedOrigins: AlertOrigin[] = options?.managedOrigins?.length
+      ? options.managedOrigins
+      : [
+          'SYSTEM',
+          'PROGRAMACION',
+          'REPORTE_DIARIO',
+          'ANALISIS_LUBRICANTE',
+          'COMBUSTIBLE',
+          'INVENTARIO',
+        ];
     const activeRows = await this.alertaRepo.find({
       where: {
         is_deleted: false,
@@ -5881,6 +6058,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return [...rows]
       .map((row) => {
         const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+        const inventoryItems = this.getInventoryAlertItems(payload);
         const equipo = row.equipo_id ? equipoMap.get(row.equipo_id) : null;
         const linkedWorkOrders = this.extractAlertWorkOrderSnapshots(row)
           .map((snapshot) => {
@@ -5892,7 +6070,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                   ? this.normalizeWorkflowStatus(snapshot.status_workflow)
                   : null,
                 label:
-                  [snapshot.code, snapshot.title].filter(Boolean).join(' · ') ||
+                  [snapshot.code, snapshot.title].filter(Boolean).join(' ? ') ||
                   snapshot.id,
               };
             }
@@ -5901,7 +6079,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             return {
               ...nextSnapshot,
               label:
-                `${persisted.code} · ${persisted.title}`.trim() || persisted.id,
+                `${persisted.code} ? ${persisted.title}`.trim() || persisted.id,
             };
           })
           .filter((item) => item.id);
@@ -5919,7 +6097,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           .filter(Boolean)
           .join(' - ');
         const workOrderLabel = workOrder
-          ? `${workOrder.code} · ${workOrder.title}`
+          ? `${workOrder.code} ? ${workOrder.title}`
           : null;
 
         const hasClosedWorkOrders =
@@ -5930,11 +6108,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
         let referenciaResuelta = this.resolveAlertReferenceDisplay(row, payload);
         if (row.referencia_tipo === 'PROGRAMACION') {
-          referenciaResuelta =
-            String(payload.procedimiento_nombre || payload.plan_nombre || payload.plan_codigo || referenciaResuelta);
+          referenciaResuelta = String(
+            payload.procedimiento_nombre ||
+              payload.plan_nombre ||
+              payload.plan_codigo ||
+              referenciaResuelta,
+          );
         } else if (row.referencia_tipo === 'REPORTE_DIARIO') {
-          referenciaResuelta =
-            String(payload.reporte_codigo || payload.fecha_reporte || referenciaResuelta);
+          referenciaResuelta = String(
+            payload.reporte_codigo || payload.fecha_reporte || referenciaResuelta,
+          );
         } else if (row.referencia_tipo === 'ANALISIS_LUBRICANTE') {
           referenciaResuelta = String(payload.codigo || referenciaResuelta);
         } else if (row.referencia_tipo === 'COMBUSTIBLE') {
@@ -5945,12 +6128,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             String(payload.bodega_label || '').trim(),
           ]
             .filter(Boolean)
-            .join(' · ') || referenciaResuelta;
+            .join(' ? ') || referenciaResuelta;
+        } else if (row.referencia_tipo === 'INVENTARIO_RESUMEN') {
+          referenciaResuelta = 'Resumen general de inventario';
         }
 
-        let title = `${row.tipo_alerta}${equipoLabel ? ` · ${equipoLabel}` : ''}`;
+        let title = `${row.tipo_alerta}${equipoLabel ? ` ? ${equipoLabel}` : ''}`;
         let subtitle = String(row.detalle || '').trim();
-        let accionSugerida = 'Revisar la condición y programar la acción correctiva.';
+        let accionSugerida = 'Revisar la condicion y programar la accion correctiva.';
 
         if (row.origen === 'PROGRAMACION') {
           const planLabel =
@@ -5960,7 +6145,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 payload.plan_codigo ||
                 'Mantenimiento',
             ).trim();
-          title = `${planLabel}${equipoLabel ? ` · ${equipoLabel}` : ''}`;
+          title = `${planLabel}${equipoLabel ? ` ? ${equipoLabel}` : ''}`;
           accionSugerida =
             row.tipo_alerta === 'MANTENIMIENTO_VENCIDO'
               ? 'Generar o priorizar la OT del mantenimiento vencido.'
@@ -5968,43 +6153,52 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         } else if (row.origen === 'REPORTE_DIARIO') {
           const mpg = String(payload.proximo_mpg || '').trim();
           title = `${mpg || 'Seguimiento MPG'}${
-            equipoLabel ? ` · ${equipoLabel}` : ''
+            equipoLabel ? ` ? ${equipoLabel}` : ''
           }`;
           accionSugerida =
             row.tipo_alerta === 'REPORTE_DIARIO_VENCIDO'
-              ? 'Validar el reporte diario y abrir la intervención correspondiente.'
-              : 'Coordinar la atención antes de que el equipo quede vencido.';
+              ? 'Validar el reporte diario y abrir la intervencion correspondiente.'
+              : 'Coordinar la atencion antes de que el equipo quede vencido.';
         } else if (row.origen === 'ANALISIS_LUBRICANTE') {
           const compartimento = String(
             payload.compartimento_principal || 'Compartimento',
           ).trim();
-          title = `Análisis de lubricante · ${compartimento}${
-            equipoLabel ? ` · ${equipoLabel}` : ''
+          title = `Analisis de lubricante ? ${compartimento}${
+            equipoLabel ? ` ? ${equipoLabel}` : ''
           }`;
           accionSugerida =
-            'Revisar diagnóstico, tendencias y tomar muestra o intervención correctiva.';
+            'Revisar diagnostico, tendencias y tomar muestra o intervencion correctiva.';
         } else if (row.origen === 'COMBUSTIBLE') {
-          title = `Combustible · ${String(payload.tanque || 'Tanque').trim()}`;
+          title = `Combustible ? ${String(payload.tanque || 'Tanque').trim()}`;
           accionSugerida =
-            'Coordinar abastecimiento y confirmar que el tanque regrese sobre el mínimo.';
+            'Coordinar abastecimiento y confirmar que el tanque regrese sobre el minimo.';
         } else if (row.origen === 'INVENTARIO') {
-          title = [
-            'Inventario',
-            String(payload.producto_label || '').trim(),
-            String(payload.bodega_label || '').trim(),
-          ]
-            .filter(Boolean)
-            .join(' · ');
+          if (inventoryItems.length) {
+            const criticalItems = this.toNumeric(payload.materiales_criticos, 0);
+            const warningItems = this.toNumeric(
+              payload.materiales_preventivos,
+              0,
+            );
+            title = `Inventario ? ${inventoryItems.length} materiales en alerta`;
+            subtitle = `Criticos: ${criticalItems} ? Preventivos: ${warningItems}`;
+          } else {
+            title = [
+              'Inventario',
+              String(payload.producto_label || '').trim(),
+              String(payload.bodega_label || '').trim(),
+            ]
+              .filter(Boolean)
+              .join(' ? ');
+          }
           accionSugerida =
             row.tipo_alerta === 'SIN_STOCK'
-              ? 'Gestionar reposición inmediata o traslado entre bodegas.'
-              : 'Revisar reabastecimiento antes de afectar mantenimiento u operación.';
+              ? 'Gestionar reposicion inmediata o traslado entre bodegas.'
+              : 'Revisar reabastecimiento antes de afectar mantenimiento u operacion.';
         } else if (row.origen === 'BITACORA') {
-          title = `Anomalía de datos${equipoLabel ? ` · ${equipoLabel}` : ''}`;
+          title = `Anomalia de datos${equipoLabel ? ` ? ${equipoLabel}` : ''}`;
           accionSugerida =
-            'Validar la bitácora y corregir la lectura antes de continuar.';
+            'Validar la bitacora y corregir la lectura antes de continuar.';
         }
-
         let effectiveEstado = this.normalizeAlertState(row.estado);
         let effectiveNivel = this.normalizeAlertLevel(row.nivel);
         if (hasClosedWorkOrders) {
@@ -10550,11 +10744,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async recalculateAlertas(source = 'manual') {
-    const candidates = await this.buildAlertCandidates();
-    const stats = await this.syncAlertCandidates(candidates);
+    const inventoryImportRunning =
+      this.inventoryImportSuppressed || (await this.isInventoryImportRunning());
+    const managedOrigins: AlertOrigin[] = inventoryImportRunning
+      ? [
+          'SYSTEM',
+          'PROGRAMACION',
+          'REPORTE_DIARIO',
+          'ANALISIS_LUBRICANTE',
+          'COMBUSTIBLE',
+        ]
+      : [
+          'SYSTEM',
+          'PROGRAMACION',
+          'REPORTE_DIARIO',
+          'ANALISIS_LUBRICANTE',
+          'COMBUSTIBLE',
+          'INVENTARIO',
+        ];
+    const candidates = await this.buildAlertCandidates({
+      includeInventory: !inventoryImportRunning,
+    });
+    const stats = await this.syncAlertCandidates(candidates, { managedOrigins });
     return this.wrap(
       {
         source,
+        inventory_import_running: inventoryImportRunning,
         ...stats,
       },
       'Alertas recalculadas',
