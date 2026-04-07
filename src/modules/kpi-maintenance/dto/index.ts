@@ -734,6 +734,28 @@ export class AlertaQueryDto {
   @IsOptional()
   @IsUUID()
   work_order_id?: string;
+  @ApiPropertyOptional({
+    description: 'Página a consultar',
+    minimum: 1,
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  page?: number;
+  @ApiPropertyOptional({
+    description: 'Cantidad de registros por página',
+    minimum: 1,
+    maximum: 500,
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  @Max(500)
+  limit?: number;
 }
 
 export class WorkOrderQueryDto {

@@ -10454,6 +10454,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async listAlertas(q: AlertaQueryDto) {
+    const page = Number.isFinite(Number(q.page)) && Number(q.page) > 0 ? Number(q.page) : 1;
+    const limit = Math.min(
+      Number.isFinite(Number(q.limit)) && Number(q.limit) > 0 ? Number(q.limit) : 100,
+      500,
+    );
     const where: FindOptionsWhere<AlertaMantenimientoEntity> = {
       is_deleted: false,
     };
@@ -10477,7 +10482,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             : String(row.work_order_id || '') === String(q.work_order_id),
         )
       : enriched;
-    return this.wrap(filtered, 'Alertas listadas');
+    const total = filtered.length;
+    const totalPages = total > 0 ? Math.ceil(total / limit) : 1;
+    const paginated = filtered.slice((page - 1) * limit, page * limit);
+    return this.wrap(paginated, 'Alertas listadas', {
+      page,
+      limit,
+      total,
+      totalPages,
+    });
   }
 
   async getAlertasSummary() {
