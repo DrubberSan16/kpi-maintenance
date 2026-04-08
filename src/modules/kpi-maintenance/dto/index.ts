@@ -85,6 +85,44 @@ export class EquipoQueryDto {
   limit?: number;
 }
 
+export class CreateEquipoComponenteInlineDto {
+  @ApiPropertyOptional({ description: 'ID del compartimiento existente', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  id?: string;
+
+  @ApiPropertyOptional({ description: 'Codigo del compartimiento' })
+  @IsOptional()
+  @IsString()
+  codigo?: string;
+
+  @ApiProperty({ description: 'Nombre corto del compartimiento' })
+  @IsString()
+  @IsNotEmpty()
+  nombre: string;
+
+  @ApiPropertyOptional({ description: 'Nombre oficial del compartimiento' })
+  @IsOptional()
+  @IsString()
+  nombre_oficial?: string;
+
+  @ApiPropertyOptional({ description: 'Categoria funcional del compartimiento' })
+  @IsOptional()
+  @IsString()
+  categoria?: string;
+
+  @ApiPropertyOptional({ description: 'Orden visual del compartimiento', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  orden?: number;
+
+  @ApiPropertyOptional({ description: 'Descripcion operacional del compartimiento' })
+  @IsOptional()
+  @IsString()
+  descripcion?: string;
+}
+
 export class CreateEquipoDto {
   @ApiProperty({ description: 'Código único del equipo' })
   @IsString()
@@ -136,6 +174,17 @@ export class CreateEquipoDto {
   @Type(() => Number)
   @IsNumber()
   horometro_actual?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Compartimientos o partes oficiales del equipo. Si se envian, reemplazan la configuracion actual del equipo.',
+    type: () => [CreateEquipoComponenteInlineDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateEquipoComponenteInlineDto)
+  componentes?: CreateEquipoComponenteInlineDto[];
 }
 
 export class UpdateEquipoDto extends CreateEquipoDto {}

@@ -6534,6 +6534,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(await this.findEquipoOrFail(id), 'Equipo obtenido');
   }
   async createEquipo(dto: CreateEquipoDto) {
+    const { componentes: _componentes, ...equipoPayload } = dto;
     const criticidad = this.normalizeEquipoCriticidad(
       dto.criticidad ?? EquipoCriticidadEnum.MEDIA,
     );
@@ -6546,7 +6547,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null;
     const saved = await this.equipoRepo.save(
       this.equipoRepo.create({
-        ...dto,
+        ...equipoPayload,
         criticidad,
         estado_operativo,
         nombre_real,
@@ -6555,13 +6556,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         horometro_actual: dto.horometro_actual ?? 0,
       }),
     );
-    await this.ensureDefaultEquipmentComponents(saved);
+    if (Array.isArray(dto.componentes)) {
+      await this.syncEquipmentComponents(saved.id, dto.componentes);
+    } else {
+      await this.ensureDefaultEquipmentComponents(saved);
+    }
     return this.wrap(saved, 'Equipo creado');
   }
   async updateEquipo(id: string, dto: UpdateEquipoDto) {
     const e = await this.findEquipoOrFail(id);
+    const { componentes: _componentes, ...equipoPayload } = dto;
     Object.assign(e, {
-      ...dto,
+      ...equipoPayload,
       criticidad:
         dto.criticidad !== undefined
           ? this.normalizeEquipoCriticidad(dto.criticidad)
@@ -6581,7 +6587,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null
           : e.codigo_lubricante,
     });
-    return this.wrap(await this.equipoRepo.save(e), 'Equipo actualizado');
+    const saved = await this.equipoRepo.save(e);
+    if (Array.isArray(dto.componentes)) {
+      await this.syncEquipmentComponents(saved.id, dto.componentes);
+    }
+    return this.wrap(saved, 'Equipo actualizado');
   }
   async deleteEquipo(id: string) {
     const e = await this.findEquipoOrFail(id);
@@ -7227,6 +7237,90 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }),
       ),
     );
+  }
+
+  private buildEquipmentComponentDrafts(
+    components?: Array<Record<string, any>>,
+  ) {
+    const normalized = (Array.isArray(components) ? components : [])
+      .map((component, index) => {
+        const codigo = String(component?.codigo ?? '').trim() || null;
+        const nombre = String(component?.nombre ?? '').trim();
+        const nombreOficial =
+          String(component?.nombre_oficial ?? '').trim() || nombre || null;
+        const descripcion =
+          String(component?.descripcion ?? '').trim() || null;
+        const categoria = String(component?.categoria ?? '').trim() || null;
+        const orden = Number(component?.orden ?? index + 1) || index + 1;
+        const hasMeaningfulData = Boolean(
+          codigo || nombre || nombreOficial || descripcion || categoria,
+        );
+        if (!hasMeaningfulData) return null;
+        return {
+          id: String(component?.id ?? '').trim() || null,
+          codigo,
+          nombre: nombre || nombreOficial || `Compartimiento ${index + 1}`,
+          nombre_oficial: nombreOficial,
+          categoria,
+          orden,
+          descripcion,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+    return normalized.length
+      ? normalized
+      : this.getDefaultEquipmentComponentTemplates().map((template) => ({
+          id: null,
+          codigo: template.codigo,
+          nombre: template.nombre,
+          nombre_oficial: template.nombre_oficial,
+          categoria: template.categoria,
+          orden: template.orden,
+          descripcion: template.descripcion,
+        }));
+  }
+
+  private async syncEquipmentComponents(
+    equipoId: string,
+    components?: Array<Record<string, any>>,
+  ) {
+    const drafts = this.buildEquipmentComponentDrafts(components);
+    const existing = await this.equipoComponenteRepo.find({
+      where: { equipo_id: equipoId, is_deleted: false },
+      order: { orden: 'ASC' },
+    });
+    const existingById = new Map(existing.map((item) => [item.id, item]));
+    const entitiesToSave: EquipoComponenteEntity[] = [];
+
+    for (const draft of drafts) {
+      const entity =
+        (draft.id ? existingById.get(draft.id) : null) ??
+        this.equipoComponenteRepo.create({
+          equipo_id: equipoId,
+          status: 'ACTIVE',
+        });
+
+      entity.equipo_id = equipoId;
+      entity.codigo = draft.codigo;
+      entity.nombre = draft.nombre;
+      entity.nombre_oficial = draft.nombre_oficial;
+      entity.categoria = draft.categoria;
+      entity.orden = draft.orden;
+      entity.descripcion = draft.descripcion;
+      entity.is_deleted = false;
+      entitiesToSave.push(entity);
+    }
+
+    const saved = await this.equipoComponenteRepo.save(entitiesToSave);
+    const retainedIds = new Set(saved.map((item) => item.id));
+    const removed = existing.filter((item) => !retainedIds.has(item.id));
+    if (removed.length) {
+      for (const item of removed) {
+        item.is_deleted = true;
+      }
+      await this.equipoComponenteRepo.save(removed);
+    }
   }
 
   async listComponentes(query: ComponenteQueryDto) {
