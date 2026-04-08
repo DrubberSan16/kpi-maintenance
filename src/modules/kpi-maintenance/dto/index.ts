@@ -590,6 +590,19 @@ export class CreateComponenteDto {
   @IsString()
   @IsNotEmpty()
   nombre: string;
+  @ApiPropertyOptional({ description: 'Nombre oficial o real del componente' })
+  @IsOptional()
+  @IsString()
+  nombre_oficial?: string;
+  @ApiPropertyOptional({ description: 'Categoria funcional del componente' })
+  @IsOptional()
+  @IsString()
+  categoria?: string;
+  @ApiPropertyOptional({ description: 'Orden de visualizacion', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  orden?: number;
   @ApiPropertyOptional({ description: 'Descripción del componente' })
   @IsOptional()
   @IsString()
@@ -786,6 +799,13 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsUUID()
   equipment_id?: string;
+  @ApiPropertyOptional({
+    description: 'ID del compartimiento o parte del equipo',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  equipo_componente_id?: string;
   @ApiPropertyOptional({ description: 'ID del plan', format: 'uuid' })
   @IsOptional()
   @IsUUID()
@@ -852,6 +872,17 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsUUID()
   alerta_id?: string;
+  @ApiPropertyOptional({
+    description: 'ID de la orden anexada o bloqueante',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  blocked_by_work_order_id?: string;
+  @ApiPropertyOptional({ description: 'Motivo del bloqueo o anexo' })
+  @IsOptional()
+  @IsString()
+  blocked_reason?: string;
 }
 
 export class UpdateWorkOrderDto {
@@ -895,10 +926,28 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsObject()
   valor_json?: Record<string, unknown>;
+  @ApiPropertyOptional({
+    description: 'ID del compartimiento o parte del equipo',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  equipo_componente_id?: string;
   @ApiPropertyOptional({ description: 'ID de la plantilla MPG', format: 'uuid' })
   @IsOptional()
   @IsUUID()
   procedimiento_id?: string;
+  @ApiPropertyOptional({
+    description: 'ID de la orden anexada o bloqueante',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  blocked_by_work_order_id?: string | null;
+  @ApiPropertyOptional({ description: 'Motivo del bloqueo o anexo' })
+  @IsOptional()
+  @IsString()
+  blocked_reason?: string;
 }
 
 export class CreateConsumoDto {
@@ -1164,6 +1213,16 @@ export class CreateProcedimientoPlantillaDto {
   @IsOptional()
   @IsUUID()
   bodega_id?: string;
+  @ApiPropertyOptional({ description: 'Codigo referencial del compartimiento' })
+  @IsOptional()
+  @IsString()
+  compartimiento_codigo_referencia?: string;
+  @ApiPropertyOptional({
+    description: 'Nombre oficial del compartimiento o parte objetivo',
+  })
+  @IsOptional()
+  @IsString()
+  compartimiento_nombre_oficial?: string;
 }
 
 export class UpdateProcedimientoPlantillaDto extends CreateProcedimientoPlantillaDto {}

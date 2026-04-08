@@ -37,6 +37,9 @@ export class EquipoComponenteEntity {
   @Column({ type: 'uuid', nullable: true }) parent_id?: string | null;
   @Column({ type: 'text', nullable: true }) codigo?: string | null;
   @Column() nombre: string;
+  @Column({ type: 'text', nullable: true }) nombre_oficial?: string | null;
+  @Column({ type: 'text', nullable: true }) categoria?: string | null;
+  @Column({ type: 'integer', default: 1 }) orden: number;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
@@ -325,6 +328,8 @@ export class ProcedimientoPlantillaEntity {
   @Column() nombre: string;
   @Column() tipo_proceso: string;
   @Column({ type: 'uuid', nullable: true }) bodega_id?: string | null;
+  @Column({ type: 'text', nullable: true }) compartimiento_codigo_referencia?: string | null;
+  @Column({ type: 'text', nullable: true }) compartimiento_nombre_oficial?: string | null;
   @Column({ type: 'text', nullable: true }) documento_referencia?: string | null;
   @Column({ type: 'text', nullable: true }) version?: string | null;
   @Column({ type: 'text', nullable: true }) clase_mantenimiento?: string | null;
@@ -663,7 +668,17 @@ export class WorkOrderEntity {
   @Column() code: string;
   @Column() type: string;
   @Column({ type: 'uuid', nullable: true }) equipment_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) equipo_componente_id?: string | null;
+  @Column({ type: 'text', nullable: true }) equipo_componente_nombre?: string | null;
+  @Column({ type: 'text', nullable: true }) equipo_componente_nombre_oficial?: string | null;
   @Column({ type: 'uuid', nullable: true }) plan_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) blocked_by_work_order_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) parent_work_order_id?: string | null;
+  @Column({ type: 'text', nullable: true }) blocked_reason?: string | null;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  blocked_at?: Date | null;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  resumed_at?: Date | null;
   @Column() title: string;
    @Column({ type: 'jsonb', nullable: true }) valor_json?: Record<
     string,

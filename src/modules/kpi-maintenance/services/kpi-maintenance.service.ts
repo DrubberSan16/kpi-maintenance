@@ -1701,6 +1701,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const raw = String(value || '').trim().toUpperCase();
     if (['PLANNED', 'PLANIFICADA', 'PLANIFICADO', 'CREADA', 'CREADO'].includes(raw)) return 'PLANNED';
     if (['IN_PROGRESS', 'IN PROGRESS', 'EN_PROCESO', 'EN PROCESO', 'PROCESSING'].includes(raw)) return 'IN_PROGRESS';
+    if (['BLOCKED', 'BLOQUEADA', 'BLOQUEADO', 'ON_HOLD', 'DETENIDA', 'DETENIDO'].includes(raw)) return 'BLOCKED';
     if (['CLOSED', 'CERRADA', 'CERRADO', 'DONE', 'COMPLETED'].includes(raw)) return 'CLOSED';
     return raw || 'PLANNED';
   }
@@ -2244,6 +2245,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ];
   }
 
+  private getAlertNotificationRecipientTokens(
+    recipients: AlertNotificationRecipient[],
+  ) {
+    return [
+      ...new Set(
+        recipients
+          .flatMap((item) => [
+            String(item.userId || '').trim(),
+            this.normalizeEmail(item.email) ?? '',
+            this.normalizeUsername(item.username) ?? '',
+          ])
+          .filter(Boolean),
+      ),
+    ];
+  }
+
   private async resolveAlertNotificationRecipients(
     payload: Record<string, unknown>,
   ) {
@@ -2701,6 +2718,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return {
         recipients: [],
         userIds: [] as string[],
+        recipientTokens: [] as string[],
         sent: [] as string[],
         failed: [] as string[],
         skippedReason: 'No se encontraron destinatarios para la alerta.',
@@ -2757,6 +2775,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return {
       recipients,
       userIds: this.getAlertNotificationRecipientsUserIds(recipients),
+      recipientTokens: this.getAlertNotificationRecipientTokens(recipients),
       sent,
       failed,
       skippedReason: transporter
@@ -2770,7 +2789,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     try {
       const emailResult = await this.sendAlertTriggerEmails(row);
-      const inAppRecipients = emailResult.userIds;
+      const inAppRecipients = emailResult.recipientTokens;
 
       if (inAppRecipients.length) {
         await this.publishInAppNotification({
@@ -2797,6 +2816,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           email_sent: emailResult.sent,
           email_failed: emailResult.failed,
           in_app_recipients: inAppRecipients,
+          in_app_user_ids: emailResult.userIds,
           skipped_reason: emailResult.skippedReason,
         },
       };
@@ -6406,12 +6426,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async enrichWorkOrder(workOrder: WorkOrderEntity) {
-    const [equipo, plan] = await Promise.all([
+    const [equipo, plan, componente, blockingWorkOrder, parentWorkOrder] = await Promise.all([
       workOrder.equipment_id
         ? this.equipoRepo.findOne({ where: { id: workOrder.equipment_id, is_deleted: false } })
         : Promise.resolve(null),
       workOrder.plan_id
         ? this.planRepo.findOne({ where: { id: workOrder.plan_id, is_deleted: false } })
+        : Promise.resolve(null),
+      workOrder.equipo_componente_id
+        ? this.equipoComponenteRepo.findOne({
+            where: { id: workOrder.equipo_componente_id, is_deleted: false },
+          })
+        : Promise.resolve(null),
+      workOrder.blocked_by_work_order_id
+        ? this.woRepo.findOne({
+            where: { id: workOrder.blocked_by_work_order_id, is_deleted: false },
+          })
+        : Promise.resolve(null),
+      workOrder.parent_work_order_id
+        ? this.woRepo.findOne({
+            where: { id: workOrder.parent_work_order_id, is_deleted: false },
+          })
         : Promise.resolve(null),
     ]);
     const procedimientoIdFromPayload = String(
@@ -6429,12 +6464,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...workOrder,
       status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
       equipment_nombre: equipo?.nombre ?? null,
+      equipment_nombre_real: equipo?.nombre_real ?? null,
       equipment_codigo: equipo?.codigo ?? null,
       plan_nombre: plan?.nombre ?? null,
       plan_codigo: plan?.codigo ?? null,
       procedimiento_id: procedimiento?.id ?? null,
       procedimiento_codigo: procedimiento?.codigo ?? null,
       procedimiento_nombre: procedimiento?.nombre ?? null,
+      equipo_componente_id: componente?.id ?? workOrder.equipo_componente_id ?? null,
+      equipo_componente_nombre:
+        componente?.nombre ?? workOrder.equipo_componente_nombre ?? null,
+      equipo_componente_nombre_oficial:
+        componente?.nombre_oficial ??
+        workOrder.equipo_componente_nombre_oficial ??
+        null,
+      blocked_by_work_order_id:
+        blockingWorkOrder?.id ?? workOrder.blocked_by_work_order_id ?? null,
+      blocked_by_work_order_code: blockingWorkOrder?.code ?? null,
+      blocked_by_work_order_title: blockingWorkOrder?.title ?? null,
+      blocked_by_work_order_status: blockingWorkOrder?.status_workflow ?? null,
+      parent_work_order_id:
+        parentWorkOrder?.id ?? workOrder.parent_work_order_id ?? null,
+      parent_work_order_code: parentWorkOrder?.code ?? null,
+      parent_work_order_title: parentWorkOrder?.title ?? null,
     };
   }
 
@@ -6492,20 +6544,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const modelo = String(dto.modelo ?? '').trim() || null;
     const codigo_lubricante =
       String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null;
-    return this.wrap(
-      await this.equipoRepo.save(
-        this.equipoRepo.create({
-          ...dto,
-          criticidad,
-          estado_operativo,
-          nombre_real,
-          modelo,
-          codigo_lubricante,
-          horometro_actual: dto.horometro_actual ?? 0,
-        }),
-      ),
-      'Equipo creado',
+    const saved = await this.equipoRepo.save(
+      this.equipoRepo.create({
+        ...dto,
+        criticidad,
+        estado_operativo,
+        nombre_real,
+        modelo,
+        codigo_lubricante,
+        horometro_actual: dto.horometro_actual ?? 0,
+      }),
     );
+    await this.ensureDefaultEquipmentComponents(saved);
+    return this.wrap(saved, 'Equipo creado');
   }
   async updateEquipo(id: string, dto: UpdateEquipoDto) {
     const e = await this.findEquipoOrFail(id);
@@ -7028,13 +7079,166 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Programación eliminada');
   }
 
+
+  private getDefaultEquipmentComponentTemplates() {
+    return [
+      {
+        codigo: 'RAD',
+        nombre: 'Radiador',
+        nombre_oficial: 'Radiador (sistema de enfriamiento)',
+        categoria: 'ENFRIAMIENTO',
+        descripcion:
+          'Inspeccion visual, limpieza externa e interna, drenaje, lavado, revision de mangueras, relleno de refrigerante y prueba de temperatura.',
+        orden: 10,
+      },
+      {
+        codigo: 'MCI',
+        nombre: 'Motor',
+        nombre_oficial: 'Motor de combustion interna',
+        categoria: 'MOTOR',
+        descripcion:
+          'Inspeccion mecanica general, cambio de aceite, filtros, inyeccion, correas, baterias y prueba de operacion.',
+        orden: 20,
+      },
+      {
+        codigo: 'ALT',
+        nombre: 'Alternador',
+        nombre_oficial: 'Alternador',
+        categoria: 'GENERACION',
+        descripcion:
+          'Limpieza interna, revision de devanados, aislamiento, rodamientos, conexiones electricas y verificacion de salida.',
+        orden: 30,
+      },
+      {
+        codigo: 'CTRL',
+        nombre: 'Controlador',
+        nombre_oficial: 'Controlador / sistema de control',
+        categoria: 'CONTROL',
+        descripcion:
+          'Revision de conexiones electricas, tarjetas, parametros, alarmas, protecciones y configuracion.',
+        orden: 40,
+      },
+      {
+        codigo: 'BMT',
+        nombre: 'Barras MT',
+        nombre_oficial: 'Barras de media tension',
+        categoria: 'DISTRIBUCION',
+        descripcion:
+          'Desenergizacion, inspeccion visual, limpieza, ajuste de conexiones y pruebas dielectricas o de contacto.',
+        orden: 50,
+      },
+      {
+        codigo: 'TRF',
+        nombre: 'Transformador',
+        nombre_oficial: 'Transformador de potencia',
+        categoria: 'POTENCIA',
+        descripcion:
+          'Inspeccion general, revision del aceite dielectrico, limpieza de aisladores, conexiones y pruebas de aislamiento.',
+        orden: 60,
+      },
+      {
+        codigo: 'ARR',
+        nombre: 'Arranque',
+        nombre_oficial: 'Sistema de arranque',
+        categoria: 'ARRANQUE',
+        descripcion:
+          'Baterias, motor de arranque y cargador de baterias asociados a la unidad de generacion.',
+        orden: 70,
+      },
+      {
+        codigo: 'COMB',
+        nombre: 'Combustible',
+        nombre_oficial: 'Sistema de combustible',
+        categoria: 'COMBUSTIBLE',
+        descripcion:
+          'Tanque diario, lineas, filtros, bombas y control de suministro de combustible.',
+        orden: 80,
+      },
+      {
+        codigo: 'LUB',
+        nombre: 'Lubricacion',
+        nombre_oficial: 'Sistema de lubricacion',
+        categoria: 'LUBRICACION',
+        descripcion:
+          'Carter, bombas, filtros, enfriador y monitoreo del aceite lubricante.',
+        orden: 90,
+      },
+      {
+        codigo: 'ADM',
+        nombre: 'Admision',
+        nombre_oficial: 'Sistema de admision y sobrealimentacion',
+        categoria: 'ADMISION',
+        descripcion:
+          'Filtros de aire, ductos, turboalimentacion e ingreso de aire al motor.',
+        orden: 100,
+      },
+      {
+        codigo: 'SENF',
+        nombre: 'Enfriamiento',
+        nombre_oficial: 'Sistema de enfriamiento',
+        categoria: 'ENFRIAMIENTO',
+        descripcion:
+          'Bomba de agua, termostatos, tuberias, mangueras y circuito de refrigeracion.',
+        orden: 110,
+      },
+    ];
+  }
+
+  private normalizeEquipmentComponentName(value: unknown) {
+    return String(value ?? '')
+      .trim()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .toUpperCase();
+  }
+
+  private async ensureDefaultEquipmentComponents(equipo: Pick<EquipoEntity, 'id'>) {
+    const existing = await this.equipoComponenteRepo.find({
+      where: { equipo_id: equipo.id, is_deleted: false },
+    });
+    const existingKeys = new Set(
+      existing
+        .flatMap((item) => [
+          this.normalizeEquipmentComponentName(item.codigo),
+          this.normalizeEquipmentComponentName(item.nombre),
+          this.normalizeEquipmentComponentName(item.nombre_oficial),
+        ])
+        .filter(Boolean),
+    );
+    const missing = this.getDefaultEquipmentComponentTemplates().filter(
+      (template) =>
+        !existingKeys.has(this.normalizeEquipmentComponentName(template.codigo)) &&
+        !existingKeys.has(this.normalizeEquipmentComponentName(template.nombre)) &&
+        !existingKeys.has(
+          this.normalizeEquipmentComponentName(template.nombre_oficial),
+        ),
+    );
+    if (!missing.length) return;
+    await this.equipoComponenteRepo.save(
+      missing.map((template) =>
+        this.equipoComponenteRepo.create({
+          equipo_id: equipo.id,
+          codigo: template.codigo,
+          nombre: template.nombre,
+          nombre_oficial: template.nombre_oficial,
+          categoria: template.categoria,
+          descripcion: template.descripcion,
+          orden: template.orden,
+        }),
+      ),
+    );
+  }
+
   async listComponentes(query: ComponenteQueryDto) {
     const where: FindOptionsWhere<EquipoComponenteEntity> = {
       is_deleted: false,
     };
     if (query.equipo_id) where.equipo_id = query.equipo_id;
     return this.wrap(
-      await this.equipoComponenteRepo.find({ where }),
+      await this.equipoComponenteRepo.find({
+        where,
+        order: { orden: 'ASC', nombre_oficial: 'ASC', nombre: 'ASC' },
+      }),
       'Componentes listados',
     );
   }
@@ -7055,9 +7259,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: dto.parent_id,
         is_deleted: false,
       });
+    const payload = {
+      ...dto,
+      nombre: String(dto.nombre || '').trim(),
+      nombre_oficial: String(dto.nombre_oficial || '').trim() || null,
+      categoria: String(dto.categoria || '').trim() || null,
+      orden: Number(dto.orden ?? 1) || 1,
+      descripcion: String(dto.descripcion || '').trim() || null,
+    };
     return this.wrap(
       await this.equipoComponenteRepo.save(
-        this.equipoComponenteRepo.create(dto),
+        this.equipoComponenteRepo.create(payload),
       ),
       'Componente creado',
     );
@@ -7067,7 +7279,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
-    Object.assign(item, dto);
+    Object.assign(item, {
+      ...dto,
+      nombre: dto.nombre !== undefined ? String(dto.nombre || '').trim() : item.nombre,
+      nombre_oficial:
+        dto.nombre_oficial !== undefined
+          ? String(dto.nombre_oficial || '').trim() || null
+          : item.nombre_oficial,
+      categoria:
+        dto.categoria !== undefined
+          ? String(dto.categoria || '').trim() || null
+          : item.categoria,
+      orden: dto.orden !== undefined ? Number(dto.orden || 1) || 1 : item.orden,
+      descripcion:
+        dto.descripcion !== undefined
+          ? String(dto.descripcion || '').trim() || null
+          : item.descripcion,
+    });
     return this.wrap(
       await this.equipoComponenteRepo.save(item),
       'Componente actualizado',
@@ -7274,6 +7502,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               nombre: dto.nombre,
               tipo_proceso: dto.tipo_proceso,
               bodega_id: dto.bodega_id ?? null,
+              compartimiento_codigo_referencia:
+                this.trimNullableText(dto.compartimiento_codigo_referencia),
+              compartimiento_nombre_oficial:
+                this.trimNullableText(dto.compartimiento_nombre_oficial),
               documento_referencia: dto.documento_referencia ?? null,
               version: dto.version ?? null,
               clase_mantenimiento: dto.clase_mantenimiento ?? null,
@@ -7376,6 +7608,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         nombre: dto.nombre ?? row.nombre,
         tipo_proceso: dto.tipo_proceso ?? row.tipo_proceso,
         bodega_id: dto.bodega_id ?? row.bodega_id ?? null,
+        compartimiento_codigo_referencia:
+          dto.compartimiento_codigo_referencia !== undefined
+            ? this.trimNullableText(dto.compartimiento_codigo_referencia)
+            : row.compartimiento_codigo_referencia ?? null,
+        compartimiento_nombre_oficial:
+          dto.compartimiento_nombre_oficial !== undefined
+            ? this.trimNullableText(dto.compartimiento_nombre_oficial)
+            : row.compartimiento_nombre_oficial ?? null,
         documento_referencia: dto.documento_referencia ?? row.documento_referencia ?? null,
         version: dto.version ?? row.version ?? null,
         clase_mantenimiento: dto.clase_mantenimiento ?? row.clase_mantenimiento ?? null,
@@ -10912,6 +11152,159 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+
+  private async resolveWorkOrderComponentContext(
+    equipmentId?: string | null,
+    componentId?: string | null,
+  ) {
+    if (!componentId) {
+      return {
+        component: null,
+        componentId: null,
+        componentName: null,
+        componentOfficialName: null,
+      };
+    }
+    const component = await this.findOneOrFail(this.equipoComponenteRepo, {
+      id: componentId,
+      is_deleted: false,
+    });
+    if (equipmentId && component.equipo_id !== equipmentId) {
+      throw new BadRequestException(
+        'El compartimiento seleccionado no pertenece al equipo de la orden.',
+      );
+    }
+    return {
+      component,
+      componentId: component.id,
+      componentName: component.nombre ?? null,
+      componentOfficialName: component.nombre_oficial ?? component.nombre ?? null,
+    };
+  }
+
+  private async applyBlockingRelationship(
+    workOrder: WorkOrderEntity,
+    blockedByWorkOrderId?: string | null,
+    blockedReason?: string | null,
+  ) {
+    const normalizedBlockedById = String(blockedByWorkOrderId || '').trim() || null;
+    const payload = {
+      ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
+    };
+
+    if (!normalizedBlockedById) {
+      workOrder.blocked_by_work_order_id = null;
+      workOrder.blocked_reason = String(blockedReason || '').trim() || null;
+      if (this.normalizeWorkflowStatus(workOrder.status_workflow) === 'BLOCKED') {
+        const restoreCandidate = this.normalizeWorkflowStatus(
+          payload.workflow_before_block ?? 'PLANNED',
+        );
+        workOrder.status_workflow =
+          restoreCandidate === 'BLOCKED' ? 'PLANNED' : restoreCandidate;
+        workOrder.resumed_at = new Date();
+      }
+      workOrder.blocked_at = null;
+      workOrder.valor_json = payload;
+      return null;
+    }
+
+    if (workOrder.id && normalizedBlockedById === workOrder.id) {
+      throw new BadRequestException(
+        'Una orden de trabajo no puede bloquearse a si misma.',
+      );
+    }
+
+    const blocker = await this.findOneOrFail(this.woRepo, {
+      id: normalizedBlockedById,
+      is_deleted: false,
+    });
+
+    workOrder.blocked_by_work_order_id = blocker.id;
+    workOrder.blocked_reason =
+      String(blockedReason || '').trim() || workOrder.blocked_reason || null;
+
+    if (this.normalizeWorkflowStatus(blocker.status_workflow) !== 'CLOSED') {
+      const currentStatus = this.normalizeWorkflowStatus(workOrder.status_workflow);
+      if (currentStatus !== 'BLOCKED' && currentStatus !== 'CLOSED') {
+        payload.workflow_before_block = currentStatus;
+      }
+      workOrder.status_workflow = 'BLOCKED';
+      workOrder.blocked_at = workOrder.blocked_at ?? new Date();
+      workOrder.resumed_at = null;
+    } else if (this.normalizeWorkflowStatus(workOrder.status_workflow) === 'BLOCKED') {
+      const restoreCandidate = this.normalizeWorkflowStatus(
+        payload.workflow_before_block ?? 'IN_PROGRESS',
+      );
+      workOrder.status_workflow =
+        restoreCandidate === 'BLOCKED' ? 'IN_PROGRESS' : restoreCandidate;
+      workOrder.resumed_at = new Date();
+    }
+
+    workOrder.valor_json = {
+      ...payload,
+      blocking_work_order: {
+        id: blocker.id,
+        code: blocker.code,
+        title: blocker.title,
+        status_workflow: blocker.status_workflow,
+      },
+    };
+
+    if (blocker.parent_work_order_id !== workOrder.id) {
+      blocker.parent_work_order_id = workOrder.id ?? blocker.parent_work_order_id;
+      await this.woRepo.save(blocker);
+    }
+
+    return blocker;
+  }
+
+  private async releaseBlockedWorkOrdersFor(blocker: WorkOrderEntity) {
+    const blockedRows = await this.woRepo.find({
+      where: {
+        blocked_by_work_order_id: blocker.id,
+        is_deleted: false,
+      },
+    });
+
+    for (const row of blockedRows) {
+      if (this.normalizeWorkflowStatus(row.status_workflow) !== 'BLOCKED') {
+        continue;
+      }
+      const payload = {
+        ...((row.valor_json ?? {}) as Record<string, unknown>),
+      };
+      const restoreCandidate = this.normalizeWorkflowStatus(
+        payload.workflow_before_block ?? 'IN_PROGRESS',
+      );
+      row.status_workflow =
+        restoreCandidate === 'BLOCKED' ? 'IN_PROGRESS' : restoreCandidate;
+      row.resumed_at = new Date();
+      row.valor_json = {
+        ...payload,
+        last_unblocked_by_work_order: {
+          id: blocker.id,
+          code: blocker.code,
+          title: blocker.title,
+        },
+      };
+      const saved = await this.woRepo.save(row);
+      await this.appendWorkOrderHistory(
+        saved.id,
+        this.normalizeWorkflowStatus(saved.status_workflow),
+        `Orden desbloqueada tras culminar OT anexada ${blocker.code}`,
+        { fromStatus: 'BLOCKED' },
+      );
+      await this.publishInAppNotification({
+        title: 'Orden desbloqueada',
+        body: `${saved.code} ya puede continuar porque culmino la OT anexada ${blocker.code}.`,
+        module: 'maintenance',
+        entityType: 'work-order',
+        entityId: saved.id,
+        level: 'success',
+      });
+    }
+  }
+
   async listWorkOrders(q: WorkOrderQueryDto) {
     const qb = this.woRepo
       .createQueryBuilder('wo')
@@ -10936,6 +11329,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async createWorkOrder(dto: CreateWorkOrderDto) {
     if (dto.equipment_id) await this.findEquipoOrFail(dto.equipment_id);
+    const componentContext = await this.resolveWorkOrderComponentContext(
+      dto.equipment_id ?? null,
+      dto.equipo_componente_id ?? null,
+    );
     let resolvedPlanId = dto.plan_id ?? null;
     if (dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
@@ -10956,6 +11353,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         code: resolution.resolvedCode,
         type: dto.type,
         equipment_id: dto.equipment_id ?? null,
+        equipo_componente_id: componentContext.componentId,
+        equipo_componente_nombre: componentContext.componentName,
+        equipo_componente_nombre_oficial: componentContext.componentOfficialName,
         plan_id: resolvedPlanId,
         valor_json: {
           ...(dto.valor_json ?? {}),
@@ -10966,6 +11366,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         title: dto.title,
         description: dto.description ?? null,
         status_workflow: normalizedStatus,
+        blocked_by_work_order_id: null,
+        blocked_reason: String(dto.blocked_reason || '').trim() || null,
         priority: dto.priority ?? 5,
         provider_type: dto.provider_type ?? 'INTERNO',
         maintenance_kind: dto.maintenance_kind ?? 'CORRECTIVO',
@@ -10974,7 +11376,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         vendor_id: dto.vendor_id ?? null,
         purchase_request_id: dto.purchase_request_id ?? null,
       });
-      this.applyWorkflowDates(entity, null, normalizedStatus);
+      await this.applyBlockingRelationship(
+        entity,
+        dto.blocked_by_work_order_id ?? null,
+        dto.blocked_reason ?? null,
+      );
+      this.applyWorkflowDates(entity, null, entity.status_workflow);
 
       try {
         created = await this.woRepo.save(entity);
@@ -10999,12 +11406,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       throw new ConflictException('No se pudo generar un código único para la orden de trabajo.');
     }
 
-    await this.appendWorkOrderHistory(created.id, normalizedStatus, 'Orden de trabajo creada');
+        if (created.blocked_by_work_order_id) {
+      const blocker = await this.woRepo.findOne({
+        where: { id: created.blocked_by_work_order_id, is_deleted: false },
+      });
+      if (blocker && blocker.parent_work_order_id !== created.id) {
+        blocker.parent_work_order_id = created.id;
+        await this.woRepo.save(blocker);
+      }
+    }
+
+await this.appendWorkOrderHistory(
+      created.id,
+      this.normalizeWorkflowStatus(created.status_workflow),
+      'Orden de trabajo creada',
+    );
     if (dto.alerta_id) {
       await this.syncAlertWorkOrderLink(
         dto.alerta_id,
         created,
-        normalizedStatus === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO',
+        this.normalizeWorkflowStatus(created.status_workflow) === 'CLOSED'
+          ? 'CERRADA'
+          : 'EN_PROCESO',
       );
     }
     const enriched = await this.enrichWorkOrder(created);
@@ -11022,7 +11445,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       module: 'maintenance',
       entityType: 'work-order',
       entityId: created.id,
-      level: normalizedStatus === 'CLOSED' ? 'success' : 'info',
+      level: this.normalizeWorkflowStatus(created.status_workflow) === 'CLOSED' ? 'success' : 'info',
     });
     await this.writeSecurityLog({
       description: `[WO:${created.id}] Creación de OT ${created.code}${resolution.codeWasReassigned ? ` (reemplazó ${resolution.requestedCode ?? 'sin código'})` : ''}`,
@@ -11053,9 +11476,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
       resolvedPlanId = synced.plan.id;
     }
+    const componentContext = await this.resolveWorkOrderComponentContext(
+      wo.equipment_id ?? null,
+      dto.equipo_componente_id ?? wo.equipo_componente_id ?? null,
+    );
     Object.assign(wo, {
       ...dto,
       plan_id: resolvedPlanId,
+      equipo_componente_id: componentContext.componentId,
+      equipo_componente_nombre: componentContext.componentName,
+      equipo_componente_nombre_oficial: componentContext.componentOfficialName,
+      blocked_reason:
+        dto.blocked_reason !== undefined
+          ? String(dto.blocked_reason || '').trim() || null
+          : wo.blocked_reason,
       valor_json:
         dto.valor_json || dto.procedimiento_id
           ? {
@@ -11068,8 +11502,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : wo.valor_json,
     });
     wo.status_workflow = this.normalizeWorkflowStatus(dto.status_workflow ?? wo.status_workflow);
+    await this.applyBlockingRelationship(
+      wo,
+      dto.blocked_by_work_order_id !== undefined
+        ? dto.blocked_by_work_order_id
+        : wo.blocked_by_work_order_id,
+      dto.blocked_reason !== undefined ? dto.blocked_reason : wo.blocked_reason,
+    );
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
     const saved = await this.woRepo.save(wo);
+    if (this.normalizeWorkflowStatus(saved.status_workflow) === 'CLOSED') {
+      await this.releaseBlockedWorkOrdersFor(saved);
+    }
     if (previousStatus !== saved.status_workflow) {
       await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus });
     } else {
