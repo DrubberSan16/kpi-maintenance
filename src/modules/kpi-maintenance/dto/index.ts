@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -30,6 +30,20 @@ export enum EquipoEstadoOperativoEnum {
   MPG = 'MPG',
   CORRECTIVO = 'CORRECTIVO',
   BLOQUEADA = 'BLOQUEADA',
+}
+
+export enum EquipoComponenteCategoriaEnum {
+  MOTOR = 'MOTOR',
+  GENERACION = 'GENERACION',
+  CONTROL = 'CONTROL',
+  DISTRIBUCION = 'DISTRIBUCION',
+  POTENCIA = 'POTENCIA',
+  ARRANQUE = 'ARRANQUE',
+  COMBUSTIBLE = 'COMBUSTIBLE',
+  LUBRICACION = 'LUBRICACION',
+  ADMISION = 'ADMISION',
+  ENFRIAMIENTO = 'ENFRIAMIENTO',
+  OTROS = 'OTROS',
 }
 
 export class EquipoQueryDto {
@@ -106,8 +120,15 @@ export class CreateEquipoComponenteInlineDto {
   @IsString()
   nombre_oficial?: string;
 
-  @ApiPropertyOptional({ description: 'Categoria funcional del compartimiento' })
+  @ApiPropertyOptional({
+    description: 'Categoria funcional del compartimiento',
+    enum: EquipoComponenteCategoriaEnum,
+  })
   @IsOptional()
+  @Transform(({ value }) => {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    return normalized || undefined;
+  })
   @IsString()
   categoria?: string;
 
@@ -643,8 +664,15 @@ export class CreateComponenteDto {
   @IsOptional()
   @IsString()
   nombre_oficial?: string;
-  @ApiPropertyOptional({ description: 'Categoria funcional del componente' })
+  @ApiPropertyOptional({
+    description: 'Categoria funcional del componente',
+    enum: EquipoComponenteCategoriaEnum,
+  })
   @IsOptional()
+  @Transform(({ value }) => {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    return normalized || undefined;
+  })
   @IsString()
   categoria?: string;
   @ApiPropertyOptional({ description: 'Orden de visualizacion', type: Number })

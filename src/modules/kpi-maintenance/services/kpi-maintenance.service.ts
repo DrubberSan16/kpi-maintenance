@@ -7250,7 +7250,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           String(component?.nombre_oficial ?? '').trim() || nombre || null;
         const descripcion =
           String(component?.descripcion ?? '').trim() || null;
-        const categoria = String(component?.categoria ?? '').trim() || null;
+        const categoria = this.normalizeEquipmentComponentCategory(
+          component?.categoria,
+        );
         const orden = Number(component?.orden ?? index + 1) || index + 1;
         const hasMeaningfulData = Boolean(
           codigo || nombre || nombreOficial || descripcion || categoria,
@@ -7279,6 +7281,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           orden: template.orden,
           descripcion: template.descripcion,
         }));
+  }
+
+  private normalizeEquipmentComponentCategory(value: unknown) {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    return normalized || null;
   }
 
   private async syncEquipmentComponents(
@@ -7357,7 +7364,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...dto,
       nombre: String(dto.nombre || '').trim(),
       nombre_oficial: String(dto.nombre_oficial || '').trim() || null,
-      categoria: String(dto.categoria || '').trim() || null,
+      categoria: this.normalizeEquipmentComponentCategory(dto.categoria),
       orden: Number(dto.orden ?? 1) || 1,
       descripcion: String(dto.descripcion || '').trim() || null,
     };
@@ -7382,7 +7389,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : item.nombre_oficial,
       categoria:
         dto.categoria !== undefined
-          ? String(dto.categoria || '').trim() || null
+          ? this.normalizeEquipmentComponentCategory(dto.categoria)
           : item.categoria,
       orden: dto.orden !== undefined ? Number(dto.orden || 1) || 1 : item.orden,
       descripcion:
