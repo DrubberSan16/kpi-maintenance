@@ -612,12 +612,15 @@ export class KpiMaintenanceController {
     @Body('requested_by') requestedBy?: string,
     @Body('requested_by_email') requestedByEmail?: string,
     @Body('requested_user_id') requestedUserId?: string,
+    @Body('sucursal_id') sucursalId?: string,
+    @Req() req?: any,
   ) {
     return this.service.importProgramacionMensualWorkbook(file, {
       requested_by: requestedBy,
       requested_by_email: requestedByEmail,
       requested_user_id: requestedUserId,
-    });
+      sucursal_id: sucursalId,
+    }, getSucursalScopeId(req));
   }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Obtener programación por ID' })
@@ -1039,8 +1042,8 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Crear cronograma semanal' })
   @Post('inteligencia/cronogramas-semanales')
-  createCronogramaSemanal(@Body() dto: CreateCronogramaSemanalDto) {
-    return this.service.createCronogramaSemanal(dto);
+  createCronogramaSemanal(@Body() dto: CreateCronogramaSemanalDto, @Req() req: any) {
+    return this.service.createCronogramaSemanal(dto, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1062,12 +1065,15 @@ export class KpiMaintenanceController {
     @Body('requested_by') requestedBy?: string,
     @Body('requested_by_email') requestedByEmail?: string,
     @Body('requested_user_id') requestedUserId?: string,
+    @Body('sucursal_id') sucursalId?: string,
+    @Req() req?: any,
   ) {
     return this.service.importCronogramaSemanalWorkbook(file, {
       requested_by: requestedBy,
       requested_by_email: requestedByEmail,
       requested_user_id: requestedUserId,
-    });
+      sucursal_id: sucursalId,
+    }, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1076,8 +1082,9 @@ export class KpiMaintenanceController {
   updateCronogramaSemanal(
     @Param('id') id: string,
     @Body() dto: UpdateCronogramaSemanalDto,
+    @Req() req: any,
   ) {
-    return this.service.updateCronogramaSemanal(id, dto);
+    return this.service.updateCronogramaSemanal(id, dto, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1104,8 +1111,8 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Crear reporte de operación diaria' })
   @Post('inteligencia/reportes-diarios')
-  createReporteOperacionDiaria(@Body() dto: CreateReporteOperacionDiariaDto) {
-    return this.service.createReporteOperacionDiaria(dto);
+  createReporteOperacionDiaria(@Body() dto: CreateReporteOperacionDiariaDto, @Req() req: any) {
+    return this.service.createReporteOperacionDiaria(dto, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1114,8 +1121,9 @@ export class KpiMaintenanceController {
   updateReporteOperacionDiaria(
     @Param('id') id: string,
     @Body() dto: UpdateReporteOperacionDiariaDto,
+    @Req() req: any,
   ) {
-    return this.service.updateReporteOperacionDiaria(id, dto);
+    return this.service.updateReporteOperacionDiaria(id, dto, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')

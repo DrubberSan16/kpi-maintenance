@@ -1607,6 +1607,10 @@ export class CreateCronogramaSemanalDto {
   @ApiProperty({ description: 'Fecha de fin de semana (ISO 8601)' })
   @IsDateString()
   fecha_fin: string;
+  @ApiPropertyOptional({ description: 'ID de la sucursal asociada', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  sucursal_id?: string;
   @ApiPropertyOptional({ description: 'Locación' })
   @IsOptional()
   @IsString()
@@ -1845,6 +1849,10 @@ export class CreateReporteOperacionDiariaDto {
   @ApiProperty({ description: 'Fecha del reporte (ISO 8601)' })
   @IsDateString()
   fecha_reporte: string;
+  @ApiPropertyOptional({ description: 'ID de la sucursal asociada', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  sucursal_id?: string;
   @ApiPropertyOptional({ description: 'Locación' })
   @IsOptional()
   @IsString()

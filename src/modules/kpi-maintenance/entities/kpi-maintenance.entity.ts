@@ -428,6 +428,7 @@ export class CronogramaSemanalEntity {
   @Column() codigo: string;
   @Column({ type: 'date' }) fecha_inicio: string;
   @Column({ type: 'date' }) fecha_fin: string;
+  @Column({ type: 'uuid', nullable: true }) sucursal_id?: string | null;
   @Column({ type: 'text', nullable: true }) locacion?: string | null;
   @Column({ type: 'text', nullable: true }) referencia_orden?: string | null;
   @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
@@ -474,6 +475,7 @@ export class ProgramacionMensualEntity {
   @Column() codigo: string;
   @Column({ type: 'date', nullable: true }) fecha_inicio?: string | null;
   @Column({ type: 'date', nullable: true }) fecha_fin?: string | null;
+  @Column({ type: 'uuid', nullable: true }) sucursal_id?: string | null;
   @Column({ type: 'text', nullable: true }) locacion?: string | null;
   @Column({ type: 'text', nullable: true }) documento_origen?: string | null;
   @Column({ type: 'text', nullable: true }) nombre_archivo?: string | null;
@@ -524,6 +526,7 @@ export class ReporteOperacionDiariaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column() codigo: string;
   @Column({ type: 'date' }) fecha_reporte: string;
+  @Column({ type: 'uuid', nullable: true }) sucursal_id?: string | null;
   @Column({ type: 'text', nullable: true }) locacion?: string | null;
   @Column({ type: 'text', nullable: true }) turno?: string | null;
   @Column({ type: 'text', nullable: true }) documento_origen?: string | null;

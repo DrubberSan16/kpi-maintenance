@@ -308,6 +308,8 @@ type ParsedProgramacionMensualWorkbook = {
     codigo: string;
     fecha_inicio: string | null;
     fecha_fin: string | null;
+    sucursal_id?: string | null;
+    locacion?: string | null;
     documento_origen: string;
     nombre_archivo: string;
     resumen: string;
@@ -843,6 +845,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return nombre || codigo || null;
   }
 
+  private buildSucursalLabel(sucursal?: Partial<InventorySucursalEntity> | null) {
+    if (!sucursal) return null;
+    const codigo = String(sucursal.codigo || '').trim();
+    const nombre = String(sucursal.nombre || '').trim();
+    if (codigo && nombre) return `${codigo} - ${nombre}`;
+    return nombre || codigo || null;
+  }
+
+  private async resolveSucursalForWrite(
+    explicitSucursalId?: string | null,
+    scopedSucursalId?: string | null,
+  ) {
+    const normalizedSucursalId = this.firstNonEmptyString(
+      explicitSucursalId,
+      scopedSucursalId,
+    );
+    if (!normalizedSucursalId) return null;
+    const sucursal = await this.sucursalRepo.findOne({
+      where: {
+        id: normalizedSucursalId,
+        is_deleted: false,
+      },
+    });
+    if (!sucursal) {
+      throw new BadRequestException('La sucursal seleccionada no existe.');
+    }
+    return sucursal;
+  }
+
   private normalizeScopeToken(value: unknown) {
     return String(value ?? '')
       .normalize('NFD')
@@ -1008,6 +1039,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     scope: SucursalScopeContext | null,
   ) {
     if (!scope) return payload;
+    if (String(payload?.sucursal_id || '').trim() === scope.sucursalId) {
+      return payload;
+    }
     if (this.matchesScopedLocation(payload?.locacion, scope)) {
       return payload;
     }
@@ -1044,6 +1078,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     scope: SucursalScopeContext | null,
   ) {
     if (!scope) return payload;
+    if (String(payload?.sucursal_id || '').trim() === scope.sucursalId) {
+      return payload;
+    }
     if (this.matchesScopedLocation(payload?.locacion, scope)) {
       return payload;
     }
@@ -1135,6 +1172,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     scope: SucursalScopeContext | null,
   ) {
     if (!scope) return payload;
+    if (String(payload?.sucursal_id || '').trim() === scope.sucursalId) {
+      return payload;
+    }
     if (this.matchesScopedLocation(payload?.locacion, scope)) {
       return payload;
     }
@@ -10522,7 +10562,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       requested_by?: string | null;
       requested_by_email?: string | null;
       requested_user_id?: string | null;
+      sucursal_id?: string | null;
     },
+    scopedSucursalId?: string | null,
   ) {
     if (!file?.buffer) {
       throw new BadRequestException(
@@ -10538,6 +10580,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const requestedBy = this.firstNonEmptyString(options?.requested_by);
     const requestedByEmail = this.normalizeEmail(options?.requested_by_email);
     const requestedUserId = this.firstNonEmptyString(options?.requested_user_id);
+    const sucursal = await this.resolveSucursalForWrite(
+      options?.sucursal_id,
+      scopedSucursalId,
+    );
+    const sucursalLabel = this.buildSucursalLabel(sucursal);
 
     const savedId = await this.dataSource.transaction(async (manager) => {
       const headerRepo = manager.getRepository(ProgramacionMensualEntity);
@@ -10546,6 +10593,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const header = await headerRepo.save(
         headerRepo.create({
           ...parsed.header,
+          sucursal_id: sucursal?.id ?? parsed.header.sucursal_id ?? null,
+          locacion: parsed.header.locacion ?? sucursalLabel ?? null,
           created_by: requestedBy,
           updated_by: requestedBy,
           payload_json: {
@@ -10555,6 +10604,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             actor_user_id: requestedUserId,
             requested_by: requestedBy,
             requested_by_email: requestedByEmail,
+            sucursal_id: sucursal?.id ?? parsed.header.sucursal_id ?? null,
+            sucursal_codigo: sucursal?.codigo ?? null,
+            sucursal_nombre: sucursal?.nombre ?? null,
           },
         }),
       );
@@ -10644,6 +10696,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async parseCronogramaSemanalWorkbook(
     buffer: Buffer,
     fileName: string,
+    sucursal?: InventorySucursalEntity | null,
   ): Promise<ParsedCronogramaSemanalWorkbook> {
     const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
     const sheetName = workbook.SheetNames[0];
@@ -10727,7 +10780,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         codigo: await this.generateNextCronogramaSemanalCode(),
         fecha_inicio: dateRange.fecha_inicio,
         fecha_fin: dateRange.fecha_fin,
-        locacion: 'TPTA',
+        sucursal_id: sucursal?.id ?? undefined,
+        locacion: this.buildSucursalLabel(sucursal) ?? 'TPTA',
         referencia_orden: undefined,
         documento_origen: fileName,
         resumen: `Importación semanal desde ${fileName}`,
@@ -10735,6 +10789,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           hoja_origen: sheetName,
           rango_fuente: dateRange.label,
           daily_hours: dailyHours,
+          sucursal_id: sucursal?.id ?? null,
+          sucursal_codigo: sucursal?.codigo ?? null,
+          sucursal_nombre: sucursal?.nombre ?? null,
         },
         detalles,
       },
@@ -10751,7 +10808,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       requested_by?: string | null;
       requested_by_email?: string | null;
       requested_user_id?: string | null;
+      sucursal_id?: string | null;
     },
+    scopedSucursalId?: string | null,
   ) {
     if (!file?.buffer) {
       throw new BadRequestException(
@@ -10759,9 +10818,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    const sucursal = await this.resolveSucursalForWrite(
+      options?.sucursal_id,
+      scopedSucursalId,
+    );
     const parsed = await this.parseCronogramaSemanalWorkbook(
       file.buffer,
       String(file.originalname || 'cronograma_semanal.xlsx'),
+      sucursal,
     );
     const created = await this.createCronogramaSemanal({
       ...parsed.dto,
@@ -10771,7 +10835,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actor_email: this.normalizeEmail(options?.requested_by_email),
         actor_user_id: this.firstNonEmptyString(options?.requested_user_id),
       },
-    });
+    }, scopedSucursalId);
     return this.wrap(
       {
         cronograma: created.data,
@@ -10821,7 +10885,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async createCronogramaSemanal(dto: CreateCronogramaSemanalDto) {
+  async createCronogramaSemanal(
+    dto: CreateCronogramaSemanalDto,
+    scopedSucursalId?: string | null,
+  ) {
+    const sucursal = await this.resolveSucursalForWrite(
+      dto.sucursal_id,
+      scopedSucursalId,
+    );
+    const sucursalLabel = this.buildSucursalLabel(sucursal);
     const savedId = await this.dataSource.transaction(async (manager) => {
       const cronogramaRepo = manager.getRepository(CronogramaSemanalEntity);
       const detalleRepo = manager.getRepository(CronogramaSemanalDetalleEntity);
@@ -10832,11 +10904,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         codigo: dto.codigo,
         fecha_inicio: dto.fecha_inicio.slice(0, 10),
         fecha_fin: dto.fecha_fin.slice(0, 10),
-        locacion: dto.locacion ?? null,
+        sucursal_id: sucursal?.id ?? null,
+        locacion: dto.locacion ?? sucursalLabel ?? null,
         referencia_orden: dto.referencia_orden ?? null,
         documento_origen: dto.documento_origen ?? null,
         resumen: dto.resumen ?? null,
-        payload_json: payloadJson,
+        payload_json: {
+          ...payloadJson,
+          sucursal_id: sucursal?.id ?? null,
+          sucursal_codigo: sucursal?.codigo ?? null,
+          sucursal_nombre: sucursal?.nombre ?? null,
+        },
         created_by: this.firstNonEmptyString(
           payloadJson.actor_username,
           payloadJson.created_by,
@@ -10893,7 +10971,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(payload, 'Cronograma semanal creado');
   }
 
-  async updateCronogramaSemanal(id: string, dto: UpdateCronogramaSemanalDto) {
+  async updateCronogramaSemanal(
+    id: string,
+    dto: UpdateCronogramaSemanalDto,
+    scopedSucursalId?: string | null,
+  ) {
     await this.findOneOrFail(this.cronogramaSemanalRepo, { id, is_deleted: false });
 
     await this.dataSource.transaction(async (manager) => {
@@ -10901,16 +10983,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const detalleRepo = manager.getRepository(CronogramaSemanalDetalleEntity);
       const row = await cronogramaRepo.findOne({ where: { id, is_deleted: false } });
       if (!row) throw new NotFoundException('Cronograma semanal no encontrado');
+      const sucursal = await this.resolveSucursalForWrite(
+        dto.sucursal_id ?? row.sucursal_id,
+        scopedSucursalId,
+      );
+      const sucursalLabel = this.buildSucursalLabel(sucursal);
 
       Object.assign(row, {
         codigo: dto.codigo ?? row.codigo,
         fecha_inicio: dto.fecha_inicio ? this.toDateOnlyString(dto.fecha_inicio) : row.fecha_inicio,
         fecha_fin: dto.fecha_fin ? this.toDateOnlyString(dto.fecha_fin) : row.fecha_fin,
-        locacion: dto.locacion ?? row.locacion ?? null,
+        sucursal_id: sucursal?.id ?? row.sucursal_id ?? null,
+        locacion: dto.locacion ?? sucursalLabel ?? row.locacion ?? null,
         referencia_orden: dto.referencia_orden ?? row.referencia_orden ?? null,
         documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
         resumen: dto.resumen ?? row.resumen ?? null,
-        payload_json: dto.payload_json ?? row.payload_json ?? {},
+        payload_json: {
+          ...((row.payload_json ?? {}) as Record<string, unknown>),
+          ...((dto.payload_json ?? {}) as Record<string, unknown>),
+          sucursal_id: sucursal?.id ?? row.sucursal_id ?? null,
+          sucursal_codigo: sucursal?.codigo ?? null,
+          sucursal_nombre: sucursal?.nombre ?? null,
+        },
       });
       await cronogramaRepo.save(row);
 
@@ -11014,7 +11108,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async createReporteOperacionDiaria(dto: CreateReporteOperacionDiariaDto) {
+  async createReporteOperacionDiaria(
+    dto: CreateReporteOperacionDiariaDto,
+    scopedSucursalId?: string | null,
+  ) {
+    const sucursal = await this.resolveSucursalForWrite(
+      dto.sucursal_id,
+      scopedSucursalId,
+    );
+    const sucursalLabel = this.buildSucursalLabel(sucursal);
     const savedId = await this.dataSource.transaction(async (manager) => {
       const reporteRepo = manager.getRepository(ReporteOperacionDiariaEntity);
       const unidadRepo = manager.getRepository(ReporteOperacionDiariaUnidadEntity);
@@ -11027,11 +11129,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       Object.assign(row, {
         codigo: dto.codigo,
         fecha_reporte: dto.fecha_reporte.slice(0, 10),
-        locacion: dto.locacion ?? null,
+        sucursal_id: sucursal?.id ?? null,
+        locacion: dto.locacion ?? sucursalLabel ?? null,
         turno: dto.turno ?? null,
         documento_origen: dto.documento_origen ?? null,
         resumen: dto.resumen ?? null,
-        payload_json: payloadJson,
+        payload_json: {
+          ...payloadJson,
+          sucursal_id: sucursal?.id ?? null,
+          sucursal_codigo: sucursal?.codigo ?? null,
+          sucursal_nombre: sucursal?.nombre ?? null,
+        },
         created_by: this.firstNonEmptyString(
           payloadJson.actor_username,
           payloadJson.created_by,
@@ -11146,7 +11254,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(payload, 'Reporte de operación diaria creado');
   }
 
-  async updateReporteOperacionDiaria(id: string, dto: UpdateReporteOperacionDiariaDto) {
+  async updateReporteOperacionDiaria(
+    id: string,
+    dto: UpdateReporteOperacionDiariaDto,
+    scopedSucursalId?: string | null,
+  ) {
     await this.findOneOrFail(this.reporteDiarioRepo, { id, is_deleted: false });
 
     await this.dataSource.transaction(async (manager) => {
@@ -11156,17 +11268,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const componenteRepo = manager.getRepository(ControlComponenteEntity);
       const row = await reporteRepo.findOne({ where: { id, is_deleted: false } });
       if (!row) throw new NotFoundException('Reporte de operación diaria no encontrado');
+      const sucursal = await this.resolveSucursalForWrite(
+        dto.sucursal_id ?? row.sucursal_id,
+        scopedSucursalId,
+      );
+      const sucursalLabel = this.buildSucursalLabel(sucursal);
 
       Object.assign(row, {
         codigo: dto.codigo ?? row.codigo,
         fecha_reporte: dto.fecha_reporte
           ? this.toDateOnlyString(dto.fecha_reporte)
           : row.fecha_reporte,
-        locacion: dto.locacion ?? row.locacion ?? null,
+        sucursal_id: sucursal?.id ?? row.sucursal_id ?? null,
+        locacion: dto.locacion ?? sucursalLabel ?? row.locacion ?? null,
         turno: dto.turno ?? row.turno ?? null,
         documento_origen: dto.documento_origen ?? row.documento_origen ?? null,
         resumen: dto.resumen ?? row.resumen ?? null,
-        payload_json: dto.payload_json ?? row.payload_json ?? {},
+        payload_json: {
+          ...((row.payload_json ?? {}) as Record<string, unknown>),
+          ...((dto.payload_json ?? {}) as Record<string, unknown>),
+          sucursal_id: sucursal?.id ?? row.sucursal_id ?? null,
+          sucursal_codigo: sucursal?.codigo ?? null,
+          sucursal_nombre: sucursal?.nombre ?? null,
+        },
         updated_by: this.firstNonEmptyString(
           (dto.payload_json ?? {})?.['actor_username'],
           (dto.payload_json ?? {})?.['updated_by'],
