@@ -50,6 +50,7 @@ import {
   EventoProcesoEntity,
   EventoEquipoEntity,
   FallaCatalogoEntity,
+  InventorySucursalEntity,
   KardexEntity,
   LecturaEquipoEntity,
   LocationEntity,
@@ -216,6 +217,15 @@ type InventoryAlertItem = {
   nivel: AlertLevel;
   observacion: string;
   actor_username: string | null;
+};
+
+type SucursalScopeContext = {
+  sucursalId: string;
+  locationIds: Set<string>;
+  locationTokens: Set<string>;
+  warehouseIds: Set<string>;
+  equipmentIds: Set<string>;
+  equipmentCodes: Set<string>;
 };
 
 type SecurityUserDirectoryItem = {
@@ -720,6 +730,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly locationRepo: Repository<LocationEntity>,
     @InjectRepository(MarcaEntity)
     private readonly marcaRepo: Repository<MarcaEntity>,
+    @InjectRepository(InventorySucursalEntity)
+    private readonly sucursalRepo: Repository<InventorySucursalEntity>,
     @InjectRepository(BitacoraDiariaEntity)
     private readonly bitacoraRepo: Repository<BitacoraDiariaEntity>,
     @InjectRepository(AlertaMantenimientoEntity)
@@ -829,6 +841,410 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const nombre = String(bodega.nombre || '').trim();
     if (codigo && nombre) return `${codigo} - ${nombre}`;
     return nombre || codigo || null;
+  }
+
+  private normalizeScopeToken(value: unknown) {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+  }
+
+  private async buildSucursalScopeContext(
+    sucursalId?: string | null,
+  ): Promise<SucursalScopeContext | null> {
+    const normalizedSucursalId = String(sucursalId || '').trim();
+    if (!normalizedSucursalId) return null;
+
+    const sucursal = await this.sucursalRepo.findOne({
+      where: { id: normalizedSucursalId, is_deleted: false },
+    });
+    if (!sucursal) {
+      throw new BadRequestException('La sucursal seleccionada no existe.');
+    }
+
+    const [locations, warehouses] = await Promise.all([
+      this.locationRepo.find({
+        where: { sucursal_id: normalizedSucursalId, is_deleted: false } as any,
+      }),
+      this.bodegaRepo.find({
+        where: { sucursal_id: normalizedSucursalId, is_deleted: false } as any,
+      }),
+    ]);
+
+    const locationIds = new Set(
+      locations.map((item) => String(item.id || '').trim()).filter(Boolean),
+    );
+    const warehouseIds = new Set(
+      warehouses.map((item) => String(item.id || '').trim()).filter(Boolean),
+    );
+    const locationTokens = new Set<string>();
+
+    locations.forEach((item) => {
+      [item.id, item.codigo, item.nombre].forEach((value) => {
+        const token = this.normalizeScopeToken(value);
+        if (token) locationTokens.add(token);
+      });
+    });
+
+    const equipments = locationIds.size
+      ? await this.equipoRepo.find({
+          where: {
+            location_id: In([...locationIds]),
+            is_deleted: false,
+          } as any,
+        })
+      : [];
+    const equipmentIds = new Set(
+      equipments.map((item) => String(item.id || '').trim()).filter(Boolean),
+    );
+    const equipmentCodes = new Set(
+      equipments
+        .map((item) => this.normalizeScopeToken(item.codigo))
+        .filter(Boolean),
+    );
+
+    return {
+      sucursalId: normalizedSucursalId,
+      locationIds,
+      locationTokens,
+      warehouseIds,
+      equipmentIds,
+      equipmentCodes,
+    };
+  }
+
+  private matchesScopedLocation(
+    value: unknown,
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope) return true;
+    const token = this.normalizeScopeToken(value);
+    return token ? scope.locationTokens.has(token) : false;
+  }
+
+  private matchesScopedEquipment(
+    equipmentId: unknown,
+    equipmentCode: unknown,
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope) return true;
+    const normalizedEquipmentId = String(equipmentId || '').trim();
+    if (normalizedEquipmentId && scope.equipmentIds.has(normalizedEquipmentId)) {
+      return true;
+    }
+    const normalizedEquipmentCode = this.normalizeScopeToken(equipmentCode);
+    return normalizedEquipmentCode
+      ? scope.equipmentCodes.has(normalizedEquipmentCode)
+      : false;
+  }
+
+  private async assertWarehouseVisibleForSucursal(
+    bodegaId?: string | null,
+    sucursalId?: string | null,
+  ) {
+    const normalizedBodegaId = String(bodegaId || '').trim();
+    const normalizedSucursalId = String(sucursalId || '').trim();
+    if (!normalizedBodegaId || !normalizedSucursalId) return;
+
+    const bodega = await this.bodegaRepo.findOne({
+      where: {
+        id: normalizedBodegaId,
+        is_deleted: false,
+      } as any,
+    });
+
+    if (!bodega || String(bodega.sucursal_id || '').trim() !== normalizedSucursalId) {
+      throw new NotFoundException(
+        'La bodega seleccionada no pertenece a la sucursal activa.',
+      );
+    }
+  }
+
+  private isProcedimientoVisibleForScope(
+    row: Pick<ProcedimientoPlantillaEntity, 'bodega_id'>,
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope) return true;
+    const normalizedWarehouseId = String(row.bodega_id || '').trim();
+    if (!normalizedWarehouseId) return true;
+    return scope.warehouseIds.has(normalizedWarehouseId);
+  }
+
+  private buildProgramacionMensualPeriods(details: Array<{ fecha_programada?: string | null; programacion_id?: string | null }>) {
+    const periodsMap = new Map<
+      string,
+      { period: string; total: number; sincronizados: number; label: string }
+    >();
+
+    for (const detail of details) {
+      const period = String(detail.fecha_programada || '').slice(0, 7);
+      if (!period) continue;
+      const parsed = new Date(`${period}-01T00:00:00Z`);
+      const label = parsed.toLocaleDateString('es-EC', {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+      const current = periodsMap.get(period) ?? {
+        period,
+        total: 0,
+        sincronizados: 0,
+        label,
+      };
+      current.total += 1;
+      if (detail.programacion_id) current.sincronizados += 1;
+      periodsMap.set(period, current);
+    }
+
+    return [...periodsMap.values()].sort((a, b) =>
+      String(a.period).localeCompare(String(b.period)),
+    );
+  }
+
+  private scopeProgramacionMensualPayload(
+    payload: any,
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope) return payload;
+    if (this.matchesScopedLocation(payload?.locacion, scope)) {
+      return payload;
+    }
+
+    const detalles = Array.isArray(payload?.detalles)
+      ? payload.detalles.filter((item: any) =>
+          this.matchesScopedEquipment(item?.equipo_id, item?.equipo_codigo, scope),
+        )
+      : [];
+    const detallesConsolidados = Array.isArray(payload?.detalles_consolidados)
+      ? payload.detalles_consolidados.filter((item: any) =>
+          this.matchesScopedEquipment(item?.equipo_id, item?.equipo_codigo, scope),
+        )
+      : [];
+
+    if (!detalles.length && !detallesConsolidados.length) {
+      return null;
+    }
+
+    const detailSource = detallesConsolidados.length ? detallesConsolidados : detalles;
+
+    return {
+      ...payload,
+      total_detalles: detalles.length,
+      total_detalles_consolidados: detallesConsolidados.length,
+      periodos: this.buildProgramacionMensualPeriods(detailSource),
+      detalles,
+      detalles_consolidados: detallesConsolidados,
+    };
+  }
+
+  private scopeCronogramaSemanalPayload(
+    payload: any,
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope) return payload;
+    if (this.matchesScopedLocation(payload?.locacion, scope)) {
+      return payload;
+    }
+
+    const detalles = Array.isArray(payload?.detalles)
+      ? payload.detalles.filter((item: any) =>
+          this.matchesScopedEquipment(item?.equipo_id, item?.equipo_codigo, scope),
+        )
+      : [];
+
+    if (!detalles.length) {
+      return null;
+    }
+
+    const dailyHours = detalles.reduce((acc: Record<string, number>, item: any) => {
+      const key = String(item?.fecha_actividad || '').slice(0, 10);
+      if (!key) return acc;
+      acc[key] = Number(
+        ((acc[key] ?? 0) + this.toNumeric(item?.duracion_horas, 0)).toFixed(2),
+      );
+      return acc;
+    }, {});
+
+    const dailyEquipmentMap = new Map<string, any>();
+    for (const item of detalles) {
+      const fechaActividad = String(item?.fecha_actividad || '').slice(0, 10);
+      const equipoCodigo = String(item?.equipo_codigo || '').trim();
+      if (!fechaActividad || !equipoCodigo) continue;
+      const key = `${fechaActividad}::${this.normalizeWorkbookToken(equipoCodigo)}`;
+      const current = dailyEquipmentMap.get(key) ?? {
+        key,
+        fecha_actividad: fechaActividad,
+        equipo_id: item?.equipo_id ?? null,
+        equipo_codigo: item?.equipo_codigo ?? null,
+        equipo_nombre: item?.equipo_nombre ?? null,
+        total_horas: 0,
+        total_actividades: 0,
+        cronograma_ids: Array.isArray(payload?.id) ? payload.id : [payload?.id].filter(Boolean),
+        cronograma_codigos: [payload?.codigo].filter(Boolean),
+        actividades: [],
+      };
+      current.total_horas = Number(
+        (current.total_horas + this.toNumeric(item?.duracion_horas, 0)).toFixed(2),
+      );
+      current.total_actividades += 1;
+      current.actividades.push({
+        detalle_id: item?.id,
+        actividad: item?.actividad,
+        tipo_proceso: item?.tipo_proceso ?? null,
+        hora_inicio: item?.hora_inicio ?? null,
+        hora_fin: item?.hora_fin ?? null,
+        duracion_horas: this.toNumeric(item?.duracion_horas, 0),
+        responsable_area: item?.responsable_area ?? null,
+        observacion: item?.observacion ?? null,
+      });
+      dailyEquipmentMap.set(key, current);
+    }
+
+    const timeSlots = [...new Set(detalles.map((item: any) => `${item?.hora_inicio || ''}-${item?.hora_fin || ''}`))]
+      .filter(Boolean)
+      .map((key) => {
+        const [hora_inicio = null, hora_fin = null] = String(key).split('-');
+        return {
+          key,
+          hora_inicio,
+          hora_fin,
+          label:
+            hora_inicio && hora_fin
+              ? `${String(hora_inicio).slice(0, 5)} - ${String(hora_fin).slice(0, 5)}`
+              : String(key),
+        };
+      });
+
+    return {
+      ...payload,
+      detalles,
+      daily_hours: dailyHours,
+      daily_equipment_hours: [...dailyEquipmentMap.values()].sort((a, b) =>
+        `${a.fecha_actividad}-${a.equipo_codigo || ''}`.localeCompare(
+          `${b.fecha_actividad}-${b.equipo_codigo || ''}`,
+        ),
+      ),
+      time_slots: timeSlots,
+    };
+  }
+
+  private scopeReporteDiarioPayload(
+    payload: any,
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope) return payload;
+    if (this.matchesScopedLocation(payload?.locacion, scope)) {
+      return payload;
+    }
+
+    const unidades = Array.isArray(payload?.unidades)
+      ? payload.unidades.filter((item: any) =>
+          this.matchesScopedEquipment(item?.equipo_id, item?.equipo_codigo, scope),
+        )
+      : [];
+    const componentes = Array.isArray(payload?.componentes)
+      ? payload.componentes.filter((item: any) =>
+          this.matchesScopedEquipment(item?.equipo_id, item?.equipo_codigo, scope),
+        )
+      : [];
+
+    if (!unidades.length && !componentes.length) {
+      return null;
+    }
+
+    return {
+      ...payload,
+      unidades,
+      combustibles: [],
+      componentes,
+    };
+  }
+
+  private async filterWorkOrdersByScope(
+    rows: WorkOrderEntity[],
+    scope: SucursalScopeContext | null,
+  ) {
+    if (!scope || !rows.length) return rows;
+
+    const visibleIds = new Set<string>();
+    const pendingIds: string[] = [];
+
+    for (const row of rows) {
+      const workOrderId = String(row.id || '').trim();
+      if (!workOrderId) continue;
+      if (
+        row.equipment_id &&
+        scope.equipmentIds.has(String(row.equipment_id || '').trim())
+      ) {
+        visibleIds.add(workOrderId);
+        continue;
+      }
+      pendingIds.push(workOrderId);
+    }
+
+    if (pendingIds.length && scope.warehouseIds.size) {
+      const warehouseIds = [...scope.warehouseIds];
+      const [consumos, reservas, entregas] = await Promise.all([
+        this.consumoRepo.find({
+          where: {
+            work_order_id: In(pendingIds),
+            bodega_id: In(warehouseIds),
+            is_deleted: false,
+          } as any,
+        }),
+        this.reservaRepo.find({
+          where: {
+            work_order_id: In(pendingIds),
+            bodega_id: In(warehouseIds),
+            is_deleted: false,
+          } as any,
+        }),
+        this.dataSource.getRepository(EntregaMaterialEntity).find({
+          where: {
+            work_order_id: In(pendingIds),
+            is_deleted: false,
+          } as any,
+        }),
+      ]);
+
+      consumos.forEach((row) => visibleIds.add(String(row.work_order_id || '').trim()));
+      reservas.forEach((row) => visibleIds.add(String(row.work_order_id || '').trim()));
+
+      const entregaById = new Map(
+        entregas.map((row) => [String(row.id || '').trim(), String(row.work_order_id || '').trim()]),
+      );
+      const entregaIds = [...entregaById.keys()].filter(Boolean);
+      if (entregaIds.length) {
+        const detalles = await this.dataSource
+          .getRepository(EntregaMaterialDetEntity)
+          .find({
+            where: {
+              entrega_id: In(entregaIds),
+              bodega_id: In(warehouseIds),
+            } as any,
+          });
+        detalles.forEach((detalle) => {
+          const workOrderId = entregaById.get(String(detalle.entrega_id || '').trim());
+          if (workOrderId) visibleIds.add(workOrderId);
+        });
+      }
+    }
+
+    return rows.filter((row) => visibleIds.has(String(row.id || '').trim()));
+  }
+
+  private async assertWorkOrderVisibleForSucursal(
+    row: WorkOrderEntity,
+    sucursalId?: string | null,
+  ) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const visible = await this.filterWorkOrdersByScope([row], scope);
+    if (!visible.length) {
+      throw new NotFoundException('Work order no encontrada');
+    }
+    return visible[0];
   }
 
   private async ensureInventoryWarehouseExists(bodegaId?: string | null) {
@@ -6490,7 +6906,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async listEquipos(query: EquipoQueryDto) {
+  async listEquipos(query: EquipoQueryDto, sucursalId?: string | null) {
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 10, 100);
     const estadoOperativo = query.estado_operativo
@@ -6501,7 +6917,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : undefined;
     const qb = this.equipoRepo
       .createQueryBuilder('e')
+      .leftJoin(
+        LocationEntity,
+        'location',
+        'location.id = e.location_id AND location.is_deleted = false',
+      )
       .where('e.is_deleted = false');
+    if (sucursalId) {
+      qb.andWhere('location.sucursal_id = :sucursalId', { sucursalId });
+    }
     if (query.codigo)
       qb.andWhere('e.codigo ILIKE :codigo', { codigo: `%${query.codigo}%` });
     if (query.marca_id)
@@ -6530,8 +6954,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(data, 'Equipos listados', { page, limit, total });
   }
 
-  async getEquipo(id: string) {
-    return this.wrap(await this.findEquipoOrFail(id), 'Equipo obtenido');
+  async getEquipo(id: string, sucursalId?: string | null) {
+    const row = await this.equipoRepo
+      .createQueryBuilder('e')
+      .leftJoin(
+        LocationEntity,
+        'location',
+        'location.id = e.location_id AND location.is_deleted = false',
+      )
+      .where('e.id = :id', { id })
+      .andWhere('e.is_deleted = false');
+    if (sucursalId) {
+      row.andWhere('location.sucursal_id = :sucursalId', { sucursalId });
+    }
+    const equipo = await row.getOne();
+    if (!equipo) {
+      throw new NotFoundException('Equipo no encontrado');
+    }
+    return this.wrap(equipo, 'Equipo obtenido');
   }
   async createEquipo(dto: CreateEquipoDto) {
     const { componentes: _componentes, ...equipoPayload } = dto;
@@ -6656,12 +7096,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Tipo de equipo eliminado');
   }
 
-  async listLocations(query: LocationQueryDto) {
+  async listLocations(query: LocationQueryDto, sucursalId?: string | null) {
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 10, 100);
     const qb = this.locationRepo
       .createQueryBuilder('l')
       .where('l.is_deleted = false');
+    if (sucursalId) {
+      qb.andWhere('l.sucursal_id = :sucursalId', { sucursalId });
+    }
+    if (query.sucursal_id) {
+      qb.andWhere('l.sucursal_id = :querySucursalId', {
+        querySucursalId: query.sucursal_id,
+      });
+    }
     if (query.codigo)
       qb.andWhere('l.codigo ILIKE :codigo', { codigo: `%${query.codigo}%` });
     if (query.nombre)
@@ -6675,20 +7123,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async getLocation(id: string) {
-    return this.wrap(
-      await this.findOneOrFail(
-        this.locationRepo.manager.getRepository(LocationEntity),
-        {
-          id,
-          is_deleted: false,
-        },
-      ),
-      'Location obtenida',
-    );
+  async getLocation(id: string, sucursalId?: string | null) {
+    const qb = this.locationRepo
+      .createQueryBuilder('l')
+      .where('l.id = :id', { id })
+      .andWhere('l.is_deleted = false');
+    if (sucursalId) {
+      qb.andWhere('l.sucursal_id = :sucursalId', { sucursalId });
+    }
+    const location = await qb.getOne();
+    if (!location) {
+      throw new NotFoundException('Location no encontrada');
+    }
+    return this.wrap(location, 'Location obtenida');
   }
 
   async createLocation(dto: CreateLocationDto) {
+    await this.findOneOrFail(this.sucursalRepo as any, {
+      id: dto.sucursal_id,
+      is_deleted: false,
+    } as any);
     return this.wrap(
       await this.locationRepo.manager.save(
         LocationEntity,
@@ -6706,6 +7160,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         is_deleted: false,
       },
     );
+    await this.findOneOrFail(this.sucursalRepo as any, {
+      id: dto.sucursal_id,
+      is_deleted: false,
+    } as any);
     Object.assign(l, dto);
     return this.wrap(
       await this.locationRepo.manager.save(LocationEntity, l),
@@ -6996,9 +7454,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     return this.wrap(enriched, 'Programación creada');
   }
-  async listProgramaciones() {
-    const rows = await this.programacionRepo.find({ where: { is_deleted: false, activo: true } });
-    const data = await Promise.all(rows.map((row) => this.recalculateProgramacionFields(row, { persist: false })));
+  async listProgramaciones(sucursalId?: string | null) {
+    const rows = await this.programacionRepo.find({
+      where: { is_deleted: false, activo: true },
+    });
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const scopedRows = !scope
+      ? rows
+      : rows.filter((row) =>
+          scope.equipmentIds.has(String(row.equipo_id || '').trim()),
+        );
+    const data = await Promise.all(
+      scopedRows.map((row) =>
+        this.recalculateProgramacionFields(row, { persist: false }),
+      ),
+    );
     data.sort((a: any, b: any) => {
       const left = a.proxima_fecha || '';
       const right = b.proxima_fecha || '';
@@ -7007,11 +7477,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     return this.wrap(data, 'Programaciones listadas');
   }
-  async getProgramacion(id: string) {
+  async getProgramacion(id: string, sucursalId?: string | null) {
     const row = await this.findOneOrFail(this.programacionRepo, {
       id,
       is_deleted: false,
     });
+    if (sucursalId) {
+      const scope = await this.buildSucursalScopeContext(sucursalId);
+      if (
+        scope &&
+        !scope.equipmentIds.has(String(row.equipo_id || '').trim())
+      ) {
+        throw new NotFoundException('ProgramaciÃ³n no encontrada');
+      }
+    }
     return this.wrap(
       await this.recalculateProgramacionFields(row, { persist: false }),
       'Programación obtenida',
@@ -7558,22 +8037,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Punto de lubricación eliminado');
   }
 
-  async listProcedimientosPlantilla() {
+  async listProcedimientosPlantilla(sucursalId?: string | null) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.procedimientoRepo.find({
       where: { is_deleted: false },
       order: { updated_at: 'DESC', created_at: 'DESC' },
     });
     return this.wrap(
-      await Promise.all(rows.map((row) => this.buildProcedimientoPayload(row))),
+      await Promise.all(
+        rows
+          .filter((row) => this.isProcedimientoVisibleForScope(row, scope))
+          .map((row) => this.buildProcedimientoPayload(row)),
+      ),
       'Procedimientos plantilla listados',
     );
   }
 
-  async getProcedimientoPlantilla(id: string) {
+  async getProcedimientoPlantilla(id: string, sucursalId?: string | null) {
     const row = await this.findOneOrFail(this.procedimientoRepo, {
       id,
       is_deleted: false,
     });
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    if (!this.isProcedimientoVisibleForScope(row, scope)) {
+      throw new NotFoundException('Procedimiento plantilla no encontrado');
+    }
     return this.wrap(
       await this.buildProcedimientoPayload(row),
       'Procedimiento plantilla obtenido',
@@ -7795,22 +8283,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Procedimiento plantilla eliminado');
   }
 
-  async listAnalisisLubricante() {
+  async listAnalisisLubricante(sucursalId?: string | null) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.analisisLubricanteRepo.find({
       where: { is_deleted: false },
       order: { fecha_reporte: 'DESC', created_at: 'DESC' },
     });
     return this.wrap(
-      await Promise.all(rows.map((row) => this.buildAnalisisLubricantePayload(row))),
+      await Promise.all(
+        rows
+          .filter((row) =>
+            this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
+          )
+          .map((row) => this.buildAnalisisLubricantePayload(row)),
+      ),
       'Análisis de lubricante listados',
     );
   }
 
-  async getAnalisisLubricante(id: string) {
+  async getAnalisisLubricante(id: string, sucursalId?: string | null) {
     const row = await this.findOneOrFail(this.analisisLubricanteRepo, {
       id,
       is_deleted: false,
     });
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    if (!this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope)) {
+      throw new NotFoundException('Análisis de lubricante no encontrado');
+    }
     return this.wrap(
       await this.buildAnalisisLubricantePayload(row),
       'Análisis de lubricante obtenido',
@@ -7819,7 +8318,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async listAnalisisLubricanteCatalog(
     query: AnalisisLubricanteCatalogQueryDto,
+    sucursalId?: string | null,
   ) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.analisisLubricanteRepo.find({
       where: { is_deleted: false },
       order: { fecha_reporte: 'DESC', fecha_muestra: 'DESC', created_at: 'DESC' },
@@ -7848,6 +8349,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     >();
 
     for (const row of rows) {
+      if (
+        !this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope)
+      ) {
+        continue;
+      }
       const identity = this.resolveLubricantIdentity(row);
       if (!identity.identity_lookup_key || !identity.lubricante) continue;
       const existing = catalog.get(identity.identity_lookup_key) ?? {
@@ -7928,14 +8434,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async getAnalisisLubricanteDashboard(
     query: AnalisisLubricanteDashboardQueryDto,
+    sucursalId?: string | null,
   ) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.analisisLubricanteRepo.find({
       where: { is_deleted: false },
       order: { fecha_reporte: 'ASC', fecha_muestra: 'ASC', created_at: 'ASC' },
     });
+    const scopedRows = rows.filter((row) =>
+      this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
+    );
 
     const referencedRow = query.codigo
-      ? rows.find(
+      ? scopedRows.find(
           (item) =>
             this.normalizeSearchToken(item.codigo) ===
             this.normalizeSearchToken(query.codigo),
@@ -7967,7 +8478,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       query.to,
     );
 
-    const matchingRows = rows.filter((row) => {
+    const matchingRows = scopedRows.filter((row) => {
       const identity = this.resolveLubricantIdentity(row);
       const dateValue = this.resolveAnalisisFechaReferencia(row);
       const rowCompartimento = this.normalizeSearchToken(
@@ -9957,24 +10468,47 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async listProgramacionesMensuales(query?: ProgramacionMensualQueryDto) {
+  async listProgramacionesMensuales(
+    query?: ProgramacionMensualQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.programacionMensualRepo.find({
       where: { is_deleted: false },
       order: { fecha_inicio: 'DESC', created_at: 'DESC' },
     });
-    const payload = await Promise.all(
-      rows.map((row) => this.buildProgramacionMensualPayload(row, query)),
-    );
+    const payload = (
+      await Promise.all(
+        rows.map(async (row) =>
+          this.scopeProgramacionMensualPayload(
+            await this.buildProgramacionMensualPayload(row, query),
+            scope,
+          ),
+        ),
+      )
+    ).filter((item): item is NonNullable<typeof item> => Boolean(item));
     return this.wrap(payload, 'Programaciones mensuales listadas');
   }
 
-  async getProgramacionMensual(id: string, query?: ProgramacionMensualQueryDto) {
+  async getProgramacionMensual(
+    id: string,
+    query?: ProgramacionMensualQueryDto,
+    sucursalId?: string | null,
+  ) {
     const row = await this.findOneOrFail(this.programacionMensualRepo, {
       id,
       is_deleted: false,
     });
-    return this.wrap(
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const payload = this.scopeProgramacionMensualPayload(
       await this.buildProgramacionMensualPayload(row, query),
+      scope,
+    );
+    if (!payload) {
+      throw new NotFoundException('Programación mensual no encontrada');
+    }
+    return this.wrap(
+      payload,
       'Programación mensual obtenida',
     );
   }
@@ -10247,24 +10781,42 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async listCronogramasSemanales() {
+  async listCronogramasSemanales(sucursalId?: string | null) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.cronogramaSemanalRepo.find({
       where: { is_deleted: false },
       order: { fecha_inicio: 'DESC', created_at: 'DESC' },
     });
     return this.wrap(
-      await Promise.all(rows.map((row) => this.buildCronogramaSemanalPayload(row))),
+      (
+        await Promise.all(
+          rows.map(async (row) =>
+            this.scopeCronogramaSemanalPayload(
+              await this.buildCronogramaSemanalPayload(row),
+              scope,
+            ),
+          ),
+        )
+      ).filter((item): item is NonNullable<typeof item> => Boolean(item)),
       'Cronogramas semanales listados',
     );
   }
 
-  async getCronogramaSemanal(id: string) {
+  async getCronogramaSemanal(id: string, sucursalId?: string | null) {
     const row = await this.findOneOrFail(this.cronogramaSemanalRepo, {
       id,
       is_deleted: false,
     });
-    return this.wrap(
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const payload = this.scopeCronogramaSemanalPayload(
       await this.buildCronogramaSemanalPayload(row),
+      scope,
+    );
+    if (!payload) {
+      throw new NotFoundException('Cronograma semanal no encontrado');
+    }
+    return this.wrap(
+      payload,
       'Cronograma semanal obtenido',
     );
   }
@@ -10422,24 +10974,42 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Cronograma semanal eliminado');
   }
 
-  async listReportesOperacionDiaria() {
+  async listReportesOperacionDiaria(sucursalId?: string | null) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.reporteDiarioRepo.find({
       where: { is_deleted: false },
       order: { fecha_reporte: 'DESC', created_at: 'DESC' },
     });
     return this.wrap(
-      await Promise.all(rows.map((row) => this.buildReporteDiarioPayload(row))),
+      (
+        await Promise.all(
+          rows.map(async (row) =>
+            this.scopeReporteDiarioPayload(
+              await this.buildReporteDiarioPayload(row),
+              scope,
+            ),
+          ),
+        )
+      ).filter((item): item is NonNullable<typeof item> => Boolean(item)),
       'Reportes de operación diaria listados',
     );
   }
 
-  async getReporteOperacionDiaria(id: string) {
+  async getReporteOperacionDiaria(id: string, sucursalId?: string | null) {
     const row = await this.findOneOrFail(this.reporteDiarioRepo, {
       id,
       is_deleted: false,
     });
-    return this.wrap(
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const payload = this.scopeReporteDiarioPayload(
       await this.buildReporteDiarioPayload(row),
+      scope,
+    );
+    if (!payload) {
+      throw new NotFoundException('Reporte de operación diaria no encontrado');
+    }
+    return this.wrap(
+      payload,
       'Reporte de operación diaria obtenido',
     );
   }
@@ -10835,10 +11405,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return from <= range.end && to >= range.start;
   }
 
-  async getIntelligenceSummary(query?: IntelligencePeriodQueryDto) {
+  async getIntelligenceSummary(
+    query?: IntelligencePeriodQueryDto,
+    sucursalId?: string | null,
+  ) {
     const periodRange = this.buildIntelligencePeriodRange(query);
     const [
-      procedimientos,
+      procedimientosRows,
       analisisRows,
       cronogramas,
       reportes,
@@ -10847,7 +11420,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       pendingWorkOrders,
       componentesRecientes,
     ] = await Promise.all([
-      this.procedimientoRepo.count({ where: { is_deleted: false } }),
+      this.procedimientoRepo.find({ where: { is_deleted: false } }),
       this.analisisLubricanteRepo.find({
         where: { is_deleted: false },
         order: { fecha_reporte: 'DESC', created_at: 'DESC' },
@@ -10874,6 +11447,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         order: { updated_at: 'DESC', created_at: 'DESC' },
       }),
     ]);
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const procedimientos = procedimientosRows.filter((row) =>
+      this.isProcedimientoVisibleForScope(row, scope),
+    );
 
     const programaciones = await Promise.all(
       overdueProgramaciones.map((row) =>
@@ -10881,32 +11458,65 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ),
     );
 
-    const filteredAnalyses = analisisRows.filter((row) =>
+    const scopedAnalyses = analisisRows.filter((row) =>
+      this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
+    );
+    const scopedCronogramas = !scope
+      ? cronogramas
+      : cronogramas.filter((row) =>
+          this.matchesScopedLocation(row.locacion, scope),
+        );
+    const scopedReportes = !scope
+      ? reportes
+      : reportes.filter((row) =>
+          this.matchesScopedLocation(row.locacion, scope),
+        );
+    const scopedEventos = !scope
+      ? eventos
+      : eventos.filter((row) =>
+          this.matchesScopedEquipment(row.equipo_id, null, scope),
+        );
+    const scopedProgramaciones = !scope
+      ? programaciones
+      : programaciones.filter((row: any) =>
+          this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
+        );
+    const scopedPendingWorkOrders = await this.filterWorkOrdersByScope(
+      pendingWorkOrders,
+      scope,
+    );
+    const scopedComponents = !scope
+      ? componentesRecientes
+      : componentesRecientes.filter((row) =>
+          this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
+        );
+
+    const filteredAnalyses = scopedAnalyses.filter((row) =>
       this.valueMatchesIntelligencePeriod(
         row.fecha_reporte || row.fecha_muestra || row.created_at,
         periodRange,
       ),
     );
-    const filteredCronogramas = cronogramas.filter((row) =>
+    const filteredCronogramas = scopedCronogramas.filter((row) =>
       this.rangeOverlapsIntelligencePeriod(
         row.fecha_inicio || row.created_at,
         row.fecha_fin || row.fecha_inicio || row.created_at,
         periodRange,
       ),
     );
-    const filteredReportes = reportes.filter((row) =>
+    const filteredReportes = scopedReportes.filter((row) =>
       this.valueMatchesIntelligencePeriod(
         row.fecha_reporte || row.created_at,
         periodRange,
       ),
     );
-    const filteredEventos = eventos.filter((row) =>
+    const filteredEventos = scopedEventos.filter((row) =>
       this.valueMatchesIntelligencePeriod(
         row.fecha_evento || row.created_at,
         periodRange,
       ),
     );
-    const filteredProgramaciones = programaciones.filter((row: any) =>
+    const filteredProgramaciones = scopedProgramaciones.filter((row: any) =>
       this.valueMatchesIntelligencePeriod(
         row.proxima_fecha || row.updated_at || row.created_at,
         periodRange,
@@ -10917,11 +11527,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         String(row.estado_programacion || '').toUpperCase() === 'VENCIDA',
     );
 
-    const filteredPendingWorkOrders = pendingWorkOrders.filter((row) =>
+    const filteredPendingWorkOrders = scopedPendingWorkOrders.filter((row) =>
       this.valueMatchesIntelligencePeriod(
-        row.scheduled_start ||
-          row.started_at ||
-          row.closed_at,
+        row.scheduled_start || row.started_at || row.closed_at,
         periodRange,
       ),
     );
@@ -10929,7 +11537,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const reportIds = new Set(
       filteredReportes.map((row) => String(row.id || '')).filter(Boolean),
     );
-    const filteredComponents = componentesRecientes.filter((row) =>
+    const filteredComponents = scopedComponents.filter((row) =>
       row.reporte_id
         ? reportIds.has(String(row.reporte_id))
         : this.valueMatchesIntelligencePeriod(
@@ -10964,7 +11572,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             }
           : null,
         kpis: {
-          procedimientos,
+          procedimientos: procedimientos.length,
           analisis_lubricante: filteredAnalyses.length,
           lubricantes_registrados: lubricantesRegistrados,
           cronogramas_semanales: filteredCronogramas.length,
@@ -10988,7 +11596,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async listAlertas(q: AlertaQueryDto) {
+  async listAlertas(q: AlertaQueryDto, sucursalId?: string | null) {
     const page = Number.isFinite(Number(q.page)) && Number(q.page) > 0 ? Number(q.page) : 1;
     const limit = Math.min(
       Number.isFinite(Number(q.limit)) && Number(q.limit) > 0 ? Number(q.limit) : 100,
@@ -11007,16 +11615,103 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where,
       order: { fecha_generada: 'DESC', id: 'DESC' },
     });
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const enriched = await this.enrichAlertRows(rows);
+    const referencedWorkOrderIds = [
+      ...new Set(
+        enriched.flatMap((row: any) => {
+          const ids = Array.isArray(row.work_orders)
+            ? row.work_orders.map((item: any) => String(item?.id || '').trim())
+            : [];
+          if (row.work_order_id) {
+            ids.push(String(row.work_order_id || '').trim());
+          }
+          return ids.filter(Boolean);
+        }),
+      ),
+    ];
+    const visibleWorkOrderIds = new Set(
+      !scope || !referencedWorkOrderIds.length
+        ? referencedWorkOrderIds
+        : (
+            await this.filterWorkOrdersByScope(
+              await this.woRepo.find({
+                where: {
+                  id: In(referencedWorkOrderIds),
+                  is_deleted: false,
+                } as any,
+              }),
+              scope,
+            )
+          ).map((item) => String(item.id || '').trim()),
+    );
+    const scopedRows = !scope
+      ? enriched
+      : enriched
+          .map((row: any) => {
+            const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+            const inventoryItems = this.getInventoryAlertItems(payload).filter((item) =>
+              scope.warehouseIds.has(String(item.bodega_id || '').trim()),
+            );
+            const linkedWorkOrders = Array.isArray(row.work_orders)
+              ? row.work_orders.filter((item: any) =>
+                  visibleWorkOrderIds.has(String(item?.id || '').trim()),
+                )
+              : [];
+            const workOrderVisible =
+              linkedWorkOrders.length > 0 ||
+              (row.work_order_id &&
+                visibleWorkOrderIds.has(String(row.work_order_id || '').trim()));
+            const equipmentVisible = this.matchesScopedEquipment(
+              row.equipo_id,
+              row.equipo_codigo,
+              scope,
+            );
+
+            if (!inventoryItems.length && !workOrderVisible && !equipmentVisible) {
+              return null;
+            }
+
+            if (!inventoryItems.length) {
+              return {
+                ...row,
+                work_orders: linkedWorkOrders,
+                work_order_count: linkedWorkOrders.length,
+                work_order_titles: linkedWorkOrders.map((item: any) => item.label),
+              };
+            }
+
+            const criticalCount = inventoryItems.filter(
+              (item) => String(item.nivel || '').toUpperCase() === 'CRITICAL',
+            ).length;
+            const preventiveCount = inventoryItems.length - criticalCount;
+            return {
+              ...row,
+              detalle: `${inventoryItems.length} material(es) en alerta de inventario.`,
+              title: `Inventario · ${inventoryItems.length} materiales en alerta`,
+              subtitle: `Criticos: ${criticalCount} · Preventivos: ${preventiveCount}`,
+              payload_json: {
+                ...payload,
+                inventory_items: inventoryItems,
+                total_materiales: inventoryItems.length,
+                materiales_criticos: criticalCount,
+                materiales_preventivos: preventiveCount,
+              },
+              work_orders: linkedWorkOrders,
+              work_order_count: linkedWorkOrders.length,
+              work_order_titles: linkedWorkOrders.map((item: any) => item.label),
+            };
+          })
+          .filter((item): item is NonNullable<typeof item> => Boolean(item));
     const filtered = q.work_order_id
-      ? enriched.filter((row: any) =>
+      ? scopedRows.filter((row: any) =>
           Array.isArray(row.work_orders)
             ? row.work_orders.some(
                 (item: any) => String(item?.id || '') === String(q.work_order_id),
               )
             : String(row.work_order_id || '') === String(q.work_order_id),
         )
-      : enriched;
+      : scopedRows;
     const total = filtered.length;
     const totalPages = total > 0 ? Math.ceil(total / limit) : 1;
     const paginated = filtered.slice((page - 1) * limit, page * limit);
@@ -11028,12 +11723,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async getAlertasSummary() {
-    const rows = await this.alertaRepo.find({
-      where: { is_deleted: false },
-      order: { fecha_generada: 'DESC', id: 'DESC' },
-    });
-    const enrichedRows = await this.enrichAlertRows(rows);
+  async getAlertasSummary(sucursalId?: string | null) {
+    const response = await this.listAlertas({ page: 1, limit: 500 }, sucursalId);
+    const enrichedRows = Array.isArray(response?.data) ? response.data : [];
 
     const totals = {
       total: enrichedRows.length,
@@ -11406,7 +12098,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async listWorkOrders(q: WorkOrderQueryDto) {
+  async listWorkOrders(
+    q: WorkOrderQueryDto,
+    sucursalId?: string | null,
+  ) {
     const qb = this.woRepo
       .createQueryBuilder('wo')
       .where('wo.is_deleted = false');
@@ -11419,12 +12114,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (q.maintenance_kind)
       qb.andWhere('wo.maintenance_kind = :kind', { kind: q.maintenance_kind });
     qb.orderBy('wo.created_at', 'DESC');
-    const rows = await qb.getMany();
-    return this.wrap(await Promise.all(rows.map((row) => this.enrichWorkOrder(row))), 'Work orders listadas');
+    const rows = await this.filterWorkOrdersByScope(
+      await qb.getMany(),
+      await this.buildSucursalScopeContext(sucursalId),
+    );
+    return this.wrap(
+      await Promise.all(rows.map((row) => this.enrichWorkOrder(row))),
+      'Work orders listadas',
+    );
   }
 
-  async getWorkOrder(id: string) {
-    const row = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+  async getWorkOrder(id: string, sucursalId?: string | null) {
+    const row = await this.findOneOrFail(this.woRepo, {
+      id,
+      is_deleted: false,
+    });
+    await this.assertWorkOrderVisibleForSucursal(row, sucursalId);
     return this.wrap(await this.enrichWorkOrder(row), 'Work order obtenida');
   }
 
@@ -11938,22 +12643,34 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async listConsumos(workOrderId: string) {
-    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+  async listConsumos(workOrderId: string, sucursalId?: string | null) {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+    await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.consumoRepo.find({
       where: { work_order_id: workOrderId, is_deleted: false },
       order: { id: 'DESC' },
     });
+    const scopedRows = !scope
+      ? rows
+      : rows.filter((row) =>
+          row.bodega_id
+            ? scope.warehouseIds.has(String(row.bodega_id || '').trim())
+            : false,
+        );
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
-      rows.map((row) => row.producto_id),
-      rows.map((row) => row.bodega_id || '').filter(Boolean),
+      scopedRows.map((row) => row.producto_id),
+      scopedRows.map((row) => row.bodega_id || '').filter(Boolean),
     );
     const groupedTotals = new Map<
       string,
       { plannedQty: number; issuedQty: number; pendingQty: number }
     >();
     await Promise.all(
-      rows.map(async (row) => {
+      scopedRows.map(async (row) => {
         const key = `${row.producto_id}|${row.bodega_id || ''}`;
         if (groupedTotals.has(key)) return;
         groupedTotals.set(
@@ -11968,7 +12685,7 @@ await this.appendWorkOrderHistory(
     );
 
     return this.wrap(
-      rows.map((row) => {
+      scopedRows.map((row) => {
         const key = `${row.producto_id}|${row.bodega_id || ''}`;
         const totals = groupedTotals.get(key);
         return {
@@ -11982,7 +12699,11 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async listMaterialReservations(productoId: string, bodegaId: string) {
+  async listMaterialReservations(
+    productoId: string,
+    bodegaId: string,
+    sucursalId?: string | null,
+  ) {
     const normalizedProductoId = String(productoId || '').trim();
     const normalizedBodegaId = String(bodegaId || '').trim();
 
@@ -11992,6 +12713,11 @@ await this.appendWorkOrderHistory(
     if (!normalizedBodegaId) {
       throw new BadRequestException('bodega_id es obligatorio');
     }
+
+    await this.assertWarehouseVisibleForSucursal(
+      normalizedBodegaId,
+      sucursalId,
+    );
 
     const [producto, bodega, reservas] = await Promise.all([
       this.findOneOrFail(this.productoRepo, {
@@ -12153,8 +12879,13 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async listIssueMaterials(workOrderId: string) {
-    await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+  async listIssueMaterials(workOrderId: string, sucursalId?: string | null) {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+    await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    const scope = await this.buildSucursalScopeContext(sucursalId);
     const entregas = await this.dataSource.getRepository(EntregaMaterialEntity).find({
       where: { work_order_id: workOrderId, is_deleted: false },
       order: { fecha: 'DESC' },
@@ -12170,19 +12901,30 @@ await this.appendWorkOrderHistory(
     );
 
     return this.wrap(
-      entregas.map((entrega) => {
-        const items = detalles
-          .filter((detalle) => detalle.entrega_id === entrega.id)
-          .map((detalle) => this.mapIssueItemWithCatalogs(detalle, productMap, warehouseMap));
-        return {
-          ...entrega,
-          items,
-          total: items.reduce(
-            (acc, item) => acc + Number(item.costo_unitario || 0) * Number(item.cantidad || 0),
-            0,
-          ),
-        };
-      }),
+      entregas
+        .map((entrega) => {
+          const items = detalles
+            .filter((detalle) => detalle.entrega_id === entrega.id)
+            .filter((detalle) =>
+              !scope
+                ? true
+                : scope.warehouseIds.has(String(detalle.bodega_id || '').trim()),
+            )
+            .map((detalle) =>
+              this.mapIssueItemWithCatalogs(detalle, productMap, warehouseMap),
+            );
+          if (!items.length && scope) return null;
+          return {
+            ...entrega,
+            items,
+            total: items.reduce(
+              (acc, item) =>
+                acc + Number(item.costo_unitario || 0) * Number(item.cantidad || 0),
+              0,
+            ),
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
       'Salidas de materiales listadas',
     );
   }

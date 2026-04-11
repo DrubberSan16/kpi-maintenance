@@ -274,6 +274,10 @@ export class LocationQueryDto {
   @IsOptional()
   @IsString()
   nombre?: string;
+  @ApiPropertyOptional({ description: 'ID de la sucursal asociada', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  sucursal_id?: string;
   @ApiPropertyOptional({
     description: 'Página a consultar',
     minimum: 1,
@@ -305,6 +309,9 @@ export class CreateLocationDto {
   @IsString()
   @IsNotEmpty()
   nombre: string;
+  @ApiProperty({ description: 'ID de la sucursal asociada', format: 'uuid' })
+  @IsUUID()
+  sucursal_id: string;
   @ApiPropertyOptional({ description: 'Descripción de la ubicación' })
   @IsOptional()
   @IsString()

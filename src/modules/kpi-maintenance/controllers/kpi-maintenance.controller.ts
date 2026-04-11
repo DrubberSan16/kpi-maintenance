@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   Res,
   UploadedFile,
   UseInterceptors,
@@ -81,6 +82,7 @@ import {
   LocationQueryDto,
   EquipoTipoQueryDto,
 } from '../dto';
+import { getSucursalScopeId } from '../../../common/http/sucursal-scope.util';
 
 const bodyExamples = {
   createEquipo: {
@@ -204,15 +206,15 @@ export class KpiMaintenanceController {
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Listar equipos con filtros opcionales' })
   @Get('equipos')
-  listEquipos(@Query() query: EquipoQueryDto) {
-    return this.service.listEquipos(query);
+  listEquipos(@Query() query: EquipoQueryDto, @Req() req: any) {
+    return this.service.listEquipos(query, getSucursalScopeId(req));
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
   @Get('equipos/:id')
-  getEquipo(@Param('id') id: string) {
-    return this.service.getEquipo(id);
+  getEquipo(@Param('id') id: string, @Req() req: any) {
+    return this.service.getEquipo(id, getSucursalScopeId(req));
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Crear un equipo' })
@@ -296,16 +298,16 @@ export class KpiMaintenanceController {
   @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Listar locaciones con filtros opcionales' })
   @Get('locaciones')
-  listLocaciones(@Query() query: LocationQueryDto) {
-    return this.service.listLocations(query);
+  listLocaciones(@Query() query: LocationQueryDto, @Req() req: any) {
+    return this.service.listLocations(query, getSucursalScopeId(req));
   }
 
   @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Obtener locación por ID' })
   @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
   @Get('locaciones/:id')
-  getLocacion(@Param('id') id: string) {
-    return this.service.getLocation(id);
+  getLocacion(@Param('id') id: string, @Req() req: any) {
+    return this.service.getLocation(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Locaciones')
@@ -525,16 +527,19 @@ export class KpiMaintenanceController {
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Listar programaciones de mantenimiento' })
   @Get('programaciones')
-  listProgramaciones() {
-    return this.service.listProgramaciones();
+  listProgramaciones(@Req() req: any) {
+    return this.service.listProgramaciones(getSucursalScopeId(req));
   }
   @ApiTags('Programaciones')
   @ApiOperation({
     summary: 'Listar calendarios mensuales importados de programación MPG',
   })
   @Get('programaciones/mensuales')
-  listProgramacionesMensuales(@Query() query: ProgramacionMensualQueryDto) {
-    return this.service.listProgramacionesMensuales(query);
+  listProgramacionesMensuales(
+    @Query() query: ProgramacionMensualQueryDto,
+    @Req() req: any,
+  ) {
+    return this.service.listProgramacionesMensuales(query, getSucursalScopeId(req));
   }
 
   @ApiTags('Programaciones')
@@ -545,8 +550,9 @@ export class KpiMaintenanceController {
   getProgramacionMensual(
     @Param('id') id: string,
     @Query() query: ProgramacionMensualQueryDto,
+    @Req() req: any,
   ) {
-    return this.service.getProgramacionMensual(id, query);
+    return this.service.getProgramacionMensual(id, query, getSucursalScopeId(req));
   }
 
   @ApiTags('Programaciones')
@@ -621,8 +627,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Get('programaciones/:id')
-  getProgramacion(@Param('id') id: string) {
-    return this.service.getProgramacion(id);
+  getProgramacion(@Param('id') id: string, @Req() req: any) {
+    return this.service.getProgramacion(id, getSucursalScopeId(req));
   }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Actualizar programación por ID' })
@@ -658,14 +664,14 @@ export class KpiMaintenanceController {
   @ApiTags('Alertas')
   @ApiOperation({ summary: 'Listar alertas con filtros opcionales' })
   @Get('alertas')
-  listAlertas(@Query() query: AlertaQueryDto) {
-    return this.service.listAlertas(query);
+  listAlertas(@Query() query: AlertaQueryDto, @Req() req: any) {
+    return this.service.listAlertas(query, getSucursalScopeId(req));
   }
   @ApiTags('Alertas')
   @ApiOperation({ summary: 'Obtener resumen consolidado de alertas' })
   @Get('alertas/summary')
-  getAlertSummary() {
-    return this.service.getAlertasSummary();
+  getAlertSummary(@Req() req: any) {
+    return this.service.getAlertasSummary(getSucursalScopeId(req));
   }
   @ApiTags('Alertas')
   @ApiOperation({ summary: 'Recalcular alertas del sistema' })
@@ -821,8 +827,8 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Listar plantillas de procedimientos documentales' })
   @Get('inteligencia/procedimientos')
-  listProcedimientosPlantilla() {
-    return this.service.listProcedimientosPlantilla();
+  listProcedimientosPlantilla(@Req() req: any) {
+    return this.service.listProcedimientosPlantilla(getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -835,8 +841,8 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener plantilla de procedimiento por ID' })
   @Get('inteligencia/procedimientos/:id')
-  getProcedimientoPlantilla(@Param('id') id: string) {
-    return this.service.getProcedimientoPlantilla(id);
+  getProcedimientoPlantilla(@Param('id') id: string, @Req() req: any) {
+    return this.service.getProcedimientoPlantilla(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -866,8 +872,8 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Listar análisis de lubricante' })
   @Get('inteligencia/analisis-lubricante')
-  listAnalisisLubricante() {
-    return this.service.listAnalisisLubricante();
+  listAnalisisLubricante(@Req() req: any) {
+    return this.service.listAnalisisLubricante(getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -889,8 +895,9 @@ export class KpiMaintenanceController {
   @Get('inteligencia/analisis-lubricante/catalog')
   listAnalisisLubricanteCatalog(
     @Query() query: AnalisisLubricanteCatalogQueryDto,
+    @Req() req: any,
   ) {
-    return this.service.listAnalisisLubricanteCatalog(query);
+    return this.service.listAnalisisLubricanteCatalog(query, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -898,15 +905,16 @@ export class KpiMaintenanceController {
   @Get('inteligencia/analisis-lubricante/dashboard')
   getAnalisisLubricanteDashboard(
     @Query() query: AnalisisLubricanteDashboardQueryDto,
+    @Req() req: any,
   ) {
-    return this.service.getAnalisisLubricanteDashboard(query);
+    return this.service.getAnalisisLubricanteDashboard(query, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener análisis de lubricante por ID' })
   @Get('inteligencia/analisis-lubricante/:id')
-  getAnalisisLubricante(@Param('id') id: string) {
-    return this.service.getAnalisisLubricante(id);
+  getAnalisisLubricante(@Param('id') id: string, @Req() req: any) {
+    return this.service.getAnalisisLubricante(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1017,15 +1025,15 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Listar cronogramas semanales' })
   @Get('inteligencia/cronogramas-semanales')
-  listCronogramasSemanales() {
-    return this.service.listCronogramasSemanales();
+  listCronogramasSemanales(@Req() req: any) {
+    return this.service.listCronogramasSemanales(getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener cronograma semanal por ID' })
   @Get('inteligencia/cronogramas-semanales/:id')
-  getCronogramaSemanal(@Param('id') id: string) {
-    return this.service.getCronogramaSemanal(id);
+  getCronogramaSemanal(@Param('id') id: string, @Req() req: any) {
+    return this.service.getCronogramaSemanal(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1082,15 +1090,15 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Listar reportes de operación diaria' })
   @Get('inteligencia/reportes-diarios')
-  listReportesOperacionDiaria() {
-    return this.service.listReportesOperacionDiaria();
+  listReportesOperacionDiaria(@Req() req: any) {
+    return this.service.listReportesOperacionDiaria(getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener reporte de operación diaria por ID' })
   @Get('inteligencia/reportes-diarios/:id')
-  getReporteOperacionDiaria(@Param('id') id: string) {
-    return this.service.getReporteOperacionDiaria(id);
+  getReporteOperacionDiaria(@Param('id') id: string, @Req() req: any) {
+    return this.service.getReporteOperacionDiaria(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1134,15 +1142,15 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Obtener resumen KPI documental y operativo' })
   @Get('inteligencia/summary')
-  getIntelligenceSummary(@Query() query: IntelligencePeriodQueryDto) {
-    return this.service.getIntelligenceSummary(query);
+  getIntelligenceSummary(@Query() query: IntelligencePeriodQueryDto, @Req() req: any) {
+    return this.service.getIntelligenceSummary(query, getSucursalScopeId(req));
   }
 
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar órdenes de trabajo con filtros opcionales' })
   @Get('work-orders')
-  listWorkOrders(@Query() query: WorkOrderQueryDto) {
-    return this.service.listWorkOrders(query);
+  listWorkOrders(@Query() query: WorkOrderQueryDto, @Req() req: any) {
+    return this.service.listWorkOrders(query, getSucursalScopeId(req));
   }
 
 
@@ -1172,8 +1180,13 @@ export class KpiMaintenanceController {
   listMaterialReservations(
     @Query('producto_id') productoId: string,
     @Query('bodega_id') bodegaId: string,
+    @Req() req: any,
   ) {
-    return this.service.listMaterialReservations(productoId, bodegaId);
+    return this.service.listMaterialReservations(
+      productoId,
+      bodegaId,
+      getSucursalScopeId(req),
+    );
   }
 
   @ApiTags('Work Orders')
@@ -1184,8 +1197,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Get('work-orders/:id')
-  getWorkOrder(@Param('id') id: string) {
-    return this.service.getWorkOrder(id);
+  getWorkOrder(@Param('id') id: string, @Req() req: any) {
+    return this.service.getWorkOrder(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Work Orders')
@@ -1401,8 +1414,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Get('work-orders/:id/consumos')
-  listConsumos(@Param('id') id: string) {
-    return this.service.listConsumos(id);
+  listConsumos(@Param('id') id: string, @Req() req: any) {
+    return this.service.listConsumos(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Work Orders')
@@ -1441,8 +1454,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Get('work-orders/:id/issue-materials')
-  listIssueMaterials(@Param('id') id: string) {
-    return this.service.listIssueMaterials(id);
+  listIssueMaterials(@Param('id') id: string, @Req() req: any) {
+    return this.service.listIssueMaterials(id, getSucursalScopeId(req));
   }
 
   @ApiTags('Work Orders')

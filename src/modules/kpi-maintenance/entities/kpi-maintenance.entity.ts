@@ -58,6 +58,7 @@ export class LocationEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'text' }) codigo: string;
   @Column({ type: 'text' }) nombre: string;
+  @Column({ type: 'uuid', nullable: true }) sucursal_id?: string | null;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
@@ -837,7 +838,17 @@ export class ProductoEntity {
 @Entity({ schema: 'kpi_inventory', name: 'tb_bodega' })
 export class BodegaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid', nullable: true }) sucursal_id?: string | null;
   @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 150, nullable: true }) nombre?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_inventory', name: 'tb_sucursal' })
+export class InventorySucursalEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
+  @Column({ type: 'varchar', length: 150, nullable: true }) nombre?: string | null;
+  @Column({ type: 'text', nullable: true }) status?: string | null;
   @Column({ default: false }) is_deleted: boolean;
 }
