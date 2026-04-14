@@ -2923,19 +2923,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return `
       <div style="margin-top:22px;">
         <div style="font-size:13px;color:#5f7388;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Materiales afectados</div>
-        <div style="border:1px solid #dbe4f0;border-radius:16px;overflow:hidden;background:#fbfdff;">
-          <table style="width:100%;border-collapse:collapse;font-size:14px;color:#193550;">
-            <thead style="background:#eef4fb;">
-              <tr>
-                <th style="padding:12px;text-align:left;">Material</th>
-                <th style="padding:12px;text-align:left;">Bodega</th>
-                <th style="padding:12px;text-align:right;">Stock actual</th>
-                <th style="padding:12px;text-align:right;">Stock minimo</th>
-                <th style="padding:12px;text-align:left;">Observacion</th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
+        <div style="border:1px solid #dbe4f0;border-radius:16px;background:#fbfdff;">
+          <div style="width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:16px;">
+            <table style="width:100%;min-width:760px;border-collapse:collapse;font-size:14px;color:#193550;">
+              <thead style="background:#eef4fb;">
+                <tr>
+                  <th style="padding:12px;text-align:left;">Material</th>
+                  <th style="padding:12px;text-align:left;">Bodega</th>
+                  <th style="padding:12px;text-align:right;">Stock actual</th>
+                  <th style="padding:12px;text-align:right;">Stock minimo</th>
+                  <th style="padding:12px;text-align:left;">Observacion</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
         </div>
       </div>
     `;
