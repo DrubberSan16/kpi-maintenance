@@ -74,11 +74,13 @@ import {
   ReporteOperacionDiariaUnidadEntity,
   WorkOrderStatusHistoryEntity,
   StockBodegaEntity,
+  UnidadMedidaEntity,
   WorkOrderAdjuntoEntity,
   WorkOrderEntity,
   WorkOrderTareaEntity,
 } from '../entities/kpi-maintenance.entity';
 import {
+  AnalisisAceiteKpiQueryDto,
   AlertaQueryDto,
   AnalisisLubricanteCatalogQueryDto,
   AnalisisLubricanteDashboardQueryDto,
@@ -801,6 +803,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly kardexRepo: Repository<KardexEntity>,
     @InjectRepository(ProductoEntity)
     private readonly productoRepo: Repository<ProductoEntity>,
+    @InjectRepository(UnidadMedidaEntity)
+    private readonly unidadMedidaRepo: Repository<UnidadMedidaEntity>,
     @InjectRepository(BodegaEntity)
     private readonly bodegaRepo: Repository<BodegaEntity>,
     @InjectRepository(ReservaStockEntity)
@@ -1327,6 +1331,185 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       productMap: new Map(productos.map((item) => [item.id, item])),
       warehouseMap: new Map(bodegas.map((item) => [item.id, item])),
     };
+  }
+
+  private parseOilUsageDate(
+    value: unknown,
+    options?: { endOfDay?: boolean },
+  ) {
+    const raw = this.safeDateOnlyString(value) ?? String(value || '').trim();
+    if (!raw) return null;
+    const parsed = new Date(
+      /^\d{4}-\d{2}-\d{2}$/.test(raw)
+        ? `${raw}T${options?.endOfDay ? '23:59:59.999' : '00:00:00.000'}`
+        : raw,
+    );
+    if (Number.isNaN(parsed.getTime())) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      parsed.setHours(
+        options?.endOfDay ? 23 : 0,
+        options?.endOfDay ? 59 : 0,
+        options?.endOfDay ? 59 : 0,
+        options?.endOfDay ? 999 : 0,
+      );
+    }
+    return parsed;
+  }
+
+  private formatOilUsageDateLabel(value: Date) {
+    return new Intl.DateTimeFormat('es-EC', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    }).format(value);
+  }
+
+  private formatOilUsageBucketLabel(value: Date, periodo: string) {
+    if (periodo === 'ANUAL') {
+      return new Intl.DateTimeFormat('es-EC', {
+        month: 'short',
+      }).format(value);
+    }
+    return new Intl.DateTimeFormat('es-EC', {
+      day: '2-digit',
+      month: 'short',
+    }).format(value);
+  }
+
+  private buildOilUsageDateRange(query?: AnalisisAceiteKpiQueryDto) {
+    const normalizedPeriod = String(query?.periodo || 'MENSUAL')
+      .trim()
+      .toUpperCase();
+    const today = new Date();
+    const referenceDate =
+      this.parseOilUsageDate(query?.reference_date) ??
+      this.parseOilUsageDate(query?.from) ??
+      this.parseOilUsageDate(query?.to, { endOfDay: true }) ??
+      today;
+
+    let fromDate: Date;
+    let toDate: Date;
+
+    if (normalizedPeriod === 'SEMANAL') {
+      fromDate = new Date(referenceDate);
+      fromDate.setHours(0, 0, 0, 0);
+      fromDate.setDate(fromDate.getDate() - fromDate.getDay());
+      toDate = new Date(fromDate);
+      toDate.setDate(toDate.getDate() + 6);
+      toDate.setHours(23, 59, 59, 999);
+    } else if (normalizedPeriod === 'ANUAL') {
+      const year = Number(query?.year) || referenceDate.getFullYear();
+      fromDate = new Date(year, 0, 1, 0, 0, 0, 0);
+      toDate = new Date(year, 11, 31, 23, 59, 59, 999);
+    } else if (normalizedPeriod === 'PERSONALIZADO') {
+      fromDate =
+        this.parseOilUsageDate(query?.from) ??
+        new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate(), 0, 0, 0, 0);
+      toDate =
+        this.parseOilUsageDate(query?.to, { endOfDay: true }) ??
+        new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate(), 23, 59, 59, 999);
+    } else {
+      const year = Number(query?.year) || referenceDate.getFullYear();
+      const month = Number(query?.month) || referenceDate.getMonth() + 1;
+      fromDate = new Date(year, month - 1, 1, 0, 0, 0, 0);
+      toDate = new Date(year, month, 0, 23, 59, 59, 999);
+    }
+
+    if (fromDate.getTime() > toDate.getTime()) {
+      const swappedFrom = new Date(toDate);
+      swappedFrom.setHours(0, 0, 0, 0);
+      const swappedTo = new Date(fromDate);
+      swappedTo.setHours(23, 59, 59, 999);
+      fromDate = swappedFrom;
+      toDate = swappedTo;
+    }
+
+    let label = `${this.formatOilUsageDateLabel(fromDate)} - ${this.formatOilUsageDateLabel(toDate)}`;
+    if (normalizedPeriod === 'MENSUAL') {
+      label = new Intl.DateTimeFormat('es-EC', {
+        month: 'long',
+        year: 'numeric',
+      }).format(fromDate);
+    } else if (normalizedPeriod === 'ANUAL') {
+      label = `Año ${fromDate.getFullYear()}`;
+    } else if (normalizedPeriod === 'SEMANAL') {
+      label = `Semana del ${this.formatOilUsageDateLabel(fromDate)} al ${this.formatOilUsageDateLabel(toDate)}`;
+    }
+
+    return {
+      periodo:
+        normalizedPeriod === 'SEMANAL' ||
+        normalizedPeriod === 'ANUAL' ||
+        normalizedPeriod === 'PERSONALIZADO'
+          ? normalizedPeriod
+          : 'MENSUAL',
+      fromDate,
+      toDate,
+      from: fromDate.toISOString().slice(0, 10),
+      to: toDate.toISOString().slice(0, 10),
+      year: fromDate.getFullYear(),
+      month: fromDate.getMonth() + 1,
+      label,
+      reference_date: referenceDate.toISOString().slice(0, 10),
+    };
+  }
+
+  private resolveWorkOrderReferenceDate(workOrder?: WorkOrderEntity | null) {
+    if (!workOrder) return null;
+    return (
+      this.parseOilUsageDate(workOrder.closed_at, { endOfDay: true }) ??
+      this.parseOilUsageDate(workOrder.started_at, { endOfDay: true }) ??
+      this.parseOilUsageDate(workOrder.scheduled_start, { endOfDay: true }) ??
+      this.parseOilUsageDate(workOrder.updated_at, { endOfDay: true }) ??
+      this.parseOilUsageDate(workOrder.created_at, { endOfDay: true })
+    );
+  }
+
+  private async buildOilProductCatalog() {
+    const unitNames = ['GALON', 'GALONES'];
+    const unitCodes = ['GALON', 'GALONES', 'GAL', 'GL'];
+    const { entities, raw } = await this.productoRepo
+      .createQueryBuilder('producto')
+      .leftJoin(
+        UnidadMedidaEntity,
+        'unidad',
+        'unidad.id = producto.unidad_medida_id AND unidad.is_deleted = false',
+      )
+      .where('producto.is_deleted = false')
+      .andWhere(
+        `(
+          UPPER(COALESCE(unidad.nombre, '')) IN (:...unitNames)
+          OR UPPER(COALESCE(unidad.abreviatura, '')) IN (:...unitCodes)
+          OR UPPER(COALESCE(unidad.codigo, '')) IN (:...unitCodes)
+        )`,
+        {
+          unitNames,
+          unitCodes,
+        },
+      )
+      .select('producto')
+      .addSelect('unidad.nombre', 'unidad_nombre')
+      .addSelect('unidad.abreviatura', 'unidad_abreviatura')
+      .addSelect('unidad.codigo', 'unidad_codigo')
+      .orderBy('producto.nombre', 'ASC')
+      .addOrderBy('producto.codigo', 'ASC')
+      .getRawAndEntities();
+
+    return entities.map((producto, index) => {
+      const unidadNombre = String(raw[index]?.unidad_nombre || '').trim() || null;
+      const unidadAbreviatura =
+        String(raw[index]?.unidad_abreviatura || '').trim() || null;
+      const unidadCodigo = String(raw[index]?.unidad_codigo || '').trim() || null;
+      return {
+        id: producto.id,
+        codigo: producto.codigo ?? null,
+        nombre: producto.nombre ?? null,
+        label: this.buildProductoLabel(producto) ?? producto.id,
+        unidad_medida: unidadNombre,
+        unidad_medida_abreviatura: unidadAbreviatura,
+        unidad_medida_codigo: unidadCodigo,
+      };
+    });
   }
 
   private mapConsumoWithCatalogs(
@@ -12143,6 +12326,368 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         component_highlights: filteredComponents.slice(0, 5),
       },
       'Resumen de inteligencia operativa generado',
+    );
+  }
+
+  async getAnalisisAceiteKpi(
+    query: AnalisisAceiteKpiQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const [scope, oilCatalog] = await Promise.all([
+      this.buildSucursalScopeContext(sucursalId),
+      this.buildOilProductCatalog(),
+    ]);
+    const oilCatalogMap = new Map(oilCatalog.map((item) => [item.id, item]));
+    const requestedProductId = this.firstNonEmptyString(query?.producto_id);
+
+    if (requestedProductId && !oilCatalogMap.has(requestedProductId)) {
+      throw new BadRequestException(
+        'El material seleccionado no corresponde a un aceite medido en galones.',
+      );
+    }
+
+    const selectedProductId =
+      requestedProductId ?? this.firstNonEmptyString(oilCatalog[0]?.id);
+    const range = this.buildOilUsageDateRange(query);
+
+    if (!selectedProductId) {
+      return this.wrap(
+        {
+          filters: range,
+          catalog: oilCatalog,
+          selected_product_id: null,
+          selected_product: null,
+          totals: {
+            total_cantidad: 0,
+            total_ordenes: 0,
+            total_equipos: 0,
+            promedio_por_orden: 0,
+            promedio_por_equipo: 0,
+            total_costo: 0,
+          },
+          trend: [],
+          work_orders: [],
+          by_equipment: [],
+        },
+        'KPI de análisis de aceite generado',
+      );
+    }
+
+    const consumos = await this.consumoRepo.find({
+      where: {
+        producto_id: selectedProductId,
+        is_deleted: false,
+      },
+      order: { id: 'DESC' },
+    });
+
+    const workOrderIds = [
+      ...new Set(
+        consumos
+          .map((row) => String(row.work_order_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const rawWorkOrders = workOrderIds.length
+      ? await this.woRepo.find({
+          where: { id: In(workOrderIds), is_deleted: false },
+        })
+      : [];
+    const visibleWorkOrders = await this.filterWorkOrdersByScope(
+      rawWorkOrders,
+      scope,
+    );
+    const workOrderMap = new Map(
+      visibleWorkOrders.map((row) => [row.id, row]),
+    );
+
+    const equipmentIds = [
+      ...new Set(
+        visibleWorkOrders
+          .map((row) => String(row.equipment_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const equipments = equipmentIds.length
+      ? await this.equipoRepo.find({
+          where: { id: In(equipmentIds), is_deleted: false },
+        })
+      : [];
+    const equipmentMap = new Map(equipments.map((row) => [row.id, row]));
+
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      [selectedProductId],
+      consumos.map((row) => row.bodega_id || '').filter(Boolean),
+    );
+
+    const groupedByOrder = new Map<
+      string,
+      {
+        work_order_id: string;
+        producto_id: string;
+        workOrder: WorkOrderEntity;
+        referenceDate: Date;
+        equipment_id: string | null;
+        cantidad: number;
+        subtotal: number;
+        bodega_ids: Set<string>;
+        observaciones: Set<string>;
+        movimientos: number;
+      }
+    >();
+
+    for (const row of consumos) {
+      const workOrder = workOrderMap.get(String(row.work_order_id || '').trim());
+      if (!workOrder) continue;
+      const referenceDate = this.resolveWorkOrderReferenceDate(workOrder);
+      if (!referenceDate) continue;
+      if (
+        referenceDate.getTime() < range.fromDate.getTime() ||
+        referenceDate.getTime() > range.toDate.getTime()
+      ) {
+        continue;
+      }
+
+      const key = `${workOrder.id}::${row.producto_id}`;
+      const current =
+        groupedByOrder.get(key) ??
+        {
+          work_order_id: workOrder.id,
+          producto_id: row.producto_id,
+          workOrder,
+          referenceDate,
+          equipment_id: workOrder.equipment_id ?? null,
+          cantidad: 0,
+          subtotal: 0,
+          bodega_ids: new Set<string>(),
+          observaciones: new Set<string>(),
+          movimientos: 0,
+        };
+
+      current.cantidad += this.toNumeric(row.cantidad, 0);
+      current.subtotal += this.toNumeric(row.subtotal, 0);
+      current.movimientos += 1;
+      if (row.bodega_id) {
+        current.bodega_ids.add(String(row.bodega_id).trim());
+      }
+      if (row.observacion) {
+        current.observaciones.add(String(row.observacion).trim());
+      }
+      groupedByOrder.set(key, current);
+    }
+
+    const baseRows = [...groupedByOrder.values()]
+      .map((row) => {
+        const producto = productMap.get(row.producto_id);
+        const equipment = row.equipment_id
+          ? equipmentMap.get(row.equipment_id)
+          : null;
+        const bodegaLabels = [...row.bodega_ids]
+          .map((id) => this.buildBodegaLabel(warehouseMap.get(id)) ?? id)
+          .filter(Boolean);
+        const quantity = Number(row.cantidad.toFixed(4));
+        const totalCost = Number(row.subtotal.toFixed(2));
+
+        return {
+          work_order_id: row.work_order_id,
+          work_order_code: row.workOrder.code,
+          work_order_title: row.workOrder.title,
+          work_order_status: this.normalizeWorkflowStatus(
+            row.workOrder.status_workflow,
+          ),
+          fecha_referencia: row.referenceDate.toISOString(),
+          fecha_referencia_label: this.formatOilUsageDateLabel(row.referenceDate),
+          producto_id: row.producto_id,
+          producto_codigo: producto?.codigo ?? null,
+          producto_nombre: producto?.nombre ?? null,
+          producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+          equipment_id: equipment?.id ?? row.equipment_id ?? null,
+          equipment_code: equipment?.codigo ?? null,
+          equipment_name: equipment?.nombre ?? null,
+          equipment_label:
+            [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
+            'Sin equipo',
+          bodegas: bodegaLabels,
+          bodega_label: bodegaLabels.join(' | ') || 'Sin bodega',
+          movimientos: row.movimientos,
+          cantidad: quantity,
+          subtotal: totalCost,
+          costo_promedio:
+            quantity > 0 ? Number((totalCost / quantity).toFixed(4)) : 0,
+          observacion: [...row.observaciones].join(' | ') || null,
+        };
+      })
+      .sort((a, b) => {
+        const dateDiff =
+          new Date(a.fecha_referencia).getTime() -
+          new Date(b.fecha_referencia).getTime();
+        if (dateDiff !== 0) return dateDiff;
+        return String(a.work_order_code || '').localeCompare(
+          String(b.work_order_code || ''),
+        );
+      });
+
+    let previousQuantity: number | null = null;
+    const workOrderRows = baseRows.map((row) => {
+      const difference =
+        previousQuantity == null
+          ? null
+          : Number((row.cantidad - previousQuantity).toFixed(4));
+      previousQuantity = row.cantidad;
+      return {
+        ...row,
+        diferencia_vs_anterior: difference,
+        tendencia_cantidad:
+          difference == null
+            ? 'BASE'
+            : difference > 0
+              ? 'SUBE'
+              : difference < 0
+                ? 'BAJA'
+                : 'IGUAL',
+      };
+    });
+
+    const byEquipmentMap = new Map<
+      string,
+      {
+        equipment_id: string | null;
+        equipment_label: string;
+        equipment_code: string | null;
+        equipment_name: string | null;
+        total_cantidad: number;
+        total_costo: number;
+        work_order_ids: Set<string>;
+        fechas: Date[];
+      }
+    >();
+    for (const row of workOrderRows) {
+      const equipmentKey =
+        String(row.equipment_id || '').trim() ||
+        `SIN_EQUIPO::${String(row.equipment_label || '').trim()}`;
+      const current =
+        byEquipmentMap.get(equipmentKey) ??
+        {
+          equipment_id: row.equipment_id,
+          equipment_label: row.equipment_label,
+          equipment_code: row.equipment_code,
+          equipment_name: row.equipment_name,
+          total_cantidad: 0,
+          total_costo: 0,
+          work_order_ids: new Set<string>(),
+          fechas: [],
+        };
+      current.total_cantidad += this.toNumeric(row.cantidad, 0);
+      current.total_costo += this.toNumeric(row.subtotal, 0);
+      current.work_order_ids.add(row.work_order_id);
+      current.fechas.push(new Date(row.fecha_referencia));
+      byEquipmentMap.set(equipmentKey, current);
+    }
+
+    const byEquipment = [...byEquipmentMap.values()]
+      .map((row) => ({
+        equipment_id: row.equipment_id,
+        equipment_code: row.equipment_code,
+        equipment_name: row.equipment_name,
+        equipment_label: row.equipment_label,
+        total_cantidad: Number(row.total_cantidad.toFixed(4)),
+        total_costo: Number(row.total_costo.toFixed(2)),
+        total_ordenes: row.work_order_ids.size,
+        primera_fecha:
+          row.fechas.length > 0
+            ? row.fechas
+                .slice()
+                .sort((a, b) => a.getTime() - b.getTime())[0]
+                ?.toISOString() ?? null
+            : null,
+        ultima_fecha:
+          row.fechas.length > 0
+            ? row.fechas
+                .slice()
+                .sort((a, b) => b.getTime() - a.getTime())[0]
+                ?.toISOString() ?? null
+            : null,
+      }))
+      .sort((a, b) => b.total_cantidad - a.total_cantidad);
+
+    const trendMap = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        total_cantidad: number;
+        work_order_ids: Set<string>;
+      }
+    >();
+    for (const row of workOrderRows) {
+      const dateValue = new Date(row.fecha_referencia);
+      const key =
+        range.periodo === 'ANUAL'
+          ? `${dateValue.getFullYear()}-${String(dateValue.getMonth() + 1).padStart(2, '0')}`
+          : dateValue.toISOString().slice(0, 10);
+      const current =
+        trendMap.get(key) ??
+        {
+          key,
+          label: this.formatOilUsageBucketLabel(dateValue, range.periodo),
+          total_cantidad: 0,
+          work_order_ids: new Set<string>(),
+        };
+      current.total_cantidad += this.toNumeric(row.cantidad, 0);
+      current.work_order_ids.add(row.work_order_id);
+      trendMap.set(key, current);
+    }
+
+    const trend = [...trendMap.values()]
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map((row) => ({
+        key: row.key,
+        label: row.label,
+        cantidad: Number(row.total_cantidad.toFixed(4)),
+        total_ordenes: row.work_order_ids.size,
+      }));
+
+    const totalCantidad = workOrderRows.reduce(
+      (acc, row) => acc + this.toNumeric(row.cantidad, 0),
+      0,
+    );
+    const totalCosto = workOrderRows.reduce(
+      (acc, row) => acc + this.toNumeric(row.subtotal, 0),
+      0,
+    );
+    const totalOrdenes = new Set(workOrderRows.map((row) => row.work_order_id))
+      .size;
+    const totalEquipos = new Set(
+      byEquipment.map((row) => row.equipment_id || row.equipment_label),
+    ).size;
+
+    const selectedProduct = oilCatalogMap.get(selectedProductId) ?? null;
+
+    return this.wrap(
+      {
+        filters: range,
+        catalog: oilCatalog,
+        selected_product_id: selectedProductId,
+        selected_product: selectedProduct,
+        totals: {
+          total_cantidad: Number(totalCantidad.toFixed(4)),
+          total_costo: Number(totalCosto.toFixed(2)),
+          total_ordenes: totalOrdenes,
+          total_equipos: totalEquipos,
+          promedio_por_orden:
+            totalOrdenes > 0
+              ? Number((totalCantidad / totalOrdenes).toFixed(4))
+              : 0,
+          promedio_por_equipo:
+            totalEquipos > 0
+              ? Number((totalCantidad / totalEquipos).toFixed(4))
+              : 0,
+        },
+        trend,
+        work_orders: workOrderRows,
+        by_equipment: byEquipment,
+      },
+      'KPI de análisis de aceite generado',
     );
   }
 

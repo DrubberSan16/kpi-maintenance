@@ -840,8 +840,18 @@ export class ProductoEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'varchar', length: 60, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 250, nullable: true }) nombre?: string | null;
+  @Column({ type: 'uuid', nullable: true }) unidad_medida_id?: string | null;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   ultimo_costo: number;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({ schema: 'kpi_inventory', name: 'tb_unidad_medida' })
+export class UnidadMedidaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
+  @Column({ type: 'varchar', length: 100, nullable: true }) nombre?: string | null;
+  @Column({ type: 'varchar', length: 20, nullable: true }) abreviatura?: string | null;
   @Column({ default: false }) is_deleted: boolean;
 }
 

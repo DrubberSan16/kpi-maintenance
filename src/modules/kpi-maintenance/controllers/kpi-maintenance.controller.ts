@@ -24,6 +24,7 @@ import {
 } from '@nestjs/swagger';
 import { KpiMaintenanceService } from '../services/kpi-maintenance.service';
 import {
+  AnalisisAceiteKpiQueryDto,
   AlertaQueryDto,
   AnalisisLubricanteCatalogQueryDto,
   AnalisisLubricanteDashboardQueryDto,
@@ -889,6 +890,22 @@ export class KpiMaintenanceController {
   @Get('inteligencia/analisis-lubricante')
   listAnalisisLubricante(@Req() req: any) {
     return this.service.listAnalisisLubricante(getSucursalScopeId(req));
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary:
+      'KPI de consumo de aceite por rango, orden de trabajo y equipo',
+  })
+  @Get('inteligencia/analisis-aceite/kpi')
+  getAnalisisAceiteKpi(
+    @Query() query: AnalisisAceiteKpiQueryDto,
+    @Req() req: any,
+  ) {
+    return this.service.getAnalisisAceiteKpi(
+      query,
+      getSucursalScopeId(req),
+    );
   }
 
   @ApiTags('Inteligencia Operativa')

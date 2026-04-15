@@ -1559,6 +1559,66 @@ export class AnalisisLubricanteDashboardQueryDto {
   to?: string;
 }
 
+export class AnalisisAceiteKpiQueryDto {
+  @ApiPropertyOptional({
+    description: 'ID del material/aceite a analizar',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  producto_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Periodo del KPI: SEMANAL, MENSUAL, ANUAL o PERSONALIZADO',
+  })
+  @IsOptional()
+  @IsString()
+  periodo?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Fecha de referencia para el cálculo semanal o para inferir mes/año (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  reference_date?: string;
+
+  @ApiPropertyOptional({
+    description: 'Año a consultar cuando el periodo es mensual o anual',
+    type: Number,
+    minimum: 2000,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(2000)
+  year?: number;
+
+  @ApiPropertyOptional({
+    description: 'Mes a consultar cuando el periodo es mensual (1-12)',
+    type: Number,
+    minimum: 1,
+    maximum: 12,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  @Max(12)
+  month?: number;
+
+  @ApiPropertyOptional({ description: 'Fecha de inicio personalizada (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  from?: string;
+
+  @ApiPropertyOptional({ description: 'Fecha de fin personalizada (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  to?: string;
+}
+
 export class CronogramaSemanalDetalleDto {
   @ApiProperty({ description: 'Día de la semana' })
   @IsString()
