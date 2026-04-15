@@ -84,6 +84,18 @@ import {
 } from '../dto';
 import { getSucursalScopeId } from '../../../common/http/sucursal-scope.util';
 
+function getRequestActor(req?: any) {
+  return {
+    userId: String(req?.user?.userId || '').trim() || null,
+    username:
+      String(req?.user?.nameUser || req?.user?.username || '').trim() || null,
+    displayName:
+      String(
+        req?.user?.nameSurname || req?.user?.nameUser || req?.user?.username || '',
+      ).trim() || null,
+  };
+}
+
 const bodyExamples = {
   createEquipo: {
     codigo: 'EQ-001',
@@ -1158,7 +1170,11 @@ export class KpiMaintenanceController {
   @ApiOperation({ summary: 'Listar órdenes de trabajo con filtros opcionales' })
   @Get('work-orders')
   listWorkOrders(@Query() query: WorkOrderQueryDto, @Req() req: any) {
-    return this.service.listWorkOrders(query, getSucursalScopeId(req));
+    return this.service.listWorkOrders(
+      query,
+      getSucursalScopeId(req),
+      getRequestActor(req),
+    );
   }
 
 
@@ -1206,7 +1222,11 @@ export class KpiMaintenanceController {
   })
   @Get('work-orders/:id')
   getWorkOrder(@Param('id') id: string, @Req() req: any) {
-    return this.service.getWorkOrder(id, getSucursalScopeId(req));
+    return this.service.getWorkOrder(
+      id,
+      getSucursalScopeId(req),
+      getRequestActor(req),
+    );
   }
 
   @ApiTags('Work Orders')
@@ -1217,8 +1237,8 @@ export class KpiMaintenanceController {
     examples: { ejemplo: { value: bodyExamples.createWorkOrder } },
   })
   @Post('work-orders')
-  createWorkOrder(@Body() dto: CreateWorkOrderDto) {
-    return this.service.createWorkOrder(dto);
+  createWorkOrder(@Body() dto: CreateWorkOrderDto, @Req() req: any) {
+    return this.service.createWorkOrder(dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders')
@@ -1230,8 +1250,12 @@ export class KpiMaintenanceController {
   })
   @ApiBody({ type: UpdateWorkOrderDto, required: true })
   @Patch('work-orders/:id')
-  updateWorkOrder(@Param('id') id: string, @Body() dto: UpdateWorkOrderDto) {
-    return this.service.updateWorkOrder(id, dto);
+  updateWorkOrder(
+    @Param('id') id: string,
+    @Body() dto: UpdateWorkOrderDto,
+    @Req() req: any,
+  ) {
+    return this.service.updateWorkOrder(id, dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders')
@@ -1242,8 +1266,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Delete('work-orders/:id')
-  deleteWorkOrder(@Param('id') id: string) {
-    return this.service.deleteWorkOrder(id);
+  deleteWorkOrder(@Param('id') id: string, @Req() req: any) {
+    return this.service.deleteWorkOrder(id, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Tareas')
@@ -1276,8 +1300,9 @@ export class KpiMaintenanceController {
   createWorkOrderTarea(
     @Param('id') id: string,
     @Body() dto: CreateWorkOrderTareaDto,
+    @Req() req: any,
   ) {
-    return this.service.createWorkOrderTarea(id, dto);
+    return this.service.createWorkOrderTarea(id, dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Tareas')
@@ -1288,16 +1313,17 @@ export class KpiMaintenanceController {
   updateWorkOrderTarea(
     @Param('id') id: string,
     @Body() dto: UpdateWorkOrderTareaDto,
+    @Req() req: any,
   ) {
-    return this.service.updateWorkOrderTarea(id, dto);
+    return this.service.updateWorkOrderTarea(id, dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Tareas')
   @ApiOperation({ summary: 'Eliminar tarea ejecutada de OT por ID' })
   @ApiParam({ name: 'id', description: 'ID de la tarea de OT', required: true })
   @Delete('work-orders/tareas/:id')
-  deleteWorkOrderTarea(@Param('id') id: string) {
-    return this.service.deleteWorkOrderTarea(id);
+  deleteWorkOrderTarea(@Param('id') id: string, @Req() req: any) {
+    return this.service.deleteWorkOrderTarea(id, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Adjuntos')
@@ -1316,8 +1342,9 @@ export class KpiMaintenanceController {
   uploadWorkOrderAdjunto(
     @Param('id') id: string,
     @Body() dto: UploadWorkOrderAdjuntoDto,
+    @Req() req: any,
   ) {
-    return this.service.uploadWorkOrderAdjunto(id, dto);
+    return this.service.uploadWorkOrderAdjunto(id, dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Adjuntos')
@@ -1398,8 +1425,13 @@ export class KpiMaintenanceController {
   deleteWorkOrderAdjunto(
     @Param('id') id: string,
     @Param('adjuntoId') adjuntoId: string,
+    @Req() req: any,
   ) {
-    return this.service.deleteWorkOrderAdjunto(id, adjuntoId);
+    return this.service.deleteWorkOrderAdjunto(
+      id,
+      adjuntoId,
+      getRequestActor(req),
+    );
   }
 
   @ApiTags('Inventory')
@@ -1451,8 +1483,12 @@ export class KpiMaintenanceController {
     examples: { ejemplo: { value: bodyExamples.createConsumo } },
   })
   @Post('work-orders/:id/consumos')
-  createConsumo(@Param('id') id: string, @Body() dto: CreateConsumoDto) {
-    return this.service.createConsumo(id, dto);
+  createConsumo(
+    @Param('id') id: string,
+    @Body() dto: CreateConsumoDto,
+    @Req() req: any,
+  ) {
+    return this.service.createConsumo(id, dto, getRequestActor(req));
   }
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar salidas de materiales de una orden de trabajo' })
@@ -1479,7 +1515,11 @@ export class KpiMaintenanceController {
     examples: { ejemplo: { value: bodyExamples.issueMaterials } },
   })
   @Post('work-orders/:id/issue-materials')
-  issueMaterials(@Param('id') id: string, @Body() dto: IssueMaterialsDto) {
-    return this.service.issueMaterials(id, dto);
+  issueMaterials(
+    @Param('id') id: string,
+    @Body() dto: IssueMaterialsDto,
+    @Req() req: any,
+  ) {
+    return this.service.issueMaterials(id, dto, getRequestActor(req));
   }
 }

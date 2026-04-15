@@ -479,6 +479,13 @@ export class CreateProgramacionDto {
   @IsOptional()
   @IsUUID()
   plan_id?: string;
+  @ApiPropertyOptional({
+    description: 'ID de la orden de trabajo que ejecutará la programación',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  work_order_id?: string;
   @ApiPropertyOptional({ description: 'ID de la plantilla MPG seleccionada', format: 'uuid' })
   @IsOptional()
   @IsUUID()

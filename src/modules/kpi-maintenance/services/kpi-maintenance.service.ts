@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -226,6 +227,12 @@ type SucursalScopeContext = {
   warehouseIds: Set<string>;
   equipmentIds: Set<string>;
   equipmentCodes: Set<string>;
+};
+
+type RequestActorContext = {
+  userId?: string | null;
+  username?: string | null;
+  displayName?: string | null;
 };
 
 type SecurityUserDirectoryItem = {
@@ -1964,6 +1971,42 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const programacion = await this.programacionRepo.findOne({
       where: { id: programacionId, is_deleted: false },
+    });
+    if (!programacion) return;
+
+    const closedAtRaw =
+      workOrder.closed_at ||
+      (workOrder as Record<string, unknown>).updated_at ||
+      new Date().toISOString();
+    const closedAt = new Date(String(closedAtRaw));
+    const executionDate = Number.isNaN(closedAt.getTime())
+      ? new Date().toISOString().slice(0, 10)
+      : closedAt.toISOString().slice(0, 10);
+
+    programacion.ultima_ejecucion_fecha = executionDate;
+
+    if (workOrder.equipment_id) {
+      const equipo = await this.equipoRepo.findOne({
+        where: { id: workOrder.equipment_id, is_deleted: false },
+      });
+      if (equipo?.horometro_actual != null) {
+        programacion.ultima_ejecucion_horas = this.toNumeric(
+          equipo.horometro_actual,
+          0,
+        );
+      }
+    }
+
+    await this.recalculateProgramacionFields(programacion);
+  }
+
+  private async syncProgramacionExecutionFromLinkedWorkOrder(
+    workOrder: Partial<WorkOrderEntity>,
+  ) {
+    const workOrderId = String(workOrder.id || '').trim();
+    if (!workOrderId) return;
+    const programacion = await this.programacionRepo.findOne({
+      where: { work_order_id: workOrderId, is_deleted: false, activo: true },
     });
     if (!programacion) return;
 
@@ -6753,6 +6796,66 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private resolveActorLabel(actor?: RequestActorContext | null) {
+    return this.firstNonEmptyString(actor?.displayName, actor?.username);
+  }
+
+  private applyWorkOrderAuditStamp(
+    workOrder: WorkOrderEntity,
+    actor?: RequestActorContext | null,
+    mode: 'CREATED' | 'PROCESSED' | 'APPROVED' = 'PROCESSED',
+    options?: { action?: string | null; clearApproval?: boolean },
+  ) {
+    const actorUserId = this.firstNonEmptyString(actor?.userId);
+    const actorUsername = this.firstNonEmptyString(actor?.username);
+    const actorDisplayName = this.firstNonEmptyString(
+      actor?.displayName,
+      actor?.username,
+    );
+    const payload = {
+      ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
+    };
+
+    if (options?.clearApproval) {
+      delete payload.approved_by_user_id;
+      delete payload.approved_by_username;
+      delete payload.approved_by_name;
+      delete payload.approved_at;
+      delete payload.approval_action;
+    }
+
+    if (!actorUserId && !actorUsername && !actorDisplayName) {
+      workOrder.valor_json = payload;
+      return;
+    }
+
+    const now = new Date().toISOString();
+    if (mode === 'CREATED') {
+      payload.created_by_user_id =
+        actorUserId ?? this.firstNonEmptyString(payload.created_by_user_id);
+      payload.created_by_username =
+        actorUsername ?? this.firstNonEmptyString(payload.created_by_username);
+      payload.created_by_name =
+        actorDisplayName ?? this.firstNonEmptyString(payload.created_by_name);
+      payload.created_at = payload.created_at ?? now;
+    } else if (mode === 'PROCESSED') {
+      payload.processed_by_user_id = actorUserId ?? null;
+      payload.processed_by_username = actorUsername ?? null;
+      payload.processed_by_name = actorDisplayName ?? null;
+      payload.processed_at = now;
+    } else {
+      payload.approved_by_user_id = actorUserId ?? null;
+      payload.approved_by_username = actorUsername ?? null;
+      payload.approved_by_name = actorDisplayName ?? null;
+      payload.approved_at = now;
+      payload.approval_action =
+        this.firstNonEmptyString(options?.action, payload.approval_action) ?? null;
+      workOrder.approved_by = actorUserId ?? workOrder.approved_by ?? null;
+    }
+
+    workOrder.valor_json = payload;
+  }
+
   private applyWorkflowDates(
     workOrder: WorkOrderEntity,
     previousStatus: string | null,
@@ -6787,15 +6890,215 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return date;
   }
 
+  private async resolveProgramacionWorkOrder(workOrderId?: string | null) {
+    const normalizedId = String(workOrderId || '').trim();
+    if (!normalizedId) return null;
+    return this.findOneOrFail(this.woRepo, {
+      id: normalizedId,
+      is_deleted: false,
+    });
+  }
+
+  private mergeProgramacionWorkOrderPayload(
+    payload: Record<string, unknown> | null | undefined,
+    workOrder: WorkOrderEntity | null,
+  ) {
+    const nextPayload = { ...(payload ?? {}) } as Record<string, unknown>;
+    if (!workOrder) {
+      delete nextPayload.work_order_id;
+      delete nextPayload.work_order_code;
+      delete nextPayload.work_order_title;
+      delete nextPayload.work_order_status;
+      return nextPayload;
+    }
+    nextPayload.work_order_id = workOrder.id;
+    nextPayload.work_order_code = workOrder.code ?? null;
+    nextPayload.work_order_title = workOrder.title ?? null;
+    nextPayload.work_order_status = this.normalizeWorkflowStatus(
+      workOrder.status_workflow,
+    );
+    return nextPayload;
+  }
+
+  private collectProgramacionPlannerHints(
+    programacion?: ProgramacionPlanEntity | null,
+  ) {
+    const payload = (programacion?.payload_json ?? {}) as Record<string, unknown>;
+    const userIds = new Set<string>();
+    const usernames = new Set<string>();
+    const addUserId = (...values: unknown[]) => {
+      for (const value of values) {
+        const normalized = this.firstNonEmptyString(value);
+        if (normalized) userIds.add(normalized);
+      }
+    };
+    const addUsername = (...values: unknown[]) => {
+      for (const value of values) {
+        const normalized = this.normalizeUsername(value);
+        if (normalized) usernames.add(normalized);
+      }
+    };
+
+    addUserId(
+      payload.actor_user_id,
+      payload.user_id,
+      payload.created_by_user_id,
+      payload.requested_user_id,
+    );
+    addUsername(
+      payload.actor_username,
+      payload.created_by,
+      payload.requested_by,
+    );
+
+    return {
+      userIds,
+      usernames,
+      ownerLabel:
+        this.firstNonEmptyString(
+          payload.created_by,
+          payload.actor_username,
+          payload.requested_by,
+        ) || null,
+    };
+  }
+
+  private async resolveLinkedProgramacionForWorkOrder(workOrderId: string) {
+    return this.programacionRepo.findOne({
+      where: { work_order_id: workOrderId, is_deleted: false, activo: true },
+      order: { proxima_fecha: 'ASC', id: 'ASC' },
+    });
+  }
+
+  private async canActorCloseOrVoidWorkOrder(
+    workOrder: WorkOrderEntity,
+    actor?: RequestActorContext | null,
+    linkedProgramacion?: ProgramacionPlanEntity | null,
+  ) {
+    const actorUserId = this.firstNonEmptyString(actor?.userId);
+    const actorUsername = this.normalizeUsername(actor?.username);
+    if (!actorUserId && !actorUsername) return false;
+
+    const ownerUserIds = new Set<string>();
+    const ownerUsernames = new Set<string>();
+    const addOwnerUserId = (...values: unknown[]) => {
+      for (const value of values) {
+        const normalized = this.firstNonEmptyString(value);
+        if (normalized) ownerUserIds.add(normalized);
+      }
+    };
+    const addOwnerUsername = (...values: unknown[]) => {
+      for (const value of values) {
+        const normalized = this.normalizeUsername(value);
+        if (normalized) ownerUsernames.add(normalized);
+      }
+    };
+
+    addOwnerUserId(workOrder.requested_by);
+    addOwnerUsername(workOrder.created_by);
+
+    const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
+    plannerHints.userIds.forEach((value) => ownerUserIds.add(value));
+    plannerHints.usernames.forEach((value) => ownerUsernames.add(value));
+
+    return (
+      (!!actorUserId && ownerUserIds.has(actorUserId)) ||
+      (!!actorUsername && ownerUsernames.has(actorUsername))
+    );
+  }
+
+  private async assertCanCloseOrVoidWorkOrder(
+    workOrder: WorkOrderEntity,
+    actor?: RequestActorContext | null,
+    actionLabel = 'cerrar o anular',
+  ) {
+    const linkedProgramacion = await this.resolveLinkedProgramacionForWorkOrder(
+      workOrder.id,
+    );
+    const allowed = await this.canActorCloseOrVoidWorkOrder(
+      workOrder,
+      actor,
+      linkedProgramacion,
+    );
+    if (allowed) {
+      return { linkedProgramacion, canCloseOrVoid: true };
+    }
+
+    const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
+    const ownerLabel =
+      this.firstNonEmptyString(workOrder.created_by, plannerHints.ownerLabel) ||
+      'el usuario que creó o planificó la orden';
+    throw new ForbiddenException(
+      `Solo ${ownerLabel} puede ${actionLabel} esta orden de trabajo.`,
+    );
+  }
+
+  private async syncProgramacionWorkOrderLink(
+    programacionId: string | null | undefined,
+    workOrder: WorkOrderEntity,
+  ) {
+    const normalizedId = String(programacionId || '').trim();
+    if (!normalizedId) return;
+    const programacion = await this.programacionRepo.findOne({
+      where: { id: normalizedId, is_deleted: false },
+    });
+    if (!programacion) return;
+    programacion.work_order_id = workOrder.id;
+    programacion.payload_json = this.mergeProgramacionWorkOrderPayload(
+      programacion.payload_json,
+      workOrder,
+    );
+    await this.programacionRepo.save(programacion);
+  }
+
+  private async syncProgramacionWorkOrderLinkFromAlert(
+    alertaId: string | null | undefined,
+    workOrder: WorkOrderEntity,
+  ) {
+    const normalizedAlertId = String(alertaId || '').trim();
+    if (!normalizedAlertId) return;
+    const alerta = await this.alertaRepo.findOne({
+      where: { id: normalizedAlertId, is_deleted: false },
+    });
+    if (!alerta) return;
+    const payload = (alerta.payload_json ?? {}) as Record<string, unknown>;
+    await this.syncProgramacionWorkOrderLink(
+      this.firstNonEmptyString(payload.programacion_id),
+      workOrder,
+    );
+  }
+
+  private async detachProgramacionesFromWorkOrder(workOrderId: string) {
+    const rows = await this.programacionRepo.find({
+      where: { work_order_id: workOrderId, is_deleted: false },
+    });
+    if (!rows.length) return;
+    for (const row of rows) {
+      row.work_order_id = null;
+      row.payload_json = this.mergeProgramacionWorkOrderPayload(
+        row.payload_json,
+        null,
+      );
+    }
+    await this.programacionRepo.save(rows);
+  }
+
   private async recalculateProgramacionFields(
     programacion: ProgramacionPlanEntity,
     options?: { persist?: boolean },
   ) {
-    const equipo = await this.findEquipoOrFail(programacion.equipo_id);
-    const plan = await this.findOneOrFail(this.planRepo, {
-      id: programacion.plan_id,
-      is_deleted: false,
-    });
+    const [equipo, plan, linkedWorkOrder] = await Promise.all([
+      this.findEquipoOrFail(programacion.equipo_id),
+      this.findOneOrFail(this.planRepo, {
+        id: programacion.plan_id,
+        is_deleted: false,
+      }),
+      programacion.work_order_id
+        ? this.woRepo.findOne({
+            where: { id: programacion.work_order_id, is_deleted: false },
+          })
+        : Promise.resolve(null),
+    ]);
     const procedimiento = await this.resolveProcedimientoFromPlan(plan);
 
     const freqType = String(plan.frecuencia_tipo || 'HORAS').toUpperCase();
@@ -6861,6 +7164,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         programacion.origen_programacion ?? 'MANUAL',
       documento_origen: programacion.documento_origen ?? null,
       payload_json: programacion.payload_json ?? {},
+      work_order_id: linkedWorkOrder?.id ?? programacion.work_order_id ?? null,
+      work_order_code: linkedWorkOrder?.code ?? null,
+      work_order_title: linkedWorkOrder?.title ?? null,
+      work_order_status: linkedWorkOrder
+        ? this.normalizeWorkflowStatus(linkedWorkOrder.status_workflow)
+        : null,
       procedimiento_id: procedimiento?.id ?? null,
       procedimiento_codigo: procedimiento?.codigo ?? null,
       procedimiento_nombre: procedimiento?.nombre ?? null,
@@ -6883,8 +7192,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return enriched;
   }
 
-  private async enrichWorkOrder(workOrder: WorkOrderEntity) {
-    const [equipo, plan, componente, blockingWorkOrder, parentWorkOrder] = await Promise.all([
+  private async enrichWorkOrder(
+    workOrder: WorkOrderEntity,
+    actor?: RequestActorContext | null,
+  ) {
+    const [
+      equipo,
+      plan,
+      componente,
+      blockingWorkOrder,
+      parentWorkOrder,
+      linkedProgramacion,
+    ] = await Promise.all([
       workOrder.equipment_id
         ? this.equipoRepo.findOne({ where: { id: workOrder.equipment_id, is_deleted: false } })
         : Promise.resolve(null),
@@ -6906,6 +7225,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             where: { id: workOrder.parent_work_order_id, is_deleted: false },
           })
         : Promise.resolve(null),
+      this.resolveLinkedProgramacionForWorkOrder(workOrder.id),
     ]);
     const procedimientoIdFromPayload = String(
       (workOrder.valor_json as Record<string, unknown> | null | undefined)
@@ -6917,6 +7237,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             where: { id: procedimientoIdFromPayload, is_deleted: false },
           })
         : null) ?? (await this.resolveProcedimientoFromPlan(plan));
+
+    const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
+    const canCloseOrVoid = await this.canActorCloseOrVoidWorkOrder(
+      workOrder,
+      actor,
+      linkedProgramacion,
+    );
+    const auditPayload = (workOrder.valor_json ?? {}) as Record<string, unknown>;
 
     return {
       ...workOrder,
@@ -6945,6 +7273,57 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         parentWorkOrder?.id ?? workOrder.parent_work_order_id ?? null,
       parent_work_order_code: parentWorkOrder?.code ?? null,
       parent_work_order_title: parentWorkOrder?.title ?? null,
+      linked_programacion_id: linkedProgramacion?.id ?? null,
+      linked_programacion_codigo: linkedProgramacion?.codigo ?? null,
+      linked_programacion_owner:
+        this.firstNonEmptyString(
+          plannerHints.ownerLabel,
+          workOrder.created_by,
+        ) ?? null,
+      created_by_label:
+        this.firstNonEmptyString(
+          auditPayload.created_by_name,
+          auditPayload.created_by_username,
+          workOrder.created_by,
+        ) ?? null,
+      created_by_username:
+        this.firstNonEmptyString(
+          auditPayload.created_by_username,
+          workOrder.created_by,
+        ) ?? null,
+      created_by_user_id:
+        this.firstNonEmptyString(
+          auditPayload.created_by_user_id,
+          workOrder.requested_by,
+        ) ?? null,
+      processed_by_label:
+        this.firstNonEmptyString(
+          auditPayload.processed_by_name,
+          auditPayload.processed_by_username,
+        ) ?? null,
+      processed_by_username:
+        this.firstNonEmptyString(auditPayload.processed_by_username) ?? null,
+      processed_by_user_id:
+        this.firstNonEmptyString(auditPayload.processed_by_user_id) ?? null,
+      processed_at: auditPayload.processed_at ?? null,
+      approved_by_label:
+        this.firstNonEmptyString(
+          auditPayload.approved_by_name,
+          auditPayload.approved_by_username,
+        ) ?? null,
+      approved_by_username:
+        this.firstNonEmptyString(auditPayload.approved_by_username) ?? null,
+      approved_by_user_id:
+        this.firstNonEmptyString(
+          auditPayload.approved_by_user_id,
+          workOrder.approved_by,
+        ) ?? null,
+      approved_at:
+        this.firstNonEmptyString(auditPayload.approved_at) ??
+        (workOrder.closed_at ? workOrder.closed_at.toISOString() : null),
+      approval_action:
+        this.firstNonEmptyString(auditPayload.approval_action) ?? null,
+      can_close_or_void: canCloseOrVoid,
     };
   }
 
@@ -7437,8 +7816,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createProgramacion(dto: CreateProgramacionDto) {
-    await this.findEquipoOrFail(dto.equipo_id);
-    let resolvedPlanId = dto.plan_id ?? null;
+    const linkedWorkOrder = await this.resolveProgramacionWorkOrder(
+      dto.work_order_id,
+    );
+    if (!linkedWorkOrder) {
+      throw new BadRequestException(
+        'Debes vincular la programación a la orden de trabajo que se ejecutará.',
+      );
+    }
+    const resolvedEquipmentId =
+      dto.equipo_id ?? linkedWorkOrder?.equipment_id ?? null;
+    if (!resolvedEquipmentId) {
+      throw new BadRequestException(
+        'Debes seleccionar el equipo o la orden de trabajo vinculada.',
+      );
+    }
+    await this.findEquipoOrFail(resolvedEquipmentId);
+    let resolvedPlanId = dto.plan_id ?? linkedWorkOrder?.plan_id ?? null;
     if (dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
       resolvedPlanId = synced.plan.id;
@@ -7451,8 +7845,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
     const entity = this.programacionRepo.create({
       codigo: dto.codigo?.trim() || null,
-      equipo_id: dto.equipo_id,
+      equipo_id: resolvedEquipmentId,
       plan_id: resolvedPlanId,
+      work_order_id: linkedWorkOrder?.id ?? null,
       modo_programacion: String(
         dto.modo_programacion || 'DINAMICA',
       ).toUpperCase(),
@@ -7464,7 +7859,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       proxima_fecha: dto.proxima_fecha ?? null,
       proxima_horas: dto.proxima_horas ?? null,
       documento_origen: dto.documento_origen ?? null,
-      payload_json: dto.payload_json ?? {},
+      payload_json: this.mergeProgramacionWorkOrderPayload(
+        dto.payload_json ?? {},
+        linkedWorkOrder,
+      ),
       activo: dto.activo ?? true,
     });
     const saved = await this.programacionRepo.save(entity);
@@ -7543,7 +7941,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
-    let resolvedPlanId = dto.plan_id ?? p.plan_id;
+    const linkedWorkOrder = await this.resolveProgramacionWorkOrder(
+      dto.work_order_id !== undefined ? dto.work_order_id : p.work_order_id,
+    );
+    if (!linkedWorkOrder) {
+      throw new BadRequestException(
+        'La programación debe permanecer vinculada a una orden de trabajo.',
+      );
+    }
+    const resolvedEquipmentId =
+      dto.equipo_id ?? linkedWorkOrder?.equipment_id ?? p.equipo_id;
+    if (!resolvedEquipmentId) {
+      throw new BadRequestException(
+        'Debes seleccionar el equipo o la orden de trabajo vinculada.',
+      );
+    }
+    await this.findEquipoOrFail(resolvedEquipmentId);
+    let resolvedPlanId = dto.plan_id ?? linkedWorkOrder?.plan_id ?? p.plan_id;
     if (dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
       resolvedPlanId = synced.plan.id;
@@ -7555,8 +7969,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     Object.assign(p, {
       codigo: dto.codigo ?? p.codigo ?? null,
-      equipo_id: dto.equipo_id ?? p.equipo_id,
+      equipo_id: resolvedEquipmentId,
       plan_id: resolvedPlanId,
+      work_order_id:
+        dto.work_order_id !== undefined
+          ? linkedWorkOrder?.id ?? null
+          : p.work_order_id ?? null,
       modo_programacion: dto.modo_programacion
         ? String(dto.modo_programacion).toUpperCase()
         : p.modo_programacion ?? 'DINAMICA',
@@ -7568,7 +7986,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       proxima_fecha: dto.proxima_fecha ?? p.proxima_fecha ?? null,
       proxima_horas: dto.proxima_horas ?? p.proxima_horas ?? null,
       documento_origen: dto.documento_origen ?? p.documento_origen ?? null,
-      payload_json: dto.payload_json ?? p.payload_json ?? {},
+      payload_json:
+        dto.payload_json !== undefined || dto.work_order_id !== undefined
+          ? this.mergeProgramacionWorkOrderPayload(
+              dto.payload_json ?? p.payload_json ?? {},
+              linkedWorkOrder ?? null,
+            )
+          : p.payload_json ?? {},
       activo: dto.activo ?? p.activo,
     });
     const saved = await this.programacionRepo.save(p);
@@ -12227,6 +12651,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async listWorkOrders(
     q: WorkOrderQueryDto,
     sucursalId?: string | null,
+    actor?: RequestActorContext | null,
   ) {
     const qb = this.woRepo
       .createQueryBuilder('wo')
@@ -12245,21 +12670,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.buildSucursalScopeContext(sucursalId),
     );
     return this.wrap(
-      await Promise.all(rows.map((row) => this.enrichWorkOrder(row))),
+      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor))),
       'Work orders listadas',
     );
   }
 
-  async getWorkOrder(id: string, sucursalId?: string | null) {
+  async getWorkOrder(
+    id: string,
+    sucursalId?: string | null,
+    actor?: RequestActorContext | null,
+  ) {
     const row = await this.findOneOrFail(this.woRepo, {
       id,
       is_deleted: false,
     });
     await this.assertWorkOrderVisibleForSucursal(row, sucursalId);
-    return this.wrap(await this.enrichWorkOrder(row), 'Work order obtenida');
+    return this.wrap(
+      await this.enrichWorkOrder(row, actor),
+      'Work order obtenida',
+    );
   }
 
-  async createWorkOrder(dto: CreateWorkOrderDto) {
+  async createWorkOrder(
+    dto: CreateWorkOrderDto,
+    actor?: RequestActorContext | null,
+  ) {
     if (dto.equipment_id) await this.findEquipoOrFail(dto.equipment_id);
     const componentContext = await this.resolveWorkOrderComponentContext(
       dto.equipment_id ?? null,
@@ -12307,12 +12742,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         safety_permit_code: dto.safety_permit_code ?? null,
         vendor_id: dto.vendor_id ?? null,
         purchase_request_id: dto.purchase_request_id ?? null,
+        requested_by: this.firstNonEmptyString(actor?.userId) ?? null,
+        created_by: this.firstNonEmptyString(actor?.username) ?? null,
+        updated_by: this.firstNonEmptyString(actor?.username) ?? null,
       });
       await this.applyBlockingRelationship(
         entity,
         dto.blocked_by_work_order_id ?? null,
         dto.blocked_reason ?? null,
       );
+      this.applyWorkOrderAuditStamp(entity, actor, 'CREATED');
+      if (this.normalizeWorkflowStatus(entity.status_workflow) === 'CLOSED') {
+        this.applyWorkOrderAuditStamp(entity, actor, 'APPROVED', {
+          action: 'CERRADA',
+        });
+      }
       this.applyWorkflowDates(entity, null, entity.status_workflow);
 
       try {
@@ -12352,6 +12796,7 @@ await this.appendWorkOrderHistory(
       created.id,
       this.normalizeWorkflowStatus(created.status_workflow),
       'Orden de trabajo creada',
+      { changedBy: this.resolveActorLabel(actor) },
     );
     if (dto.alerta_id) {
       await this.syncAlertWorkOrderLink(
@@ -12361,8 +12806,12 @@ await this.appendWorkOrderHistory(
           ? 'CERRADA'
           : 'EN_PROCESO',
       );
+      await this.syncProgramacionWorkOrderLinkFromAlert(dto.alerta_id, created);
     }
-    const enriched = await this.enrichWorkOrder(created);
+    if (this.normalizeWorkflowStatus(created.status_workflow) === 'CLOSED') {
+      await this.syncProgramacionExecutionFromLinkedWorkOrder(created);
+    }
+    const enriched = await this.enrichWorkOrder(created, actor);
     const responsePayload = {
       ...enriched,
       requested_code: resolution.requestedCode,
@@ -12400,7 +12849,11 @@ await this.appendWorkOrderHistory(
     return this.wrap(responsePayload, 'Work order creada');
   }
 
-  async updateWorkOrder(id: string, dto: UpdateWorkOrderDto) {
+  async updateWorkOrder(
+    id: string,
+    dto: UpdateWorkOrderDto,
+    actor?: RequestActorContext | null,
+  ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
     const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
     let resolvedPlanId = wo.plan_id ?? null;
@@ -12412,6 +12865,12 @@ await this.appendWorkOrderHistory(
       wo.equipment_id ?? null,
       dto.equipo_componente_id ?? wo.equipo_componente_id ?? null,
     );
+    const nextWorkflowStatus = this.normalizeWorkflowStatus(
+      dto.status_workflow ?? wo.status_workflow,
+    );
+    if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
+      await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'cerrar');
+    }
     Object.assign(wo, {
       ...dto,
       plan_id: resolvedPlanId,
@@ -12432,8 +12891,19 @@ await this.appendWorkOrderHistory(
                 : {}),
             }
           : wo.valor_json,
+      updated_by:
+        this.firstNonEmptyString(actor?.username) ?? wo.updated_by ?? null,
     });
-    wo.status_workflow = this.normalizeWorkflowStatus(dto.status_workflow ?? wo.status_workflow);
+    wo.status_workflow = nextWorkflowStatus;
+    if (nextWorkflowStatus === 'CLOSED') {
+      this.applyWorkOrderAuditStamp(wo, actor, 'APPROVED', {
+        action: 'CERRADA',
+      });
+    } else {
+      this.applyWorkOrderAuditStamp(wo, actor, 'PROCESSED', {
+        clearApproval: previousStatus === 'CLOSED',
+      });
+    }
     await this.applyBlockingRelationship(
       wo,
       dto.blocked_by_work_order_id !== undefined
@@ -12445,14 +12915,15 @@ await this.appendWorkOrderHistory(
     const saved = await this.woRepo.save(wo);
     if (this.normalizeWorkflowStatus(saved.status_workflow) === 'CLOSED') {
       await this.releaseBlockedWorkOrdersFor(saved);
+      await this.syncProgramacionExecutionFromLinkedWorkOrder(saved);
     }
     if (previousStatus !== saved.status_workflow) {
-      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus });
+      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus, changedBy: this.resolveActorLabel(actor) });
     } else {
-      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus });
+      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus, changedBy: this.resolveActorLabel(actor) });
     }
     await this.syncAlertsForWorkOrder(saved);
-    const enriched = await this.enrichWorkOrder(saved);
+    const enriched = await this.enrichWorkOrder(saved, actor);
     await this.publishInAppNotification({
       title: previousStatus !== saved.status_workflow ? 'Estado de orden de trabajo actualizado' : 'Orden de trabajo actualizada',
       body:
@@ -12491,11 +12962,18 @@ await this.appendWorkOrderHistory(
     return this.wrap(enriched, 'Work order actualizada');
   }
 
-  async deleteWorkOrder(id: string) {
+  async deleteWorkOrder(id: string, actor?: RequestActorContext | null) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'anular');
     wo.is_deleted = true;
+    wo.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? wo.updated_by ?? null;
+    this.applyWorkOrderAuditStamp(wo, actor, 'APPROVED', {
+      action: 'ANULADA',
+    });
     await this.woRepo.save(wo);
-    await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow });
+    await this.detachProgramacionesFromWorkOrder(wo.id);
+    await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow, changedBy: this.resolveActorLabel(actor) });
     await this.writeSecurityLog({
       description: `[WO:${wo.id}] Eliminación lógica de OT ${wo.code}`,
       typeLog: 'WORK_ORDER',
@@ -12521,6 +12999,7 @@ await this.appendWorkOrderHistory(
   async createWorkOrderTarea(
     workOrderId: string,
     dto: CreateWorkOrderTareaDto,
+    actor?: RequestActorContext | null,
   ) {
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
@@ -12563,13 +13042,20 @@ await this.appendWorkOrderHistory(
         observacion: normalized.observacion,
       }),
     );
+    this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+    workOrder.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+    await this.woRepo.save(workOrder);
     await this.appendWorkOrderHistory(
       workOrderId,
       this.normalizeWorkflowStatus(workOrder.status_workflow),
       existing
         ? `Tarea sincronizada: ${taskDefinition.actividad}`
         : `Tarea registrada: ${taskDefinition.actividad}`,
-      { fromStatus: workOrder.status_workflow },
+      {
+        fromStatus: workOrder.status_workflow,
+        changedBy: this.resolveActorLabel(actor),
+      },
     );
     return this.wrap(
       (await this.enrichWorkOrderTareas([created]))[0] ?? created,
@@ -12577,7 +13063,11 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async updateWorkOrderTarea(id: string, dto: UpdateWorkOrderTareaDto) {
+  async updateWorkOrderTarea(
+    id: string,
+    dto: UpdateWorkOrderTareaDto,
+    actor?: RequestActorContext | null,
+  ) {
     const tarea = await this.findOneOrFail(this.woTareaRepo, {
       id,
       is_deleted: false,
@@ -12601,11 +13091,18 @@ await this.appendWorkOrderHistory(
       id: tarea.work_order_id,
       is_deleted: false,
     });
+    this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+    workOrder.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+    await this.woRepo.save(workOrder);
     await this.appendWorkOrderHistory(
       tarea.work_order_id,
       this.normalizeWorkflowStatus(workOrder.status_workflow),
       `Tarea actualizada: ${definition.actividad}`,
-      { fromStatus: workOrder.status_workflow },
+      {
+        fromStatus: workOrder.status_workflow,
+        changedBy: this.resolveActorLabel(actor),
+      },
     );
     return this.wrap(
       (await this.enrichWorkOrderTareas([saved]))[0] ?? saved,
@@ -12613,7 +13110,10 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async deleteWorkOrderTarea(id: string) {
+  async deleteWorkOrderTarea(
+    id: string,
+    actor?: RequestActorContext | null,
+  ) {
     const tarea = await this.findOneOrFail(this.woTareaRepo, {
       id,
       is_deleted: false,
@@ -12621,13 +13121,18 @@ await this.appendWorkOrderHistory(
     tarea.is_deleted = true;
     await this.woTareaRepo.save(tarea);
     const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
-    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${tarea.tarea_id}`, { fromStatus: workOrder.status_workflow });
+    this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+    workOrder.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+    await this.woRepo.save(workOrder);
+    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${tarea.tarea_id}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
     return this.wrap(true, 'Tarea de OT eliminada');
   }
 
   async uploadWorkOrderAdjunto(
     workOrderId: string,
     dto: UploadWorkOrderAdjuntoDto,
+    actor?: RequestActorContext | null,
   ) {
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
@@ -12662,7 +13167,11 @@ await this.appendWorkOrderHistory(
         },
       }),
     );
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto agregado: ${originalName}`, { fromStatus: workOrder.status_workflow });
+    this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+    workOrder.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+    await this.woRepo.save(workOrder);
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto agregado: ${originalName}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Adjunto agregado ${originalName}`,
       typeLog: 'ADJUNTO',
@@ -12740,7 +13249,11 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async deleteWorkOrderAdjunto(workOrderId: string, adjuntoId: string) {
+  async deleteWorkOrderAdjunto(
+    workOrderId: string,
+    adjuntoId: string,
+    actor?: RequestActorContext | null,
+  ) {
     const workOrder = await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
     const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
       id: adjuntoId,
@@ -12754,7 +13267,11 @@ await this.appendWorkOrderHistory(
     } catch {
       /* ignore */
     }
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto eliminado: ${adjunto.nombre ?? adjunto.id}`, { fromStatus: workOrder.status_workflow });
+    this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+    workOrder.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+    await this.woRepo.save(workOrder);
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto eliminado: ${adjunto.nombre ?? adjunto.id}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Adjunto eliminado ${adjunto.id}`,
       typeLog: 'ADJUNTO',
@@ -12958,7 +13475,11 @@ await this.appendWorkOrderHistory(
     return this.wrap(rows, 'Historial de la OT listado');
   }
 
-  async createConsumo(workOrderId: string, dto: CreateConsumoDto) {
+  async createConsumo(
+    workOrderId: string,
+    dto: CreateConsumoDto,
+    actor?: RequestActorContext | null,
+  ) {
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
@@ -12985,7 +13506,11 @@ await this.appendWorkOrderHistory(
       dto.bodega_id,
       dto.cantidad,
     );
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Consumo registrado para producto ${dto.producto_id} por ${dto.cantidad}`, { fromStatus: workOrder.status_workflow });
+    this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+    workOrder.updated_by =
+      this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+    await this.woRepo.save(workOrder);
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Consumo registrado para producto ${dto.producto_id} por ${dto.cantidad}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
@@ -13055,7 +13580,11 @@ await this.appendWorkOrderHistory(
     );
   }
 
-  async issueMaterials(workOrderId: string, dto: IssueMaterialsDto) {
+  async issueMaterials(
+    workOrderId: string,
+    dto: IssueMaterialsDto,
+    actor?: RequestActorContext | null,
+  ) {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.startTransaction();
@@ -13158,8 +13687,12 @@ await this.appendWorkOrderHistory(
       }
       mov.total_costos = total;
       await qr.manager.save(mov);
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+      workOrder.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+      await qr.manager.save(workOrder);
       await qr.commitTransaction();
-      await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Salida de materiales registrada (${dto.items.length} items)`, { fromStatus: workOrder.status_workflow });
+      await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Salida de materiales registrada (${dto.items.length} items)`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
       await this.writeSecurityLog({
         description: `[WO:${workOrderId}] Emisión de materiales por total ${total}`,
         typeLog: 'MATERIALES',

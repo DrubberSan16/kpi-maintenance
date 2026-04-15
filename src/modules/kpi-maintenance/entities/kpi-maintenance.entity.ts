@@ -226,6 +226,7 @@ export class ProgramacionPlanEntity {
   @Column({ type: 'text', nullable: true }) codigo?: string | null;
   @Column({ type: 'uuid' }) equipo_id: string;
   @Column({ type: 'uuid' }) plan_id: string;
+  @Column({ type: 'uuid', nullable: true }) work_order_id?: string | null;
   @Column({ type: 'text', default: 'DINAMICA' }) modo_programacion: string;
   @Column({ type: 'text', default: 'MANUAL' }) origen_programacion: string;
   @Column({ type: 'date', nullable: true }) ultima_ejecucion_fecha?:
@@ -703,6 +704,12 @@ export class WorkOrderEntity {
   @Column({ type: 'uuid', nullable: true }) approved_by?: string | null;
   @Column({ type: 'uuid', nullable: true }) assigned_to?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
   @Column({ default: 'INTERNO' }) provider_type: string;
   @Column({ default: 'CORRECTIVO' }) maintenance_kind: string;
   @Column({ default: false }) safety_permit_required: boolean;
