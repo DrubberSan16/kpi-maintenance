@@ -7504,10 +7504,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       approved_at:
         this.firstNonEmptyString(auditPayload.approved_at) ??
         (workOrder.closed_at ? workOrder.closed_at.toISOString() : null),
+      operational_date:
+        this.firstNonEmptyString(
+          auditPayload.approved_at,
+          auditPayload.processed_at,
+        ) ??
+        (workOrder.closed_at ? workOrder.closed_at.toISOString() : null) ??
+        (workOrder.started_at ? workOrder.started_at.toISOString() : null) ??
+        (workOrder.created_at ? workOrder.created_at.toISOString() : null),
       approval_action:
         this.firstNonEmptyString(auditPayload.approval_action) ?? null,
       can_close_or_void: canCloseOrVoid,
     };
+  }
+
+  private normalizeWorkOrderFilterDateBoundary(
+    value: string | undefined,
+    edge: 'start' | 'end',
+  ) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const suffix = edge === 'start' ? '00:00:00' : '23:59:59.999';
+    return `${raw} ${suffix}`;
   }
 
   async listEquipos(query: EquipoQueryDto, sucursalId?: string | null) {
@@ -13198,6 +13216,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     sucursalId?: string | null,
     actor?: RequestActorContext | null,
   ) {
+    const fechaDesde = this.normalizeWorkOrderFilterDateBoundary(
+      q.fecha_desde,
+      'start',
+    );
+    const fechaHasta = this.normalizeWorkOrderFilterDateBoundary(
+      q.fecha_hasta,
+      'end',
+    );
     const qb = this.woRepo
       .createQueryBuilder('wo')
       .where('wo.is_deleted = false');
@@ -13209,6 +13235,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
     if (q.maintenance_kind)
       qb.andWhere('wo.maintenance_kind = :kind', { kind: q.maintenance_kind });
+    if (fechaDesde) {
+      qb.andWhere(
+        `COALESCE(
+          NULLIF((wo.valor_json->>'approved_at')::text, ''),
+          NULLIF((wo.valor_json->>'processed_at')::text, ''),
+          wo.closed_at::text,
+          wo.started_at::text,
+          wo.created_at::text
+        )::timestamp >= :fechaDesde`,
+        { fechaDesde },
+      );
+    }
+    if (fechaHasta) {
+      qb.andWhere(
+        `COALESCE(
+          NULLIF((wo.valor_json->>'approved_at')::text, ''),
+          NULLIF((wo.valor_json->>'processed_at')::text, ''),
+          wo.closed_at::text,
+          wo.started_at::text,
+          wo.created_at::text
+        )::timestamp <= :fechaHasta`,
+        { fechaHasta },
+      );
+    }
     qb.orderBy('wo.created_at', 'DESC');
     const rows = await this.filterWorkOrdersByScope(
       await qb.getMany(),

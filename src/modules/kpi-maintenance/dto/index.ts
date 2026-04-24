@@ -875,6 +875,24 @@ export class WorkOrderQueryDto {
   @IsOptional()
   @IsString()
   maintenance_kind?: string;
+  @ApiPropertyOptional({
+    description:
+      'Fecha inicial del filtro operativo (usa cierre, procesamiento o creación según disponibilidad)',
+    type: String,
+    format: 'date',
+  })
+  @IsOptional()
+  @IsDateString()
+  fecha_desde?: string;
+  @ApiPropertyOptional({
+    description:
+      'Fecha final del filtro operativo (usa cierre, procesamiento o creación según disponibilidad)',
+    type: String,
+    format: 'date',
+  })
+  @IsOptional()
+  @IsDateString()
+  fecha_hasta?: string;
 }
 
 export class CreateWorkOrderDto {
