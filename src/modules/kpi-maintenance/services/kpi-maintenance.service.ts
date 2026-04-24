@@ -2661,9 +2661,39 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return `${basePath}${path.startsWith('/') ? path : `/${path}`}`;
   }
 
-  private buildMaintenancePublicUrl(path: string) {
+  private buildFrontendPublicUrl(path: string) {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    return this.publicBaseUrl ? `${this.publicBaseUrl}${normalizedPath}` : `/app${normalizedPath}`;
+  }
+
+  private getPublicSiteOrigin() {
+    if (!this.publicBaseUrl) return '';
+    try {
+      const parsed = new URL(this.publicBaseUrl);
+      return parsed.origin;
+    } catch {
+      return '';
+    }
+  }
+
+  private buildMaintenanceFilePublicUrl(path: string) {
     const relative = this.buildMaintenanceRelativePath(path);
-    return this.publicBaseUrl ? `${this.publicBaseUrl}${relative}` : relative;
+    const siteOrigin = this.getPublicSiteOrigin();
+    return siteOrigin ? `${siteOrigin}${relative}` : relative;
+  }
+
+  private buildWorkOrderAdjuntoLinks(workOrderId: string, adjuntoId: string) {
+    return {
+      view_url: this.buildMaintenanceFilePublicUrl(
+        `/public/work-orders/${workOrderId}/adjuntos/${adjuntoId}/view`,
+      ),
+      download_url: this.buildMaintenanceFilePublicUrl(
+        `/public/work-orders/${workOrderId}/adjuntos/${adjuntoId}/download`,
+      ),
+      public_page_url: this.buildFrontendPublicUrl(
+        `/adjuntos/ot/${workOrderId}/${adjuntoId}`,
+      ),
+    };
   }
 
   private async postJson(url: string, payload: Record<string, unknown>) {
@@ -13774,7 +13804,7 @@ await this.appendWorkOrderHistory(
     return this.wrap(
       {
         ...created,
-        view_url: this.buildMaintenancePublicUrl(`/work-orders/${workOrderId}/adjuntos/${created.id}/view`),
+        ...this.buildWorkOrderAdjuntoLinks(workOrderId, created.id),
       },
       'Adjunto cargado',
     );
@@ -13797,7 +13827,7 @@ await this.appendWorkOrderHistory(
     return this.wrap(
       rows.map((row) => ({
         ...row,
-        view_url: this.buildMaintenancePublicUrl(`/work-orders/${workOrderId}/adjuntos/${row.id}/view`),
+        ...this.buildWorkOrderAdjuntoLinks(workOrderId, row.id),
       })),
       'Adjuntos listados',
     );
@@ -13837,7 +13867,7 @@ await this.appendWorkOrderHistory(
         nombre: adjunto.nombre,
         hash_sha256: adjunto.hash_sha256,
         content_type: file.mimeType,
-        view_url: this.buildMaintenancePublicUrl(`/work-orders/${workOrderId}/adjuntos/${adjuntoId}/view`),
+        ...this.buildWorkOrderAdjuntoLinks(workOrderId, adjuntoId),
         meta: adjunto.meta,
       },
       'Adjunto obtenido',

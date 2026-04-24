@@ -1427,6 +1427,50 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Obtener metadatos públicos de un adjunto de OT' })
+  @Get('public/work-orders/:id/adjuntos/:adjuntoId')
+  getPublicWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Param('adjuntoId') adjuntoId: string,
+  ) {
+    return this.service.getWorkOrderAdjunto(id, adjuntoId);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Visualizar adjunto público de una OT directamente en el navegador' })
+  @Get('public/work-orders/:id/adjuntos/:adjuntoId/view')
+  async viewPublicWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Param('adjuntoId') adjuntoId: string,
+    @Res() res: Response,
+  ) {
+    const file = await this.service.resolveWorkOrderAdjuntoFile(id, adjuntoId);
+    res.setHeader('Content-Type', file.mimeType);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${encodeURIComponent(file.fileName)}"`,
+    );
+    return res.sendFile(file.filePath);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Descargar adjunto público de una OT' })
+  @Get('public/work-orders/:id/adjuntos/:adjuntoId/download')
+  async downloadPublicWorkOrderAdjunto(
+    @Param('id') id: string,
+    @Param('adjuntoId') adjuntoId: string,
+    @Res() res: Response,
+  ) {
+    const file = await this.service.resolveWorkOrderAdjuntoFile(id, adjuntoId);
+    res.setHeader('Content-Type', file.mimeType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(file.fileName)}"`,
+    );
+    return res.sendFile(file.filePath);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Eliminar adjunto de una OT por ID' })
   @ApiParam({
     name: 'id',
