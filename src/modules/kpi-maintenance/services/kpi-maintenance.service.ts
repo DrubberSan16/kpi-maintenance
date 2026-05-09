@@ -25,7 +25,9 @@ import * as XLSX from 'xlsx';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import {
+  Brackets,
   DataSource,
+  EntityManager,
   FindOptionsWhere,
   In,
   IsNull,
@@ -72,10 +74,14 @@ import {
   ReporteCombustibleEntity,
   ReporteOperacionDiariaEntity,
   ReporteOperacionDiariaUnidadEntity,
+  TransferenciaBodegaDetEntity,
+  TransferenciaBodegaEntity,
   WorkOrderStatusHistoryEntity,
   StockBodegaEntity,
   UnidadMedidaEntity,
   WorkOrderAdjuntoEntity,
+  WorkOrderDesechoDetEntity,
+  WorkOrderDesechoEntity,
   WorkOrderEntity,
   WorkOrderTareaEntity,
 } from '../entities/kpi-maintenance.entity';
@@ -104,6 +110,7 @@ import {
   CreateProgramacionDto,
   CreateProgramacionMensualDetalleDto,
   CreateReporteOperacionDiariaDto,
+  ScrapMaterialsDto,
   CreateWorkOrderDto,
   CreateWorkOrderTareaDto,
   DateRangeDto,
@@ -14341,6 +14348,744 @@ await this.appendWorkOrderHistory(
     } finally {
       await qr.release();
     }
+  }
+
+  async listScrapMaterials(workOrderId: string, sucursalId?: string | null) {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+    await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const scrapRepo = this.dataSource.getRepository(WorkOrderDesechoEntity);
+    const scrapDetRepo = this.dataSource.getRepository(WorkOrderDesechoDetEntity);
+    const transferRepo = this.dataSource.getRepository(TransferenciaBodegaEntity);
+
+    const headers = await scrapRepo.find({
+      where: { work_order_id: workOrderId, is_deleted: false },
+      order: { fecha: 'DESC', created_at: 'DESC' } as any,
+    });
+    const scrapIds = headers.map((item) => item.id);
+    const transferIds = headers
+      .map((item) => String(item.transferencia_bodega_id || '').trim())
+      .filter(Boolean);
+
+    const [details, transfers] = await Promise.all([
+      scrapIds.length
+        ? scrapDetRepo.find({
+            where: { work_order_desecho_id: In(scrapIds), is_deleted: false },
+            order: { created_at: 'ASC' } as any,
+          })
+        : Promise.resolve([] as WorkOrderDesechoDetEntity[]),
+      transferIds.length
+        ? transferRepo.find({
+            where: { id: In(transferIds), is_deleted: false },
+          })
+        : Promise.resolve([] as TransferenciaBodegaEntity[]),
+    ]);
+
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      details.map((item) => item.producto_id),
+      headers.flatMap((item) => [
+        item.bodega_origen_id,
+        item.bodega_chatarra_id,
+      ]),
+    );
+    const detailMap = details.reduce(
+      (acc, item) => {
+        (acc[item.work_order_desecho_id] ??= []).push(item);
+        return acc;
+      },
+      {} as Record<string, WorkOrderDesechoDetEntity[]>,
+    );
+    const transferMap = new Map(transfers.map((item) => [item.id, item]));
+
+    return this.wrap(
+      headers
+        .map((header) => {
+          const sourceVisible = !scope
+            ? true
+            : scope.warehouseIds.has(String(header.bodega_origen_id || '').trim());
+          const scrapVisible = !scope
+            ? true
+            : scope.warehouseIds.has(
+                String(header.bodega_chatarra_id || '').trim(),
+              );
+          if (!sourceVisible && !scrapVisible) return null;
+
+          const sourceWarehouse = warehouseMap.get(header.bodega_origen_id);
+          const scrapWarehouse = warehouseMap.get(header.bodega_chatarra_id);
+          const transfer = transferMap.get(header.transferencia_bodega_id);
+
+          return {
+            ...header,
+            transferencia_codigo: transfer?.codigo ?? header.code,
+            bodega_origen_label:
+              this.buildBodegaLabel(sourceWarehouse) ?? header.bodega_origen_id,
+            bodega_chatarra_label:
+              this.buildBodegaLabel(scrapWarehouse) ??
+              header.bodega_chatarra_id,
+            items: (detailMap[header.id] ?? []).map((item) =>
+              this.mapScrapItemWithCatalogs(item, productMap),
+            ),
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+      'Desechos de OT listados',
+    );
+  }
+
+  async registerScrapMaterials(
+    workOrderId: string,
+    dto: ScrapMaterialsDto,
+    actor?: RequestActorContext | null,
+    sucursalId?: string | null,
+  ) {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+
+    try {
+      const workOrder = await this.findOneOrFail(this.woRepo, {
+        id: workOrderId,
+        is_deleted: false,
+      });
+      await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+
+      if (
+        this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS'
+      ) {
+        throw new BadRequestException(
+          'Solo se pueden registrar desechos cuando la orden de trabajo está en proceso.',
+        );
+      }
+
+      const items = (dto.items ?? []).filter(
+        (item) =>
+          String(item?.producto_id || '').trim() &&
+          this.toNumeric(item?.cantidad, 0) > 0,
+      );
+      if (!items.length) {
+        throw new BadRequestException(
+          'Debes registrar al menos un material desechado.',
+        );
+      }
+
+      await this.assertWarehouseVisibleForSucursal(dto.bodega_origen_id, sucursalId);
+
+      const sourceWarehouse = await qr.manager.findOne(BodegaEntity, {
+        where: {
+          id: dto.bodega_origen_id,
+          is_deleted: false,
+        },
+      });
+      if (!sourceWarehouse) {
+        throw new NotFoundException('La bodega origen no existe.');
+      }
+      if (sourceWarehouse.es_chatarra) {
+        throw new BadRequestException(
+          'La bodega origen seleccionada no puede ser una bodega chatarra.',
+        );
+      }
+
+      const actorName = this.resolveInventoryActorName(actor);
+      const scrapWarehouse = await this.ensureScrapWarehouseForMaintenance(
+        qr.manager,
+        sourceWarehouse,
+        actorName,
+      );
+      const transferCode = await this.generateMaintenanceTransferCode(
+        qr.manager,
+        'TB',
+      );
+      const egressCode = await this.generateMaintenanceInventoryDocumentCode(
+        qr.manager,
+        'EB',
+      );
+      const ingressCode = await this.generateMaintenanceInventoryDocumentCode(
+        qr.manager,
+        'IB',
+      );
+      const movementDate = new Date();
+      const baseObservation =
+        this.firstNonEmptyString(
+          dto.observacion,
+          `Traslado a chatarra ${transferCode}`,
+          `${workOrder.code || workOrderId} - traslado a chatarra`,
+        ) || `Traslado a chatarra ${transferCode}`;
+
+      const movementOut = await qr.manager.save(
+        MovimientoInventarioEntity,
+        qr.manager.create(MovimientoInventarioEntity, {
+          tipo_movimiento: 'SALIDA',
+          fecha_movimiento: movementDate,
+          tipo_documento: 'EGRESO_BODEGA',
+          numero_documento: egressCode,
+          referencia: workOrder.code || transferCode,
+          observacion: baseObservation,
+          bodega_origen_id: sourceWarehouse.id,
+          work_order_id: workOrderId,
+          moneda: 'USD',
+          tipo_cambio: 1,
+          total_costos: 0,
+          estado: 'CONFIRMADO',
+          status: 'ACTIVE',
+          created_by: actorName,
+          updated_by: actorName,
+        }),
+      );
+
+      const movementIn = await qr.manager.save(
+        MovimientoInventarioEntity,
+        qr.manager.create(MovimientoInventarioEntity, {
+          tipo_movimiento: 'INGRESO',
+          fecha_movimiento: movementDate,
+          tipo_documento: 'INGRESO_BODEGA',
+          numero_documento: ingressCode,
+          referencia: workOrder.code || transferCode,
+          observacion: baseObservation,
+          bodega_destino_id: scrapWarehouse.id,
+          work_order_id: workOrderId,
+          moneda: 'USD',
+          tipo_cambio: 1,
+          total_costos: 0,
+          estado: 'CONFIRMADO',
+          status: 'ACTIVE',
+          created_by: actorName,
+          updated_by: actorName,
+        }),
+      );
+
+      const transfer = await qr.manager.save(
+        TransferenciaBodegaEntity,
+        qr.manager.create(TransferenciaBodegaEntity, {
+          codigo: transferCode,
+          orden_compra_id: null,
+          bodega_origen_id: sourceWarehouse.id,
+          bodega_destino_id: scrapWarehouse.id,
+          fecha_transferencia: movementDate,
+          observacion: this.trimNullableText(dto.observacion),
+          estado: 'COMPLETADA',
+          total_items: items.length,
+          total_cantidad: 0,
+          movimiento_salida_id: movementOut.id,
+          movimiento_ingreso_id: movementIn.id,
+          status: 'ACTIVE',
+          created_by: actorName,
+          updated_by: actorName,
+        }),
+      );
+
+      const scrapHeader = await qr.manager.save(
+        WorkOrderDesechoEntity,
+        qr.manager.create(WorkOrderDesechoEntity, {
+          code: transferCode,
+          work_order_id: workOrderId,
+          fecha: movementDate,
+          observacion: this.trimNullableText(dto.observacion),
+          bodega_origen_id: sourceWarehouse.id,
+          bodega_chatarra_id: scrapWarehouse.id,
+          transferencia_bodega_id: transfer.id,
+          total_items: items.length,
+          total_cantidad: 0,
+          status: 'ACTIVE',
+          created_by: actorName,
+          updated_by: actorName,
+        }),
+      );
+
+      let totalCost = 0;
+      let totalQuantity = 0;
+
+      for (const item of items) {
+        const product = await qr.manager.findOne(ProductoEntity, {
+          where: {
+            id: item.producto_id,
+            is_deleted: false,
+          },
+        });
+        if (!product) {
+          throw new NotFoundException('Uno de los materiales no existe.');
+        }
+
+        const quantity = this.toNumeric(item.cantidad, 0);
+        if (!(quantity > 0)) {
+          throw new BadRequestException(
+            `La cantidad desechada de ${product.nombre || product.id} debe ser mayor a cero.`,
+          );
+        }
+
+        const sourceStock = await this.getOrCreateStockRowForMaintenance(
+          qr.manager,
+          {
+            bodegaId: sourceWarehouse.id,
+            productoId: product.id,
+            costoPromedio: this.toNumeric(product.ultimo_costo, 0),
+            userName: actorName,
+          },
+        );
+        const sourceStockValue = this.toNumeric(sourceStock.stock_actual, 0);
+        if (sourceStockValue < quantity) {
+          throw new ConflictException(
+            `Stock insuficiente en ${this.buildBodegaLabel(sourceWarehouse) || sourceWarehouse.id} para ${product.nombre || product.id}. Disponible ${sourceStockValue.toFixed(
+              2,
+            )}, requerido ${quantity.toFixed(2)}.`,
+          );
+        }
+
+        const unitCost = this.resolveMaintenanceInventoryUnitCost(
+          product,
+          sourceStock,
+        );
+        const subtotal = quantity * unitCost;
+        totalCost += subtotal;
+        totalQuantity += quantity;
+
+        sourceStock.stock_actual = sourceStockValue - quantity;
+        sourceStock.updated_by = actorName;
+        await qr.manager.save(StockBodegaEntity, sourceStock);
+
+        const destinationStock = await this.getOrCreateStockRowForMaintenance(
+          qr.manager,
+          {
+            bodegaId: scrapWarehouse.id,
+            productoId: product.id,
+            costoPromedio: unitCost,
+            userName: actorName,
+          },
+        );
+        destinationStock.stock_actual =
+          this.toNumeric(destinationStock.stock_actual, 0) + quantity;
+        destinationStock.costo_promedio_bodega = unitCost;
+        destinationStock.updated_by = actorName;
+        await qr.manager.save(StockBodegaEntity, destinationStock);
+
+        const detailObservation =
+          this.firstNonEmptyString(item.observacion, dto.observacion, baseObservation) ||
+          baseObservation;
+
+        const movementOutDet = await qr.manager.save(
+          MovimientoInventarioDetEntity,
+          qr.manager.create(MovimientoInventarioDetEntity, {
+            movimiento_id: movementOut.id,
+            producto_id: product.id,
+            cantidad: quantity,
+            costo_unitario: unitCost,
+            subtotal_costo: subtotal,
+            observacion: detailObservation,
+            status: 'ACTIVE',
+            created_by: actorName,
+            updated_by: actorName,
+          }),
+        );
+
+        const movementInDet = await qr.manager.save(
+          MovimientoInventarioDetEntity,
+          qr.manager.create(MovimientoInventarioDetEntity, {
+            movimiento_id: movementIn.id,
+            producto_id: product.id,
+            cantidad: quantity,
+            costo_unitario: unitCost,
+            subtotal_costo: subtotal,
+            observacion: detailObservation,
+            status: 'ACTIVE',
+            created_by: actorName,
+            updated_by: actorName,
+          }),
+        );
+
+        const kardexOut = await qr.manager.save(
+          KardexEntity,
+          qr.manager.create(KardexEntity, {
+            fecha: movementDate,
+            bodega_id: sourceWarehouse.id,
+            producto_id: product.id,
+            movimiento_id: movementOut.id,
+            movimiento_det_id: movementOutDet.id,
+            tipo_movimiento: 'SALIDA',
+            entrada_cantidad: 0,
+            salida_cantidad: quantity,
+            costo_unitario: unitCost,
+            costo_total: subtotal,
+            saldo_cantidad: sourceStock.stock_actual,
+            saldo_costo_promedio: unitCost,
+            saldo_valorizado:
+              this.toNumeric(sourceStock.stock_actual, 0) * unitCost,
+            observacion: detailObservation,
+            status: 'ACTIVE',
+            created_by: actorName,
+            updated_by: actorName,
+          }),
+        );
+
+        const kardexIn = await qr.manager.save(
+          KardexEntity,
+          qr.manager.create(KardexEntity, {
+            fecha: movementDate,
+            bodega_id: scrapWarehouse.id,
+            producto_id: product.id,
+            movimiento_id: movementIn.id,
+            movimiento_det_id: movementInDet.id,
+            tipo_movimiento: 'INGRESO',
+            entrada_cantidad: quantity,
+            salida_cantidad: 0,
+            costo_unitario: unitCost,
+            costo_total: subtotal,
+            saldo_cantidad: destinationStock.stock_actual,
+            saldo_costo_promedio: unitCost,
+            saldo_valorizado:
+              this.toNumeric(destinationStock.stock_actual, 0) * unitCost,
+            observacion: detailObservation,
+            status: 'ACTIVE',
+            created_by: actorName,
+            updated_by: actorName,
+          }),
+        );
+
+        const transferDetail = await qr.manager.save(
+          TransferenciaBodegaDetEntity,
+          qr.manager.create(TransferenciaBodegaDetEntity, {
+            transferencia_bodega_id: transfer.id,
+            orden_compra_det_id: null,
+            producto_id: product.id,
+            codigo_producto: product.codigo ?? null,
+            nombre_producto: product.nombre || product.id,
+            cantidad: quantity,
+            costo_unitario: unitCost,
+            subtotal,
+            bodega_origen_id: sourceWarehouse.id,
+            bodega_destino_id: scrapWarehouse.id,
+            kardex_salida_id: kardexOut.id,
+            kardex_ingreso_id: kardexIn.id,
+            movimiento_salida_det_id: movementOutDet.id,
+            movimiento_ingreso_det_id: movementInDet.id,
+            observacion: detailObservation,
+            status: 'ACTIVE',
+            created_by: actorName,
+            updated_by: actorName,
+          }),
+        );
+
+        await qr.manager.save(
+          WorkOrderDesechoDetEntity,
+          qr.manager.create(WorkOrderDesechoDetEntity, {
+            work_order_desecho_id: scrapHeader.id,
+            producto_id: product.id,
+            cantidad: quantity,
+            costo_unitario: unitCost,
+            subtotal,
+            transferencia_bodega_det_id: transferDetail.id,
+            observacion: detailObservation,
+            status: 'ACTIVE',
+            created_by: actorName,
+            updated_by: actorName,
+          }),
+        );
+      }
+
+      movementOut.total_costos = totalCost;
+      movementOut.updated_by = actorName;
+      movementIn.total_costos = totalCost;
+      movementIn.updated_by = actorName;
+      await qr.manager.save(MovimientoInventarioEntity, [movementOut, movementIn]);
+
+      transfer.total_items = items.length;
+      transfer.total_cantidad = totalQuantity;
+      transfer.updated_by = actorName;
+      await qr.manager.save(TransferenciaBodegaEntity, transfer);
+
+      scrapHeader.total_items = items.length;
+      scrapHeader.total_cantidad = totalQuantity;
+      scrapHeader.updated_by = actorName;
+      await qr.manager.save(WorkOrderDesechoEntity, scrapHeader);
+
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+      workOrder.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+      await qr.manager.save(workOrder);
+
+      await qr.commitTransaction();
+
+      await this.appendWorkOrderHistory(
+        workOrderId,
+        this.normalizeWorkflowStatus(workOrder.status_workflow),
+        `Material desechado enviado a chatarra (${items.length} items) desde ${this.buildBodegaLabel(sourceWarehouse) || sourceWarehouse.id}`,
+        {
+          fromStatus: workOrder.status_workflow,
+          changedBy: this.resolveActorLabel(actor),
+        },
+      );
+      await this.writeSecurityLog({
+        description: `[WO:${workOrderId}] Traslado a chatarra ${transferCode} por cantidad ${totalQuantity}`,
+        typeLog: 'CHATARRA',
+      });
+      void this.recalculateAlertasNow('work-order-scrap-materials');
+
+      return this.wrap(
+        {
+          desecho_id: scrapHeader.id,
+          transferencia_bodega_id: transfer.id,
+          transferencia_codigo: transfer.codigo,
+          bodega_origen_id: sourceWarehouse.id,
+          bodega_chatarra_id: scrapWarehouse.id,
+          total_cantidad: totalQuantity,
+          total_costo: totalCost,
+        },
+        'Material desechado y transferido a chatarra',
+      );
+    } catch (error) {
+      await qr.rollbackTransaction();
+      throw error;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  private mapScrapItemWithCatalogs(
+    row: WorkOrderDesechoDetEntity,
+    productMap: Map<string, ProductoEntity>,
+  ) {
+    const producto = productMap.get(row.producto_id);
+    return {
+      ...row,
+      producto_codigo: producto?.codigo ?? null,
+      producto_nombre: producto?.nombre ?? null,
+      producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+    };
+  }
+
+  private async ensureScrapWarehouseForMaintenance(
+    manager: EntityManager,
+    sourceWarehouse: BodegaEntity,
+    actorName: string,
+  ) {
+    const scrapName = this.buildMaintenanceScrapWarehouseName(
+      sourceWarehouse.nombre,
+    );
+    const scrapCode = this.buildMaintenanceScrapWarehouseCode(
+      sourceWarehouse.codigo,
+      sourceWarehouse.id,
+    );
+    const address =
+      this.trimNullableText(sourceWarehouse.direccion) ||
+      this.buildBodegaLabel(sourceWarehouse) ||
+      'SIN DIRECCION';
+
+    let scrapWarehouse = await manager.findOne(BodegaEntity, {
+      where: {
+        bodega_padre_id: sourceWarehouse.id,
+        es_chatarra: true,
+        is_deleted: false,
+      },
+    });
+
+    if (!scrapWarehouse) {
+      scrapWarehouse = await this.findScrapWarehouseCandidateForMaintenance(
+        manager,
+        sourceWarehouse,
+        scrapName,
+      );
+    }
+
+    if (scrapWarehouse) {
+      Object.assign(scrapWarehouse, {
+        sucursal_id: sourceWarehouse.sucursal_id ?? null,
+        codigo: scrapCode,
+        nombre: scrapName,
+        direccion: address,
+        es_principal: false,
+        es_default_compra: false,
+        es_chatarra: true,
+        bodega_padre_id: sourceWarehouse.id,
+        status: sourceWarehouse.status ?? 'ACTIVE',
+        is_deleted: false,
+        deleted_at: null,
+        deleted_by: null,
+        updated_by: actorName,
+      });
+      if (!scrapWarehouse.created_by) {
+        scrapWarehouse.created_by = actorName;
+      }
+      return manager.save(BodegaEntity, scrapWarehouse);
+    }
+
+    return manager.save(
+      BodegaEntity,
+      manager.create(BodegaEntity, {
+        sucursal_id: sourceWarehouse.sucursal_id ?? null,
+        codigo: scrapCode,
+        nombre: scrapName,
+        direccion: address,
+        es_principal: false,
+        es_default_compra: false,
+        es_chatarra: true,
+        bodega_padre_id: sourceWarehouse.id,
+        status: sourceWarehouse.status ?? 'ACTIVE',
+        created_by: actorName,
+        updated_by: actorName,
+        is_deleted: false,
+      }),
+    );
+  }
+
+  private async findScrapWarehouseCandidateForMaintenance(
+    manager: EntityManager,
+    sourceWarehouse: BodegaEntity,
+    scrapName: string,
+  ) {
+    return manager
+      .createQueryBuilder(BodegaEntity, 'bodega')
+      .where('bodega.is_deleted = false')
+      .andWhere('bodega.id <> :sourceId', { sourceId: sourceWarehouse.id })
+      .andWhere('bodega.sucursal_id = :sucursalId', {
+        sucursalId: sourceWarehouse.sucursal_id,
+      })
+      .andWhere(
+        'UPPER(TRIM(COALESCE(bodega.nombre, \'\'))) = UPPER(TRIM(:scrapName))',
+        { scrapName },
+      )
+      .andWhere(
+        new Brackets((qb) => {
+          qb.where('bodega.bodega_padre_id = :sourceId', {
+            sourceId: sourceWarehouse.id,
+          }).orWhere('bodega.bodega_padre_id IS NULL');
+        }),
+      )
+      .orderBy('bodega.created_at', 'ASC')
+      .getOne();
+  }
+
+  private buildMaintenanceScrapWarehouseName(value: unknown) {
+    return this.buildWarehouseSuffixValue(
+      value,
+      ' - CHATARRA',
+      150,
+      'BODEGA CHATARRA',
+    );
+  }
+
+  private buildMaintenanceScrapWarehouseCode(
+    value: unknown,
+    fallbackSeed: string,
+  ) {
+    const fallback = `CH-${String(fallbackSeed || '')
+      .replace(/-/g, '')
+      .slice(0, 27)}`;
+    return this.buildWarehouseSuffixValue(value, '-CH', 30, fallback);
+  }
+
+  private buildWarehouseSuffixValue(
+    baseValue: unknown,
+    suffix: string,
+    maxLength: number,
+    fallbackValue: string,
+  ) {
+    const base = String(baseValue ?? '').trim();
+    const normalizedSuffix = String(suffix || '');
+    if (!normalizedSuffix.trim()) {
+      return base || fallbackValue;
+    }
+
+    if (!base) {
+      return String(fallbackValue || '').slice(0, maxLength);
+    }
+
+    const baseMaxLength = Math.max(0, maxLength - normalizedSuffix.length);
+    return `${base.slice(0, baseMaxLength)}${normalizedSuffix}`;
+  }
+
+  private async getOrCreateStockRowForMaintenance(
+    manager: EntityManager,
+    args: {
+      bodegaId: string;
+      productoId: string;
+      costoPromedio: number;
+      userName: string;
+    },
+  ) {
+    const existing = await manager.findOne(StockBodegaEntity, {
+      where: {
+        bodega_id: args.bodegaId,
+        producto_id: args.productoId,
+        is_deleted: false,
+      },
+    });
+    if (existing) return existing;
+
+    return manager.save(
+      StockBodegaEntity,
+      manager.create(StockBodegaEntity, {
+        bodega_id: args.bodegaId,
+        producto_id: args.productoId,
+        stock_actual: 0,
+        stock_min_bodega: 0,
+        stock_max_bodega: 0,
+        stock_min_global: 0,
+        stock_contenedores: 0,
+        costo_promedio_bodega: args.costoPromedio,
+        status: 'ACTIVE',
+        created_by: args.userName,
+        updated_by: args.userName,
+        is_deleted: false,
+      }),
+    );
+  }
+
+  private resolveMaintenanceInventoryUnitCost(
+    product: ProductoEntity,
+    stock: StockBodegaEntity,
+  ) {
+    const stockCost = this.toNumeric(stock.costo_promedio_bodega, 0);
+    if (stockCost > 0) return stockCost;
+    const productCost = this.toNumeric(product.ultimo_costo, 0);
+    return productCost > 0 ? productCost : 0;
+  }
+
+  private async generateMaintenanceTransferCode(
+    manager: EntityManager,
+    prefix: string,
+  ) {
+    const rows = await manager.find(TransferenciaBodegaEntity, {
+      where: { is_deleted: false },
+      select: { codigo: true } as any,
+      take: 300,
+      order: { created_at: 'DESC' } as any,
+    });
+    const maxNumber = rows.reduce((max, item) => {
+      const match = String(item?.codigo || '')
+        .trim()
+        .match(/(\d+)$/);
+      const numeric = match ? Number(match[1]) : 0;
+      return numeric > max ? numeric : max;
+    }, 0);
+    return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
+  private async generateMaintenanceInventoryDocumentCode(
+    manager: EntityManager,
+    prefix: 'IB' | 'EB',
+  ) {
+    const rows = await manager.find(MovimientoInventarioEntity, {
+      where: { is_deleted: false },
+      select: { numero_documento: true } as any,
+      take: 500,
+      order: { created_at: 'DESC' } as any,
+    });
+    const maxNumber = rows.reduce((max, item) => {
+      const match = new RegExp(`^${prefix}-(\\d{8})$`, 'i').exec(
+        String(item?.numero_documento || '').trim(),
+      );
+      const numeric = match ? Number(match[1]) : 0;
+      return numeric > max ? numeric : max;
+    }, 0);
+    return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
+  private resolveInventoryActorName(actor?: RequestActorContext | null) {
+    return (
+      this.firstNonEmptyString(actor?.username, actor?.displayName, 'SYSTEM') ||
+      'SYSTEM'
+    );
   }
 
   private async findEquipoOrFail(id: string) {

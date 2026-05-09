@@ -1125,6 +1125,49 @@ export class IssueMaterialsDto {
   observacion?: string;
 }
 
+export class ScrapMaterialItemDto {
+  @ApiProperty({ description: 'ID del producto a enviar a chatarra', format: 'uuid' })
+  @IsUUID()
+  producto_id: string;
+
+  @ApiProperty({
+    description: 'Cantidad a mover hacia bodega chatarra',
+    type: Number,
+    minimum: 0.0001,
+  })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.0001)
+  cantidad: number;
+
+  @ApiPropertyOptional({ description: 'Observación del ítem desechado' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+}
+
+export class ScrapMaterialsDto {
+  @ApiProperty({ description: 'ID de la bodega origen operativa', format: 'uuid' })
+  @IsUUID()
+  bodega_origen_id: string;
+
+  @ApiProperty({
+    description: 'Listado de materiales a enviar a chatarra',
+    type: [ScrapMaterialItemDto],
+  })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ScrapMaterialItemDto)
+  items: ScrapMaterialItemDto[];
+
+  @ApiPropertyOptional({
+    description: 'Observación general del movimiento a chatarra',
+  })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+}
+
 export class CreateWorkOrderTareaDto {
   @ApiProperty({ description: 'ID del plan', format: 'uuid' })
   @IsUUID()

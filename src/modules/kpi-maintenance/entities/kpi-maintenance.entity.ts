@@ -749,9 +749,17 @@ export class StockBodegaEntity {
   stock_contenedores: number;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   costo_promedio_bodega: number;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
   @Column({ type: 'text', nullable: true }) created_by?: string | null;
   @Column({ type: 'text', nullable: true }) updated_by?: string | null;
   @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_reserva_stock' })
@@ -787,6 +795,124 @@ export class EntregaMaterialDetEntity {
   costo_unitario: number;
 }
 
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_desecho' })
+export class WorkOrderDesechoEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() code: string;
+  @Column({ type: 'uuid' }) work_order_id: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  fecha: Date;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ type: 'uuid' }) bodega_origen_id: string;
+  @Column({ type: 'uuid' }) bodega_chatarra_id: string;
+  @Column({ type: 'uuid' }) transferencia_bodega_id: string;
+  @Column({ type: 'integer', default: 0 }) total_items: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  total_cantidad: number;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
+}
+
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_desecho_det' })
+export class WorkOrderDesechoDetEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) work_order_desecho_id: string;
+  @Column({ type: 'uuid' }) producto_id: string;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 }) cantidad: number;
+  @Column('numeric', { precision: 14, scale: 4, default: 0 })
+  costo_unitario: number;
+  @Column('numeric', { precision: 18, scale: 4, default: 0 }) subtotal: number;
+  @Column({ type: 'uuid', nullable: true })
+  transferencia_bodega_det_id?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
+}
+
+@Entity({ schema: 'kpi_inventory', name: 'tb_transferencia_bodega' })
+export class TransferenciaBodegaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column() codigo: string;
+  @Column({ type: 'uuid', nullable: true }) orden_compra_id?: string | null;
+  @Column({ type: 'uuid' }) bodega_origen_id: string;
+  @Column({ type: 'uuid' }) bodega_destino_id: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  fecha_transferencia: Date;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'COMPLETADA' }) estado: string;
+  @Column({ type: 'integer', default: 0 }) total_items: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  total_cantidad: number;
+  @Column({ type: 'uuid', nullable: true })
+  movimiento_salida_id?: string | null;
+  @Column({ type: 'uuid', nullable: true })
+  movimiento_ingreso_id?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
+}
+
+@Entity({ schema: 'kpi_inventory', name: 'tb_transferencia_bodega_det' })
+export class TransferenciaBodegaDetEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) transferencia_bodega_id: string;
+  @Column({ type: 'uuid', nullable: true }) orden_compra_det_id?: string | null;
+  @Column({ type: 'uuid' }) producto_id: string;
+  @Column({ type: 'varchar', length: 60, nullable: true })
+  codigo_producto?: string | null;
+  @Column({ type: 'varchar', length: 200 }) nombre_producto: string;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 }) cantidad: number;
+  @Column('numeric', { precision: 14, scale: 4, default: 0 })
+  costo_unitario: number;
+  @Column('numeric', { precision: 18, scale: 4, default: 0 }) subtotal: number;
+  @Column({ type: 'uuid' }) bodega_origen_id: string;
+  @Column({ type: 'uuid' }) bodega_destino_id: string;
+  @Column({ type: 'uuid', nullable: true }) kardex_salida_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) kardex_ingreso_id?: string | null;
+  @Column({ type: 'uuid', nullable: true })
+  movimiento_salida_det_id?: string | null;
+  @Column({ type: 'uuid', nullable: true })
+  movimiento_ingreso_det_id?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
+}
+
 @Entity({ schema: 'kpi_inventory', name: 'tb_movimiento_inventario' })
 export class MovimientoInventarioEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
@@ -794,9 +920,32 @@ export class MovimientoInventarioEntity {
   @Column({ type: 'timestamp without time zone', default: () => 'now()' })
   fecha_movimiento: Date;
   @Column({ type: 'uuid', nullable: true }) bodega_origen_id?: string | null;
+  @Column({ type: 'uuid', nullable: true }) bodega_destino_id?: string | null;
+  @Column({ type: 'text', nullable: true }) tipo_documento?: string | null;
+  @Column({ type: 'varchar', length: 60, nullable: true })
+  numero_documento?: string | null;
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  referencia?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ type: 'uuid', nullable: true }) tercero_id?: string | null;
+  @Column({ type: 'varchar', length: 10, nullable: true, default: 'USD' })
+  moneda?: string | null;
+  @Column('numeric', { precision: 14, scale: 6, default: 1 }) tipo_cambio: number;
   @Column('numeric', { precision: 18, scale: 4, default: 0 })
   total_costos: number;
+  @Column({ default: 'CONFIRMADO' }) estado: string;
   @Column({ type: 'uuid', nullable: true }) work_order_id?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_movimiento_inventario_det' })
@@ -805,8 +954,24 @@ export class MovimientoInventarioDetEntity {
   @Column({ type: 'uuid' }) movimiento_id: string;
   @Column({ type: 'uuid' }) producto_id: string;
   @Column('numeric', { precision: 18, scale: 6 }) cantidad: number;
+  @Column({ type: 'uuid', nullable: true }) unidad_medida_id?: string | null;
   @Column('numeric', { precision: 14, scale: 4 }) costo_unitario: number;
   @Column('numeric', { precision: 18, scale: 4 }) subtotal_costo: number;
+  @Column({ type: 'varchar', length: 80, nullable: true }) lote?: string | null;
+  @Column({ type: 'varchar', length: 120, nullable: true }) serie?: string | null;
+  @Column({ type: 'date', nullable: true }) fecha_vencimiento?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_kardex' })
@@ -833,6 +998,18 @@ export class KardexEntity {
   saldo_costo_promedio: number;
   @Column('numeric', { precision: 18, scale: 4, default: 0 })
   saldo_valorizado: number;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_producto' })
@@ -862,7 +1039,22 @@ export class BodegaEntity {
   @Column({ type: 'uuid', nullable: true }) sucursal_id?: string | null;
   @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 150, nullable: true }) nombre?: string | null;
+  @Column({ type: 'text', nullable: true }) direccion?: string | null;
+  @Column({ default: false }) es_principal: boolean;
+  @Column({ default: false }) es_default_compra: boolean;
+  @Column({ default: false }) es_chatarra: boolean;
+  @Column({ type: 'uuid', nullable: true }) bodega_padre_id?: string | null;
+  @Column({ default: 'ACTIVE' }) status: string;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
   @Column({ default: false }) is_deleted: boolean;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  deleted_at?: Date | null;
+  @Column({ type: 'text', nullable: true }) deleted_by?: string | null;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_sucursal' })

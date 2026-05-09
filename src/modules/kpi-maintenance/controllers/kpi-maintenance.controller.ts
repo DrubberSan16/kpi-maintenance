@@ -54,6 +54,7 @@ import {
   ImportAnalisisLubricanteBatchDto,
   ProgramacionMensualQueryDto,
   PurgeAnalisisLubricanteDto,
+  ScrapMaterialsDto,
   UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
   UpdateProgramacionMensualConfigDto,
@@ -170,6 +171,21 @@ const bodyExamples = {
       },
     ],
     observacion: 'Salida de materiales para OT-1287',
+  },
+  scrapMaterials: {
+    bodega_origen_id: '6013e2f8-62db-4142-9c40-5cdfb9de09af',
+    items: [
+      {
+        producto_id: 'ec7be6b7-9ed0-4e15-aa7f-79b3f8f2b84f',
+        cantidad: 1,
+        observacion: 'Repuesto retirado y enviado a chatarra',
+      },
+      {
+        producto_id: 'ac5c35f5-3079-412f-b08f-c140de8f891f',
+        cantidad: 2,
+      },
+    ],
+    observacion: 'Material desechado durante la ejecución de la OT',
   },
   createEquipoTipo: {
     codigo: 'EXCAVADORA',
@@ -1582,5 +1598,47 @@ export class KpiMaintenanceController {
     @Req() req: any,
   ) {
     return this.service.issueMaterials(id, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Listar materiales enviados a bodega chatarra desde una orden de trabajo',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Get('work-orders/:id/scrap-materials')
+  listScrapMaterials(@Param('id') id: string, @Req() req: any) {
+    return this.service.listScrapMaterials(id, getSucursalScopeId(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Registrar materiales desechados y transferirlos a la bodega chatarra',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiBody({
+    type: ScrapMaterialsDto,
+    required: true,
+    examples: { ejemplo: { value: bodyExamples.scrapMaterials } },
+  })
+  @Post('work-orders/:id/scrap-materials')
+  registerScrapMaterials(
+    @Param('id') id: string,
+    @Body() dto: ScrapMaterialsDto,
+    @Req() req: any,
+  ) {
+    return this.service.registerScrapMaterials(
+      id,
+      dto,
+      getRequestActor(req),
+      getSucursalScopeId(req),
+    );
   }
 }
