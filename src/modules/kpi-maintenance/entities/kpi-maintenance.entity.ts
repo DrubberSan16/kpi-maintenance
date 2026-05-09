@@ -841,6 +841,7 @@ export class ProductoEntity {
   @Column({ type: 'varchar', length: 60, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 250, nullable: true }) nombre?: string | null;
   @Column({ type: 'uuid', nullable: true }) unidad_medida_id?: string | null;
+  @Column({ type: 'boolean', default: false }) es_aceite: boolean;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   ultimo_costo: number;
   @Column({ default: false }) is_deleted: boolean;

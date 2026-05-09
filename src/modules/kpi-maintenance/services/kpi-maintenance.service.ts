@@ -1333,6 +1333,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private async ensureInventoryOilSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_producto
+      ADD COLUMN IF NOT EXISTS es_aceite boolean NOT NULL DEFAULT false
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_producto_es_aceite
+      ON kpi_inventory.tb_producto (es_aceite)
+      WHERE is_deleted = false
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_producto
+      SET es_aceite = true
+      WHERE is_deleted = false
+        AND COALESCE(es_aceite, false) = false
+        AND UPPER(COALESCE(nombre, '')) LIKE '%ACEITE%'
+    `);
+  }
+
   private parseOilUsageDate(
     value: unknown,
     options?: { endOfDay?: boolean },
@@ -1466,8 +1485,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async buildOilProductCatalog() {
-    const unitNames = ['GALON', 'GALONES'];
-    const unitCodes = ['GALON', 'GALONES', 'GAL', 'GL'];
     const { entities, raw } = await this.productoRepo
       .createQueryBuilder('producto')
       .leftJoin(
@@ -1476,17 +1493,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'unidad.id = producto.unidad_medida_id AND unidad.is_deleted = false',
       )
       .where('producto.is_deleted = false')
-      .andWhere(
-        `(
-          UPPER(COALESCE(unidad.nombre, '')) IN (:...unitNames)
-          OR UPPER(COALESCE(unidad.abreviatura, '')) IN (:...unitCodes)
-          OR UPPER(COALESCE(unidad.codigo, '')) IN (:...unitCodes)
-        )`,
-        {
-          unitNames,
-          unitCodes,
-        },
-      )
+      .andWhere('COALESCE(producto.es_aceite, false) = true')
       .select('producto')
       .addSelect('unidad.nombre', 'unidad_nombre')
       .addSelect('unidad.abreviatura', 'unidad_abreviatura')
@@ -1505,6 +1512,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         codigo: producto.codigo ?? null,
         nombre: producto.nombre ?? null,
         label: this.buildProductoLabel(producto) ?? producto.id,
+        es_aceite: Boolean(producto.es_aceite),
         unidad_medida: unidadNombre,
         unidad_medida_abreviatura: unidadAbreviatura,
         unidad_medida_codigo: unidadCodigo,
@@ -1737,7 +1745,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : this.reservaRepo.save(created);
   }
 
-  onModuleInit() {
+  async onModuleInit() {
+    await this.ensureInventoryOilSchema();
     this.scheduleAlertRecalculation();
     this.triggerAlertRecalculation('startup').catch((e: any) => {
       this.logger.error(
@@ -12390,7 +12399,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (requestedProductId && !oilCatalogMap.has(requestedProductId)) {
       throw new BadRequestException(
-        'El material seleccionado no corresponde a un aceite medido en galones.',
+        'El material seleccionado no está marcado como aceite.',
       );
     }
 
