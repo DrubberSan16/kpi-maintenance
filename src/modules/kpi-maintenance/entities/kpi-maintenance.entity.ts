@@ -293,7 +293,7 @@ export class WorkOrderTareaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'uuid' }) work_order_id: string;
   @Column({ type: 'uuid' }) plan_id: string;
-  @Column({ type: 'uuid' }) tarea_id: string;
+  @Column({ type: 'uuid', nullable: true }) tarea_id?: string | null;
   @Column({ type: 'uuid', nullable: true })
   procedimiento_actividad_id?: string | null;
   @Column({ type: 'boolean', nullable: true }) valor_boolean?: boolean | null;

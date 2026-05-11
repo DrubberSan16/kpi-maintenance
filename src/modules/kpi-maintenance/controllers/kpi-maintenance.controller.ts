@@ -86,6 +86,7 @@ import {
   CreateWorkOrderTareaDto,
   UpdateWorkOrderTareaDto,
 } from '../dto/work-order-task.dto';
+import { SaveWorkOrderBundleDto } from '../dto/work-order-save.dto';
 import { getSucursalScopeId } from '../../../common/http/sucursal-scope.util';
 
 function getRequestActor(req?: any) {
@@ -1277,6 +1278,20 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({
+    summary:
+      'Guardar una OT completa de forma transaccional (cabecera y detalle)',
+  })
+  @ApiBody({ type: SaveWorkOrderBundleDto, required: true })
+  @Post('work-orders/save-bundle')
+  saveNewWorkOrderBundle(
+    @Body() dto: SaveWorkOrderBundleDto,
+    @Req() req: any,
+  ) {
+    return this.service.saveWorkOrderBundle(null, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Actualizar orden de trabajo por ID' })
   @ApiParam({
     name: 'id',
@@ -1291,6 +1306,26 @@ export class KpiMaintenanceController {
     @Req() req: any,
   ) {
     return this.service.updateWorkOrder(id, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary:
+      'Guardar una OT existente de forma transaccional (cabecera y detalle)',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiBody({ type: SaveWorkOrderBundleDto, required: true })
+  @Patch('work-orders/:id/save-bundle')
+  saveExistingWorkOrderBundle(
+    @Param('id') id: string,
+    @Body() dto: SaveWorkOrderBundleDto,
+    @Req() req: any,
+  ) {
+    return this.service.saveWorkOrderBundle(id, dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders')

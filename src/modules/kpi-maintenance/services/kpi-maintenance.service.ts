@@ -151,6 +151,12 @@ import {
   UpdateWorkOrderTareaDto,
   WorkOrderTareaResponsableDto,
 } from '../dto/work-order-task.dto';
+import {
+  SaveWorkOrderAttachmentDto,
+  SaveWorkOrderBundleDto,
+  SaveWorkOrderHeaderDto,
+  SaveWorkOrderTaskUpdateDto,
+} from '../dto/work-order-save.dto';
 
 type AlertLevel = 'INFO' | 'WARNING' | 'CRITICAL';
 type AlertCategory =
@@ -263,6 +269,13 @@ type WorkOrderTaskResponsible = {
   username: string | null;
   display_name: string;
   horas: number;
+};
+
+type WorkOrderAttachmentReference = {
+  id: string;
+  nombre?: string | null;
+  mime_type?: string | null;
+  tipo?: string | null;
 };
 
 type AlertNotificationRecipient = {
@@ -1576,11 +1589,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async validateProductoEnBodega(productoId: string, bodegaId: string) {
+  private async validateProductoEnBodega(
+    productoId: string,
+    bodegaId: string,
+    manager?: EntityManager,
+  ) {
+    const productRepo =
+      manager?.getRepository(ProductoEntity) ?? this.productoRepo;
+    const warehouseRepo =
+      manager?.getRepository(BodegaEntity) ?? this.bodegaRepo;
+    const stockRepo =
+      manager?.getRepository(StockBodegaEntity) ?? this.stockRepo;
     const [producto, bodega, stock] = await Promise.all([
-      this.productoRepo.findOne({ where: { id: productoId } }),
-      this.bodegaRepo.findOne({ where: { id: bodegaId } }),
-      this.stockRepo.findOne({ where: { producto_id: productoId, bodega_id: bodegaId } }),
+      productRepo.findOne({ where: { id: productoId } }),
+      warehouseRepo.findOne({ where: { id: bodegaId } }),
+      stockRepo.findOne({
+        where: { producto_id: productoId, bodega_id: bodegaId },
+      }),
     ]);
 
     if (!producto) {
@@ -1596,9 +1621,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return { producto, bodega, stock };
   }
 
-  private async resolveInventoryCostReference(productoId: string, bodegaId: string) {
-    const { producto, bodega } = await this.validateProductoEnBodega(productoId, bodegaId);
-    const kardex = await this.kardexRepo.findOne({
+  private async resolveInventoryCostReference(
+    productoId: string,
+    bodegaId: string,
+    manager?: EntityManager,
+  ) {
+    const { producto, bodega } = await this.validateProductoEnBodega(
+      productoId,
+      bodegaId,
+      manager,
+    );
+    const kardexRepo = manager?.getRepository(KardexEntity) ?? this.kardexRepo;
+    const kardex = await kardexRepo.findOne({
       where: { producto_id: productoId, bodega_id: bodegaId },
       order: { fecha: 'DESC', id: 'DESC' },
     });
@@ -1631,8 +1665,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrderId: string,
     productoId: string,
     bodegaId: string,
+    manager?: EntityManager,
   ) {
-    const consumos = await this.consumoRepo.find({
+    const consumoRepo =
+      manager?.getRepository(ConsumoRepuestoEntity) ?? this.consumoRepo;
+    const entregaRepo =
+      manager?.getRepository(EntregaMaterialEntity) ??
+      this.dataSource.getRepository(EntregaMaterialEntity);
+    const entregaDetRepo =
+      manager?.getRepository(EntregaMaterialDetEntity) ??
+      this.dataSource.getRepository(EntregaMaterialDetEntity);
+    const consumos = await consumoRepo.find({
       where: {
         work_order_id: workOrderId,
         producto_id: productoId,
@@ -1645,12 +1688,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       0,
     );
 
-    const entregas = await this.dataSource.getRepository(EntregaMaterialEntity).find({
+    const entregas = await entregaRepo.find({
       where: { work_order_id: workOrderId, is_deleted: false },
     });
     const entregaIds = entregas.map((item) => item.id);
     const detalles = entregaIds.length
-      ? await this.dataSource.getRepository(EntregaMaterialDetEntity).find({
+      ? await entregaDetRepo.find({
           where: {
             entrega_id: In(entregaIds),
             producto_id: productoId,
@@ -1675,11 +1718,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     productoId: string,
     bodegaId: string,
     quantityDelta: number,
+    manager?: EntityManager,
   ) {
     const normalizedDelta = this.toNumeric(quantityDelta, 0);
     if (normalizedDelta <= 0) return null;
+    const reservaRepo =
+      manager?.getRepository(ReservaStockEntity) ?? this.reservaRepo;
 
-    const existing = await this.reservaRepo.findOne({
+    const existing = await reservaRepo.findOne({
       where: {
         work_order_id: workOrderId,
         producto_id: productoId,
@@ -1691,11 +1737,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (existing) {
       existing.cantidad = this.toNumeric(existing.cantidad, 0) + normalizedDelta;
-      return this.reservaRepo.save(existing);
+      return reservaRepo.save(existing);
     }
 
-    return this.reservaRepo.save(
-      this.reservaRepo.create({
+    return reservaRepo.save(
+      reservaRepo.create({
         work_order_id: workOrderId,
         producto_id: productoId,
         bodega_id: bodegaId,
@@ -1715,6 +1761,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrderId,
       productoId,
       bodegaId,
+      manager,
     );
 
     if (totals.pendingQty <= 0) {
@@ -2397,12 +2444,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private securityUsersCache:
     | { expiresAt: number; items: SecurityUserDirectoryItem[] }
     | null = null;
+  private securityLogWarningCooldownUntil = 0;
   private mailTransporter: Transporter | null = null;
   private mailTransportVerified = false;
 
   private toNumeric(value: unknown, fallback = 0) {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
+  }
+
+  private isUnauthorizedServiceError(error: unknown) {
+    return /HTTP 401|Unauthorized/i.test(String((error as any)?.message ?? ''));
   }
 
   private normalizeWorkflowStatus(value: unknown) {
@@ -2777,6 +2829,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         createdBy: payload.createdBy ?? null,
       });
     } catch (error: any) {
+      if (this.isUnauthorizedServiceError(error)) {
+        const now = Date.now();
+        if (this.securityLogWarningCooldownUntil <= now) {
+          this.securityLogWarningCooldownUntil = now + 5 * 60 * 1000;
+          this.logger.warn(
+            'No se pudo registrar log transaccional por autenticacion; se omitira temporalmente el envio al servicio de seguridad.',
+          );
+        }
+        return;
+      }
       this.logger.warn(`No se pudo registrar log transaccional: ${error?.message ?? 'desconocido'}`);
     }
   }
@@ -4116,13 +4178,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async resolveNextWorkOrderTaskOrder(
     workOrderId: string,
     planId?: string | null,
+    manager?: EntityManager,
   ) {
+    const workOrderTaskRepo =
+      manager?.getRepository(WorkOrderTareaEntity) ?? this.woTareaRepo;
+    const planTaskRepo =
+      manager?.getRepository(PlanTareaEntity) ?? this.planTareaRepo;
     const [existingRows, planTasks] = await Promise.all([
-      this.woTareaRepo.find({
+      workOrderTaskRepo.find({
         where: { work_order_id: workOrderId, is_deleted: false },
       }),
       planId
-        ? this.planTareaRepo.find({
+        ? planTaskRepo.find({
             where: { plan_id: planId, is_deleted: false },
           })
         : Promise.resolve([] as PlanTareaEntity[]),
@@ -4260,7 +4327,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return [...rows]
       .map((row) => {
-        const definition = definitionMap.get(row.tarea_id);
+        const definition = row.tarea_id
+          ? definitionMap.get(row.tarea_id)
+          : undefined;
         const storedMeta =
           row.task_meta && typeof row.task_meta === 'object' ? row.task_meta : {};
         const mergedMeta = {
@@ -13441,7 +13510,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder: WorkOrderEntity,
     blockedByWorkOrderId?: string | null,
     blockedReason?: string | null,
+    manager?: EntityManager,
   ) {
+    const workOrderRepo =
+      manager?.getRepository(WorkOrderEntity) ?? this.woRepo;
     const normalizedBlockedById = String(blockedByWorkOrderId || '').trim() || null;
     const payload = {
       ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
@@ -13469,7 +13541,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const blocker = await this.findOneOrFail(this.woRepo, {
+    const blocker = await this.findOneOrFail(workOrderRepo, {
       id: normalizedBlockedById,
       is_deleted: false,
     });
@@ -13507,7 +13579,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (blocker.parent_work_order_id !== workOrder.id) {
       blocker.parent_work_order_id = workOrder.id ?? blocker.parent_work_order_id;
-      await this.woRepo.save(blocker);
+      await workOrderRepo.save(blocker);
     }
 
     return blocker;
@@ -13632,6 +13704,986 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(
       await this.enrichWorkOrder(row, actor),
       'Work order obtenida',
+    );
+  }
+
+  private resolveAttachmentReferenceMapItem(
+    attachment: WorkOrderAdjuntoEntity,
+  ): WorkOrderAttachmentReference {
+    const meta = (attachment.meta ?? {}) as Record<string, unknown>;
+    return {
+      id: attachment.id,
+      nombre: attachment.nombre ?? null,
+      mime_type:
+        typeof meta.mime_type === 'string' ? meta.mime_type : null,
+      tipo: attachment.tipo ?? null,
+    };
+  }
+
+  private applyAttachmentReferencesToTaskPayload<
+    T extends CreateWorkOrderTareaDto | SaveWorkOrderTaskUpdateDto,
+  >(dto: T, attachmentMap: Map<string, WorkOrderAttachmentReference>) {
+    const payload = dto?.valor_json;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return dto;
+    }
+
+    const rawAttachments = Array.isArray((payload as any).adjuntos)
+      ? ((payload as any).adjuntos as Array<Record<string, unknown>>)
+      : [];
+
+    if (!rawAttachments.length) {
+      return dto;
+    }
+
+    const resolvedAttachments = rawAttachments.map((item) => {
+      const existingAttachmentId = this.firstNonEmptyString(item?.attachment_id);
+      const draftAttachmentId = this.firstNonEmptyString(
+        item?.draft_attachment_id,
+      );
+
+      if (existingAttachmentId) {
+        return {
+          ...item,
+          attachment_id: existingAttachmentId,
+          draft_attachment_id: null,
+        };
+      }
+
+      if (!draftAttachmentId) {
+        return item;
+      }
+
+      const savedAttachment = attachmentMap.get(draftAttachmentId);
+      if (!savedAttachment) {
+        throw new BadRequestException(
+          `No se pudo enlazar el adjunto temporal ${draftAttachmentId} con la tarea.`,
+        );
+      }
+
+      return {
+        ...item,
+        attachment_id: savedAttachment.id,
+        draft_attachment_id: null,
+        nombre: savedAttachment.nombre ?? item?.nombre ?? null,
+        mime_type: savedAttachment.mime_type ?? item?.mime_type ?? null,
+        tipo: savedAttachment.tipo ?? item?.tipo ?? 'EVIDENCIA',
+      };
+    });
+
+    return {
+      ...dto,
+      valor_json: {
+        ...(payload as Record<string, unknown>),
+        adjuntos: resolvedAttachments,
+      },
+    } as T;
+  }
+
+  private async uploadWorkOrderAdjuntoWithManager(
+    manager: EntityManager,
+    workOrderId: string,
+    dto: SaveWorkOrderAttachmentDto,
+    createdFiles: string[],
+  ) {
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(dto.contenido_base64, 'base64');
+    } catch {
+      throw new BadRequestException('contenido_base64 invalido');
+    }
+    if (!buffer.length) throw new BadRequestException('Archivo vacio');
+
+    const folder = join(this.uploadRoot, workOrderId);
+    await mkdir(folder, { recursive: true });
+
+    const originalName = basename(dto.nombre);
+    const storageName = `${Date.now()}-${randomUUID().slice(0, 8)}-${originalName.replace(/\s+/g, '_')}`;
+    const filePath = join(folder, storageName);
+    await writeFile(filePath, buffer);
+    createdFiles.push(filePath);
+
+    const hash = createHash('sha256').update(buffer).digest('hex');
+    const repo = manager.getRepository(WorkOrderAdjuntoEntity);
+    return repo.save(
+      repo.create({
+        work_order_id: workOrderId,
+        tipo: dto.tipo ?? 'EVIDENCIA',
+        nombre: originalName,
+        url: filePath,
+        hash_sha256: hash,
+        meta: {
+          ...(dto.meta ?? {}),
+          mime_type: dto.mime_type ?? null,
+          extension: extname(originalName) || null,
+          size_bytes: buffer.length,
+        },
+      }),
+    );
+  }
+
+  private async createConsumoWithManager(
+    manager: EntityManager,
+    workOrder: WorkOrderEntity,
+    dto: CreateConsumoDto,
+  ) {
+    if (!dto.bodega_id) {
+      throw new BadRequestException(
+        'La bodega es obligatoria para registrar el consumo.',
+      );
+    }
+
+    const { producto, bodega } = await this.validateProductoEnBodega(
+      dto.producto_id,
+      dto.bodega_id,
+      manager,
+    );
+    const costReference = await this.resolveInventoryCostReference(
+      dto.producto_id,
+      dto.bodega_id,
+      manager,
+    );
+    const costoUnitario = this.toNumeric(
+      dto.costo_unitario,
+      costReference.costo_unitario,
+    );
+    const subtotal = dto.cantidad * costoUnitario;
+    const repo = manager.getRepository(ConsumoRepuestoEntity);
+    const saved = await repo.save(
+      repo.create({
+        ...dto,
+        costo_unitario: costoUnitario,
+        work_order_id: workOrder.id,
+        subtotal,
+      }),
+    );
+    await this.upsertReservedMaterial(
+      workOrder.id,
+      dto.producto_id,
+      dto.bodega_id,
+      dto.cantidad,
+      manager,
+    );
+    return {
+      saved,
+      producto,
+      bodega,
+      subtotal,
+    };
+  }
+
+  private async issueMaterialsWithManager(
+    manager: EntityManager,
+    workOrder: WorkOrderEntity,
+    dto: IssueMaterialsDto,
+  ) {
+    const entregaRepo = manager.getRepository(EntregaMaterialEntity);
+    const movimientoRepo = manager.getRepository(MovimientoInventarioEntity);
+    const entregaDetRepo = manager.getRepository(EntregaMaterialDetEntity);
+    const movimientoDetRepo =
+      manager.getRepository(MovimientoInventarioDetEntity);
+    const kardexRepo = manager.getRepository(KardexEntity);
+
+    const entrega = await entregaRepo.save(
+      entregaRepo.create({
+        work_order_id: workOrder.id,
+        code: `EM-${Date.now()}`,
+        observacion: dto.observacion,
+      }),
+    );
+    const movimiento = await movimientoRepo.save(
+      movimientoRepo.create({
+        tipo_movimiento: 'SALIDA',
+        work_order_id: workOrder.id,
+        total_costos: 0,
+      }),
+    );
+
+    let total = 0;
+    for (const item of dto.items) {
+      let reserva = await manager.findOne(ReservaStockEntity, {
+        where: {
+          work_order_id: workOrder.id,
+          producto_id: item.producto_id,
+          bodega_id: item.bodega_id,
+          estado: 'RESERVADO',
+          is_deleted: false,
+        },
+      });
+      if (!reserva || this.toNumeric(reserva.cantidad, 0) < item.cantidad) {
+        reserva = await this.rebuildPendingReservaFromConsumos(
+          workOrder.id,
+          item.producto_id,
+          item.bodega_id,
+          manager,
+        );
+      }
+      if (!reserva || this.toNumeric(reserva.cantidad, 0) < item.cantidad) {
+        throw new ConflictException('Reserva insuficiente');
+      }
+
+      const stock = await manager.findOne(StockBodegaEntity, {
+        where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
+      });
+      if (!stock || Number(stock.stock_actual) < item.cantidad) {
+        throw new ConflictException('Stock insuficiente');
+      }
+
+      const producto = await manager.findOne(ProductoEntity, {
+        where: { id: item.producto_id },
+      });
+      if (!producto) {
+        throw new NotFoundException('Producto no encontrado');
+      }
+
+      const costo = Number(producto.ultimo_costo);
+      const subtotal = item.cantidad * costo;
+      total += subtotal;
+
+      stock.stock_actual = Number(stock.stock_actual) - item.cantidad;
+      await manager.save(stock);
+
+      const remainingReserved =
+        this.toNumeric(reserva.cantidad, 0) - item.cantidad;
+      reserva.cantidad = Math.max(remainingReserved, 0);
+      reserva.estado = remainingReserved > 0 ? 'RESERVADO' : 'CONSUMIDO';
+      await manager.save(reserva);
+
+      await entregaDetRepo.save(
+        entregaDetRepo.create({
+          entrega_id: entrega.id,
+          producto_id: item.producto_id,
+          bodega_id: item.bodega_id,
+          cantidad: item.cantidad,
+          costo_unitario: costo,
+        }),
+      );
+
+      const movDet = await movimientoDetRepo.save(
+        movimientoDetRepo.create({
+          movimiento_id: movimiento.id,
+          producto_id: item.producto_id,
+          cantidad: item.cantidad,
+          costo_unitario: costo,
+          subtotal_costo: subtotal,
+        }),
+      );
+
+      await kardexRepo.save(
+        kardexRepo.create({
+          bodega_id: item.bodega_id,
+          producto_id: item.producto_id,
+          movimiento_id: movimiento.id,
+          movimiento_det_id: movDet.id,
+          tipo_movimiento: 'SALIDA',
+          salida_cantidad: item.cantidad,
+          costo_unitario: costo,
+          costo_total: subtotal,
+          saldo_cantidad: stock.stock_actual,
+          saldo_costo_promedio: costo,
+          saldo_valorizado: Number(stock.stock_actual) * costo,
+        }),
+      );
+    }
+
+    movimiento.total_costos = total;
+    await movimientoRepo.save(movimiento);
+    return {
+      entrega_id: entrega.id,
+      movimiento_id: movimiento.id,
+      total,
+    };
+  }
+
+  private async createWorkOrderTareaWithManager(
+    manager: EntityManager,
+    workOrder: WorkOrderEntity,
+    dto: CreateWorkOrderTareaDto,
+  ) {
+    const planRepo = manager.getRepository(PlanMantenimientoEntity);
+    const planTaskRepo = manager.getRepository(PlanTareaEntity);
+    const workOrderTaskRepo = manager.getRepository(WorkOrderTareaEntity);
+    const resolvedPlanId =
+      this.firstNonEmptyString(dto.plan_id, workOrder.plan_id) ?? null;
+
+    if (!resolvedPlanId) {
+      throw new BadRequestException(
+        'La OT debe estar asociada a un plan operativo para registrar tareas.',
+      );
+    }
+
+    await this.findOneOrFail(planRepo, {
+      id: resolvedPlanId,
+      is_deleted: false,
+    } as FindOptionsWhere<PlanMantenimientoEntity>);
+
+    if (workOrder.plan_id && workOrder.plan_id !== resolvedPlanId) {
+      throw new BadRequestException(
+        'La tarea seleccionada no pertenece al plan operativo de la OT.',
+      );
+    }
+
+    const normalizedResponsables =
+      dto.responsables !== undefined
+        ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+        : [];
+    const isAdditional = Boolean(
+      dto.es_adicional ||
+        this.trimNullableText(dto.actividad_adicional) ||
+        !this.firstNonEmptyString(dto.tarea_id),
+    );
+
+    if (isAdditional) {
+      const additionalDefinition = this.buildAdditionalWorkOrderTaskDefinition({
+        actividad_adicional: dto.actividad_adicional,
+        field_type: dto.field_type,
+        required: dto.required,
+        task_meta: dto.task_meta ?? null,
+      });
+      const normalized = this.normalizeWorkOrderTaskPayload(
+        additionalDefinition,
+        dto,
+      );
+      const nextOrder = await this.resolveNextWorkOrderTaskOrder(
+        workOrder.id,
+        resolvedPlanId,
+        manager,
+      );
+      return workOrderTaskRepo.save(
+        workOrderTaskRepo.create({
+          work_order_id: workOrder.id,
+          plan_id: resolvedPlanId,
+          tarea_id: null,
+          procedimiento_actividad_id: null,
+          valor_boolean: normalized.valor_boolean,
+          valor_numeric: normalized.valor_numeric,
+          valor_text: normalized.valor_text,
+          valor_json: normalized.valor_json,
+          task_meta: additionalDefinition.task_meta,
+          es_adicional: true,
+          actividad_adicional: additionalDefinition.actividad,
+          orden_visual: nextOrder,
+          responsables: normalizedResponsables,
+          observacion: normalized.observacion,
+        }),
+      );
+    }
+
+    const tareaId = this.firstNonEmptyString(dto.tarea_id);
+    if (!tareaId) {
+      throw new BadRequestException(
+        'Debes seleccionar una tarea del plan o indicar una tarea adicional.',
+      );
+    }
+
+    const taskDefinition = await this.findOneOrFail(planTaskRepo, {
+      id: tareaId,
+      plan_id: resolvedPlanId,
+      is_deleted: false,
+    } as FindOptionsWhere<PlanTareaEntity>);
+
+    const normalized = this.normalizeWorkOrderTaskPayload(taskDefinition, dto);
+    const existing = await workOrderTaskRepo.findOne({
+      where: {
+        work_order_id: workOrder.id,
+        plan_id: resolvedPlanId,
+        tarea_id: tareaId,
+        is_deleted: false,
+      },
+    });
+    const definitionMeta =
+      (taskDefinition.meta as Record<string, unknown> | undefined) ?? {};
+
+    return workOrderTaskRepo.save(
+      workOrderTaskRepo.create({
+        ...(existing ?? {}),
+        work_order_id: workOrder.id,
+        plan_id: resolvedPlanId,
+        tarea_id: tareaId,
+        procedimiento_actividad_id:
+          this.firstNonEmptyString(definitionMeta.procedimiento_actividad_id) ??
+          null,
+        valor_boolean: normalized.valor_boolean,
+        valor_numeric: normalized.valor_numeric,
+        valor_text: normalized.valor_text,
+        valor_json: normalized.valor_json,
+        task_meta: {
+          ...definitionMeta,
+          ...((dto.task_meta as Record<string, unknown> | undefined) ?? {}),
+          field_type:
+            this.normalizePlanTaskFieldType(taskDefinition.field_type) ??
+            'BOOLEAN',
+          required: Boolean(taskDefinition.required),
+        },
+        es_adicional: false,
+        actividad_adicional: null,
+        orden_visual: existing?.orden_visual ?? taskDefinition.orden ?? null,
+        responsables:
+          dto.responsables !== undefined
+            ? normalizedResponsables
+            : this.mapStoredWorkOrderTaskResponsables(existing?.responsables),
+        observacion: normalized.observacion,
+      }),
+    );
+  }
+
+  private async updateWorkOrderTareaWithManager(
+    manager: EntityManager,
+    id: string,
+    dto: SaveWorkOrderTaskUpdateDto,
+  ) {
+    const workOrderTaskRepo = manager.getRepository(WorkOrderTareaEntity);
+    const planTaskRepo = manager.getRepository(PlanTareaEntity);
+    const tarea = await this.findOneOrFail(workOrderTaskRepo, {
+      id,
+      is_deleted: false,
+    } as FindOptionsWhere<WorkOrderTareaEntity>);
+
+    if (tarea.es_adicional) {
+      const additionalDefinition = this.buildAdditionalWorkOrderTaskDefinition(
+        {
+          actividad_adicional:
+            dto.actividad_adicional ?? tarea.actividad_adicional ?? null,
+          field_type:
+            dto.field_type ??
+            ((tarea.task_meta as Record<string, unknown> | undefined)
+              ?.field_type as string | undefined) ??
+            null,
+          required:
+            dto.required ??
+            ((tarea.task_meta as Record<string, unknown> | undefined)
+              ?.required as boolean | undefined) ??
+            null,
+          task_meta: {
+            ...((tarea.task_meta as Record<string, unknown> | undefined) ?? {}),
+            ...((dto.task_meta as Record<string, unknown> | undefined) ?? {}),
+          },
+        },
+        tarea.actividad_adicional,
+      );
+      const normalized = this.normalizeWorkOrderTaskPayload(
+        additionalDefinition,
+        dto,
+      );
+      Object.assign(tarea, {
+        valor_boolean: normalized.valor_boolean,
+        valor_numeric: normalized.valor_numeric,
+        valor_text: normalized.valor_text,
+        valor_json: normalized.valor_json,
+        task_meta: additionalDefinition.task_meta,
+        actividad_adicional: additionalDefinition.actividad,
+        procedimiento_actividad_id: null,
+        responsables:
+          dto.responsables !== undefined
+            ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+            : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
+        observacion: normalized.observacion,
+        status: dto.status ?? tarea.status,
+      });
+      return workOrderTaskRepo.save(tarea);
+    }
+
+    const definition = await this.findOneOrFail(planTaskRepo, {
+      id: tarea.tarea_id!,
+      plan_id: tarea.plan_id,
+      is_deleted: false,
+    } as FindOptionsWhere<PlanTareaEntity>);
+    const normalized = this.normalizeWorkOrderTaskPayload(definition, dto);
+    const definitionMeta =
+      (definition.meta as Record<string, unknown> | undefined) ?? {};
+    Object.assign(tarea, {
+      valor_boolean: normalized.valor_boolean,
+      valor_numeric: normalized.valor_numeric,
+      valor_text: normalized.valor_text,
+      valor_json: normalized.valor_json,
+      task_meta: {
+        ...definitionMeta,
+        ...((tarea.task_meta as Record<string, unknown> | undefined) ?? {}),
+        ...((dto.task_meta as Record<string, unknown> | undefined) ?? {}),
+        field_type:
+          this.normalizePlanTaskFieldType(definition.field_type) ?? 'BOOLEAN',
+        required: Boolean(definition.required),
+      },
+      es_adicional: false,
+      actividad_adicional: null,
+      orden_visual: tarea.orden_visual ?? definition.orden ?? null,
+      procedimiento_actividad_id:
+        this.firstNonEmptyString(definitionMeta.procedimiento_actividad_id) ??
+        null,
+      responsables:
+        dto.responsables !== undefined
+          ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+          : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
+      observacion: normalized.observacion,
+      status: dto.status ?? tarea.status,
+    });
+    return workOrderTaskRepo.save(tarea);
+  }
+
+  private async saveWorkOrderHeaderWithManager(
+    manager: EntityManager,
+    workOrderId: string | null,
+    header: SaveWorkOrderHeaderDto,
+    actor?: RequestActorContext | null,
+  ) {
+    const workOrderRepo = manager.getRepository(WorkOrderEntity);
+    const planRepo = manager.getRepository(PlanMantenimientoEntity);
+    const isNew = !workOrderId;
+    const workOrder = workOrderId
+      ? await this.findOneOrFail(workOrderRepo, {
+          id: workOrderId,
+          is_deleted: false,
+        } as FindOptionsWhere<WorkOrderEntity>)
+      : null;
+    const previousStatus = this.normalizeWorkflowStatus(
+      workOrder?.status_workflow ?? 'PLANNED',
+    );
+    const equipmentId =
+      this.firstNonEmptyString(header.equipment_id, workOrder?.equipment_id) ??
+      null;
+
+    if (!equipmentId) {
+      throw new BadRequestException('Equipo es obligatorio.');
+    }
+    await this.findEquipoOrFail(equipmentId);
+
+    let resolvedPlanId =
+      this.firstNonEmptyString(header.plan_id, workOrder?.plan_id) ?? null;
+    if (header.procedimiento_id) {
+      const synced = await this.syncPlanFromProcedimiento(
+        header.procedimiento_id,
+      );
+      resolvedPlanId = synced.plan.id;
+    }
+    if (!resolvedPlanId) {
+      throw new BadRequestException(
+        'Debes seleccionar una plantilla MPG para la OT.',
+      );
+    }
+    await this.findOneOrFail(planRepo, {
+      id: resolvedPlanId,
+      is_deleted: false,
+    } as FindOptionsWhere<PlanMantenimientoEntity>);
+
+    const componentContext = await this.resolveWorkOrderComponentContext(
+      equipmentId,
+      header.equipo_componente_id ?? workOrder?.equipo_componente_id ?? null,
+    );
+    const nextWorkflowStatus = this.normalizeWorkflowStatus(
+      header.status_workflow ?? workOrder?.status_workflow ?? 'PLANNED',
+    );
+    if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
+      await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
+    }
+
+    let resolution: CodeResolution = isNew
+      ? await this.resolveRequestedWorkOrderCode(header.code)
+      : {
+          requestedCode: workOrder?.code ?? null,
+          resolvedCode: workOrder?.code ?? '',
+          codeWasReassigned: false,
+          reassignmentReason: null,
+        };
+    let saved: WorkOrderEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const entity = workOrder
+        ? workOrder
+        : workOrderRepo.create({
+            code: resolution.resolvedCode,
+            type:
+              this.firstNonEmptyString(header.type, 'WORK_ORDER') ||
+              'WORK_ORDER',
+            title:
+              this.firstNonEmptyString(header.title, 'ORDEN DE TRABAJO') ||
+              'ORDEN DE TRABAJO',
+            requested_by: this.firstNonEmptyString(actor?.userId) ?? null,
+            created_by: this.firstNonEmptyString(actor?.username) ?? null,
+          });
+
+      Object.assign(entity, {
+        code: isNew ? resolution.resolvedCode : entity.code,
+        type: this.firstNonEmptyString(header.type, entity.type) ?? entity.type,
+        title:
+          this.firstNonEmptyString(header.title, entity.title) ?? entity.title,
+        description:
+          header.description !== undefined
+            ? this.trimNullableText(header.description)
+            : entity.description ?? null,
+        equipment_id: equipmentId,
+        equipo_componente_id: componentContext.componentId,
+        equipo_componente_nombre: componentContext.componentName,
+        equipo_componente_nombre_oficial:
+          componentContext.componentOfficialName,
+        plan_id: resolvedPlanId,
+        blocked_reason:
+          header.blocked_reason !== undefined
+            ? String(header.blocked_reason || '').trim() || null
+            : entity.blocked_reason ?? null,
+        priority:
+          header.priority !== undefined
+            ? this.toNumeric(header.priority, entity.priority ?? 5)
+            : entity.priority ?? 5,
+        provider_type:
+          this.firstNonEmptyString(
+            header.provider_type,
+            entity.provider_type,
+            'INTERNO',
+          ) || 'INTERNO',
+        maintenance_kind:
+          this.firstNonEmptyString(
+            header.maintenance_kind,
+            entity.maintenance_kind,
+            'CORRECTIVO',
+          ) || 'CORRECTIVO',
+        safety_permit_required:
+          header.safety_permit_required ??
+          entity.safety_permit_required ??
+          false,
+        safety_permit_code:
+          header.safety_permit_code !== undefined
+            ? this.trimNullableText(header.safety_permit_code)
+            : entity.safety_permit_code ?? null,
+        vendor_id:
+          header.vendor_id !== undefined
+            ? header.vendor_id ?? null
+            : entity.vendor_id ?? null,
+        purchase_request_id:
+          header.purchase_request_id !== undefined
+            ? header.purchase_request_id ?? null
+            : entity.purchase_request_id ?? null,
+        valor_json:
+          header.valor_json || header.procedimiento_id
+            ? {
+                ...((entity.valor_json as Record<string, unknown> | null) ??
+                  {}),
+                ...((header.valor_json ?? {}) as Record<string, unknown>),
+                ...(header.procedimiento_id
+                  ? { procedimiento_id: header.procedimiento_id }
+                  : {}),
+              }
+            : entity.valor_json,
+        updated_by:
+          this.firstNonEmptyString(actor?.username) ?? entity.updated_by ?? null,
+      });
+
+      entity.status_workflow = nextWorkflowStatus;
+      await this.applyBlockingRelationship(
+        entity,
+        header.blocked_by_work_order_id !== undefined
+          ? header.blocked_by_work_order_id
+          : entity.blocked_by_work_order_id,
+        header.blocked_reason !== undefined
+          ? header.blocked_reason
+          : entity.blocked_reason,
+        manager,
+      );
+
+      if (nextWorkflowStatus === 'CLOSED') {
+        this.applyWorkOrderAuditStamp(entity, actor, 'APPROVED', {
+          action: 'CERRADA',
+        });
+      } else if (isNew) {
+        this.applyWorkOrderAuditStamp(entity, actor, 'CREATED');
+      } else {
+        this.applyWorkOrderAuditStamp(entity, actor, 'PROCESSED', {
+          clearApproval: previousStatus === 'CLOSED',
+        });
+      }
+
+      this.applyWorkflowDates(entity, isNew ? null : previousStatus, entity.status_workflow);
+
+      try {
+        saved = await workOrderRepo.save(entity);
+        break;
+      } catch (error: any) {
+        if (!isNew || !this.isDuplicateWorkOrderCodeError(error) || attempt >= 2) {
+          throw error;
+        }
+        const nextCode = await this.generateNextWorkOrderCode();
+        resolution = {
+          requestedCode: resolution.requestedCode ?? header.code ?? null,
+          resolvedCode: nextCode,
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El codigo solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!saved) {
+      throw new ConflictException(
+        'No se pudo generar un codigo unico para la orden de trabajo.',
+      );
+    }
+
+    if (saved.blocked_by_work_order_id) {
+      const blocker = await workOrderRepo.findOne({
+        where: { id: saved.blocked_by_work_order_id, is_deleted: false },
+      });
+      if (blocker && blocker.parent_work_order_id !== saved.id) {
+        blocker.parent_work_order_id = saved.id;
+        await workOrderRepo.save(blocker);
+      }
+    }
+
+    return {
+      workOrder: saved,
+      isNew,
+      previousStatus,
+      resolution,
+      alertaId: this.firstNonEmptyString(header.alerta_id) ?? null,
+    };
+  }
+
+  async saveWorkOrderBundle(
+    workOrderId: string | null,
+    dto: SaveWorkOrderBundleDto,
+    actor?: RequestActorContext | null,
+  ) {
+    const createdFiles: string[] = [];
+    const header = dto.header ?? {};
+    const summary = {
+      tareas_nuevas: Array.isArray(dto.tareas_nuevas)
+        ? dto.tareas_nuevas.length
+        : 0,
+      tareas_editadas: Array.isArray(dto.tareas_editadas)
+        ? dto.tareas_editadas.length
+        : 0,
+      adjuntos_nuevos: Array.isArray(dto.adjuntos_nuevos)
+        ? dto.adjuntos_nuevos.length
+        : 0,
+      incluyo_consumo: Boolean(dto.consumo_pendiente),
+      incluyo_salida_materiales: Boolean(
+        dto.salida_materiales_pendiente?.items?.length,
+      ),
+    };
+
+    let transactionResult:
+      | {
+          workOrder: WorkOrderEntity;
+          isNew: boolean;
+          previousStatus: string;
+          resolution: CodeResolution;
+          alertaId: string | null;
+        }
+      | null = null;
+
+    try {
+      transactionResult = await this.dataSource.transaction(async (manager) => {
+        const headerResult = await this.saveWorkOrderHeaderWithManager(
+          manager,
+          workOrderId,
+          header,
+          actor,
+        );
+        const attachmentMap = new Map<string, WorkOrderAttachmentReference>();
+
+        for (const attachment of dto.adjuntos_nuevos ?? []) {
+          const savedAttachment = await this.uploadWorkOrderAdjuntoWithManager(
+            manager,
+            headerResult.workOrder.id,
+            attachment,
+            createdFiles,
+          );
+          const tempId = this.firstNonEmptyString(attachment.temp_id);
+          if (tempId) {
+            attachmentMap.set(
+              tempId,
+              this.resolveAttachmentReferenceMapItem(savedAttachment),
+            );
+          }
+        }
+
+        for (const row of dto.tareas_editadas ?? []) {
+          await this.updateWorkOrderTareaWithManager(
+            manager,
+            row.id,
+            this.applyAttachmentReferencesToTaskPayload(row, attachmentMap),
+          );
+        }
+
+        for (const row of dto.tareas_nuevas ?? []) {
+          await this.createWorkOrderTareaWithManager(
+            manager,
+            headerResult.workOrder,
+            this.applyAttachmentReferencesToTaskPayload(row, attachmentMap),
+          );
+        }
+
+        if (dto.consumo_pendiente) {
+          await this.createConsumoWithManager(
+            manager,
+            headerResult.workOrder,
+            dto.consumo_pendiente,
+          );
+        }
+
+        if (dto.salida_materiales_pendiente?.items?.length) {
+          await this.issueMaterialsWithManager(
+            manager,
+            headerResult.workOrder,
+            dto.salida_materiales_pendiente,
+          );
+        }
+
+        return headerResult;
+      });
+    } catch (error) {
+      for (const filePath of createdFiles) {
+        try {
+          await unlink(filePath);
+        } catch {
+          /* ignore cleanup errors */
+        }
+      }
+      throw error;
+    }
+
+    if (!transactionResult) {
+      throw new ConflictException(
+        'No se pudo completar el guardado transaccional de la orden de trabajo.',
+      );
+    }
+
+    const saved = await this.findOneOrFail(this.woRepo, {
+      id: transactionResult.workOrder.id,
+      is_deleted: false,
+    });
+    const normalizedSavedStatus = this.normalizeWorkflowStatus(
+      saved.status_workflow,
+    );
+    const safePostCommit = async (
+      label: string,
+      action: () => Promise<unknown>,
+    ) => {
+      try {
+        return await action();
+      } catch (error: any) {
+        this.logger.warn(
+          `No se pudo completar ${label} luego del guardado transaccional de OT: ${error?.message ?? 'desconocido'}`,
+        );
+        return null;
+      }
+    };
+
+    if (transactionResult.isNew) {
+      await safePostCommit('el historial de creacion', () =>
+        this.appendWorkOrderHistory(
+        saved.id,
+        normalizedSavedStatus,
+        'Orden de trabajo creada y detalle guardado correctamente',
+        { changedBy: this.resolveActorLabel(actor) },
+      ));
+    } else if (transactionResult.previousStatus !== normalizedSavedStatus) {
+      await safePostCommit('el historial de cambio de estado', () =>
+        this.appendWorkOrderHistory(
+        saved.id,
+        normalizedSavedStatus,
+        `Orden de trabajo guardada (${transactionResult.previousStatus} -> ${normalizedSavedStatus})`,
+        {
+          fromStatus: transactionResult.previousStatus,
+          changedBy: this.resolveActorLabel(actor),
+        },
+      ));
+    } else {
+      await safePostCommit('el historial de actualizacion', () =>
+        this.appendWorkOrderHistory(
+        saved.id,
+        normalizedSavedStatus,
+        'Orden de trabajo y detalle actualizados correctamente',
+        {
+          fromStatus: transactionResult.previousStatus,
+          changedBy: this.resolveActorLabel(actor),
+        },
+      ));
+    }
+
+    if (transactionResult.alertaId) {
+      await safePostCommit('la vinculacion de alerta con la OT', () =>
+        this.syncAlertWorkOrderLink(
+          transactionResult.alertaId!,
+          saved,
+          normalizedSavedStatus === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO',
+        ),
+      );
+      await safePostCommit('la vinculacion de programacion desde alerta', () =>
+        this.syncProgramacionWorkOrderLinkFromAlert(
+          transactionResult.alertaId!,
+          saved,
+        ),
+      );
+    }
+
+    if (normalizedSavedStatus === 'CLOSED') {
+      await safePostCommit('la liberacion de OTs bloqueadas', () =>
+        this.releaseBlockedWorkOrdersFor(saved),
+      );
+      await safePostCommit('la sincronizacion de ejecucion programada', () =>
+        this.syncProgramacionExecutionFromLinkedWorkOrder(saved),
+      );
+    }
+
+    await safePostCommit('la sincronizacion de alertas de la OT', () =>
+      this.syncAlertsForWorkOrder(saved),
+    );
+    const enriched =
+      (await safePostCommit('el enriquecimiento de la OT guardada', () =>
+        this.enrichWorkOrder(saved, actor),
+      )) ?? saved;
+    const enrichedWorkOrder = enriched as WorkOrderEntity & {
+      code?: string | null;
+      title?: string | null;
+    };
+
+    await safePostCommit('la notificacion interna', () =>
+      this.publishInAppNotification({
+        title: transactionResult.isNew
+          ? 'Nueva orden de trabajo creada'
+          : 'Orden de trabajo actualizada',
+        body: `${enrichedWorkOrder.code ?? saved.code} - ${enrichedWorkOrder.title ?? saved.title}`,
+        module: 'maintenance',
+        entityType: 'work-order',
+        entityId: saved.id,
+        level: normalizedSavedStatus === 'CLOSED' ? 'success' : 'info',
+      }),
+    );
+    await this.writeSecurityLog({
+      description: `[WO:${saved.id}] Guardado transaccional de OT ${saved.code}`,
+      typeLog: 'WORK_ORDER',
+    });
+    await safePostCommit('el evento de proceso', () =>
+      this.registerProcessEvent({
+        tipo_proceso: 'WORK_ORDER',
+        accion: transactionResult.isNew ? 'CREATED' : 'UPDATED',
+        referencia_tabla: 'tb_work_order',
+        referencia_id: saved.id,
+        referencia_codigo: saved.code,
+        equipo_id: saved.equipment_id ?? null,
+        title: transactionResult.isNew
+          ? 'Orden de trabajo creada'
+          : 'Orden de trabajo actualizada',
+        body: `${saved.code} - ${enrichedWorkOrder.title ?? saved.title}`,
+        payload_kpi: {
+          status_workflow: saved.status_workflow,
+          maintenance_kind: saved.maintenance_kind,
+          ...summary,
+        },
+      }),
+    );
+
+    return this.wrap(
+      {
+        ...enrichedWorkOrder,
+        requested_code: transactionResult.resolution.requestedCode,
+        code_was_reassigned:
+          transactionResult.resolution.codeWasReassigned,
+        code_reassignment_reason:
+          transactionResult.resolution.reassignmentReason,
+        detalle_guardado: summary,
+      },
+      'Orden de trabajo guardada correctamente',
     );
   }
 
@@ -13998,7 +15050,7 @@ await this.appendWorkOrderHistory(
         this.woTareaRepo.create({
           work_order_id: workOrderId,
           plan_id: resolvedPlanId,
-          tarea_id: randomUUID(),
+          tarea_id: null,
           procedimiento_actividad_id: null,
           valor_boolean: normalized.valor_boolean,
           valor_numeric: normalized.valor_numeric,
@@ -14155,7 +15207,7 @@ await this.appendWorkOrderHistory(
       historyLabel = additionalDefinition.actividad;
     } else {
       const definition = await this.findOneOrFail(this.planTareaRepo, {
-        id: tarea.tarea_id,
+        id: tarea.tarea_id!,
         plan_id: tarea.plan_id,
         is_deleted: false,
       });

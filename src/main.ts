@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import { TimezoneInterceptor } from './common/interceptors/timezone.interceptor';
+import { json, urlencoded } from 'express';
 
 process.env.TZ =
   String(process.env.APP_TIMEZONE || '').trim() || 'America/Guayaquil';
@@ -12,6 +13,10 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: true, credentials: true });
   const config = app.get(ConfigService);
+  const bodyLimit = String(config.get('HTTP_BODY_LIMIT') || '50mb').trim() || '50mb';
+
+  app.use(json({ limit: bodyLimit }));
+  app.use(urlencoded({ extended: true, limit: bodyLimit }));
 
   const port = Number(config.get('PORT') || 3000);
   const basePath = String(config.get('BASE_PATH') || '').trim(); // /kpi_security
