@@ -2917,9 +2917,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       };
       return normalized;
     } catch (error: any) {
-      this.logger.warn(
-        `No se pudo consultar usuarios de seguridad: ${error?.message ?? 'desconocido'}`,
-      );
+      const message = String(error?.message ?? 'desconocido');
+      this.securityUsersCache = {
+        expiresAt: now + 5 * 60 * 1000,
+        items: [],
+      };
+      if (/HTTP 401|Unauthorized/i.test(message)) {
+        this.logger.warn(
+          'No se pudo consultar usuarios de seguridad por autenticación; se omitirá temporalmente la validación remota de responsables.',
+        );
+      } else {
+        this.logger.warn(
+          `No se pudo consultar usuarios de seguridad: ${message}`,
+        );
+      }
       return [];
     }
   }
@@ -3029,9 +3040,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (item) => this.isActiveSecurityUser(item) && item.id,
     );
     if (!activeUsers.length) {
-      throw new BadRequestException(
-        'No se pudo validar los responsables porque el directorio de usuarios no está disponible.',
-      );
+      return userIds;
     }
 
     const activeUserMap = new Map(
@@ -3081,9 +3090,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (item) => this.isActiveSecurityUser(item) && item.id,
     );
     if (!activeUsers.length) {
-      throw new BadRequestException(
-        'No se pudo validar los responsables porque el directorio de usuarios no está disponible.',
-      );
+      return this.mapStoredWorkOrderTaskResponsables(values);
     }
     const activeUserMap = new Map(
       activeUsers.map((item) => [String(item.id), item]),
