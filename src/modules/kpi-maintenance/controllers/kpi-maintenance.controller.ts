@@ -67,7 +67,6 @@ import {
   WorkOrderQueryDto,
   CreateEquipoTipoDto,
   CreateWorkOrderDto,
-  CreateWorkOrderTareaDto,
   UpdateEquipoTipoDto,
   UpdateComponenteDto,
   UpdateFallaCatalogoDto,
@@ -76,7 +75,6 @@ import {
   UpdateProcedimientoPlantillaDto,
   UpdateReporteOperacionDiariaDto,
   UpdateWorkOrderDto,
-  UpdateWorkOrderTareaDto,
   UploadWorkOrderAdjuntoDto,
   WorkOrderAdjuntoQueryDto,
   CreateLocationDto,
@@ -84,6 +82,10 @@ import {
   LocationQueryDto,
   EquipoTipoQueryDto,
 } from '../dto';
+import {
+  CreateWorkOrderTareaDto,
+  UpdateWorkOrderTareaDto,
+} from '../dto/work-order-task.dto';
 import { getSucursalScopeId } from '../../../common/http/sucursal-scope.util';
 
 function getRequestActor(req?: any) {

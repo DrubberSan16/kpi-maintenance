@@ -294,6 +294,8 @@ export class WorkOrderTareaEntity {
   @Column({ type: 'uuid' }) work_order_id: string;
   @Column({ type: 'uuid' }) plan_id: string;
   @Column({ type: 'uuid' }) tarea_id: string;
+  @Column({ type: 'uuid', nullable: true })
+  procedimiento_actividad_id?: string | null;
   @Column({ type: 'boolean', nullable: true }) valor_boolean?: boolean | null;
   @Column('numeric', { precision: 18, scale: 4, nullable: true })
   valor_numeric?: number | null;
@@ -302,6 +304,16 @@ export class WorkOrderTareaEntity {
     string,
     unknown
   > | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) task_meta: Record<
+    string,
+    unknown
+  >;
+  @Column({ type: 'boolean', default: false }) es_adicional: boolean;
+  @Column({ type: 'text', nullable: true }) actividad_adicional?: string | null;
+  @Column({ type: 'integer', nullable: true }) orden_visual?: number | null;
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) responsables: Array<
+    Record<string, unknown>
+  >;
   @Column({ type: 'text', nullable: true }) observacion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;

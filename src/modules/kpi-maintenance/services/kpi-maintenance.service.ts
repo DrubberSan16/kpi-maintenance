@@ -112,7 +112,6 @@ import {
   CreateReporteOperacionDiariaDto,
   ScrapMaterialsDto,
   CreateWorkOrderDto,
-  CreateWorkOrderTareaDto,
   DateRangeDto,
   EquipoCriticidadEnum,
   EquipoQueryDto,
@@ -143,11 +142,15 @@ import {
   UpdateProgramacionMensualDetalleDto,
   UpdateReporteOperacionDiariaDto,
   UpdateWorkOrderDto,
-  UpdateWorkOrderTareaDto,
   UploadWorkOrderAdjuntoDto,
   WorkOrderAdjuntoQueryDto,
   WorkOrderQueryDto,
 } from '../dto';
+import {
+  CreateWorkOrderTareaDto,
+  UpdateWorkOrderTareaDto,
+  WorkOrderTareaResponsableDto,
+} from '../dto/work-order-task.dto';
 
 type AlertLevel = 'INFO' | 'WARNING' | 'CRITICAL';
 type AlertCategory =
@@ -253,6 +256,13 @@ type SecurityUserDirectoryItem = {
   roleNames: string[];
   status: string | null;
   isDeleted: boolean;
+};
+
+type WorkOrderTaskResponsible = {
+  user_id: string;
+  username: string | null;
+  display_name: string;
+  horas: number;
 };
 
 type AlertNotificationRecipient = {
@@ -2400,6 +2410,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (['PLANNED', 'PLANIFICADA', 'PLANIFICADO', 'CREADA', 'CREADO'].includes(raw)) return 'PLANNED';
     if (['IN_PROGRESS', 'IN PROGRESS', 'EN_PROCESO', 'EN PROCESO', 'PROCESSING'].includes(raw)) return 'IN_PROGRESS';
     if (['BLOCKED', 'BLOQUEADA', 'BLOQUEADO', 'ON_HOLD', 'DETENIDA', 'DETENIDO'].includes(raw)) return 'BLOCKED';
+    if (['CANCELLED', 'CANCELED', 'ANULADA', 'ANULADO', 'VOID', 'VOIDED'].includes(raw)) return 'CLOSED';
     if (['CLOSED', 'CERRADA', 'CERRADO', 'DONE', 'COMPLETED'].includes(raw)) return 'CLOSED';
     return raw || 'PLANNED';
   }
@@ -2943,6 +2954,164 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       !item.isDeleted &&
       String(item.status || 'ACTIVE').trim().toUpperCase() === 'ACTIVE'
     );
+  }
+
+  private buildSecurityUserDisplayName(
+    item?: Partial<SecurityUserDirectoryItem> | null,
+  ) {
+    return (
+      this.firstNonEmptyString(
+        item?.nameSurname,
+        item?.nameUser,
+        item?.email,
+        item?.id,
+      ) ?? 'Usuario'
+    );
+  }
+
+  private normalizeWorkOrderTaskResponsibleHours(value: unknown) {
+    const hours = Number(value ?? 0);
+    if (!Number.isFinite(hours) || hours < 0) {
+      throw new BadRequestException(
+        'Las horas registradas por responsable deben ser numéricas y mayores o iguales a cero.',
+      );
+    }
+    return Number(hours.toFixed(4));
+  }
+
+  private mapStoredWorkOrderTaskResponsables(
+    values: unknown,
+    userMap?: Map<string, SecurityUserDirectoryItem>,
+  ) {
+    if (!Array.isArray(values)) return [] as WorkOrderTaskResponsible[];
+    const grouped = new Map<string, WorkOrderTaskResponsible>();
+
+    for (const item of values) {
+      const userId = this.firstNonEmptyString((item as any)?.user_id);
+      if (!userId) continue;
+      const directoryUser = userMap?.get(userId);
+      const previous = grouped.get(userId);
+      const hours = this.normalizeWorkOrderTaskResponsibleHours(
+        (item as any)?.horas,
+      );
+      grouped.set(userId, {
+        user_id: userId,
+        username:
+          this.firstNonEmptyString(directoryUser?.nameUser, previous?.username) ??
+          null,
+        display_name:
+          this.firstNonEmptyString(
+            directoryUser?.nameSurname,
+            (item as any)?.display_name,
+            previous?.display_name,
+            (item as any)?.username,
+            userId,
+          ) ?? userId,
+        horas: Number(
+          (
+            this.normalizeWorkOrderTaskResponsibleHours(previous?.horas) + hours
+          ).toFixed(4),
+        ),
+      });
+    }
+
+    return [...grouped.values()];
+  }
+
+  private async normalizeProcedimientoResponsabilidades(
+    values?: string[] | null,
+  ) {
+    const userIds = this.normalizeStringArray(values);
+    if (!userIds.length) return [];
+
+    const users = await this.fetchSecurityUsers();
+    const activeUsers = users.filter(
+      (item) => this.isActiveSecurityUser(item) && item.id,
+    );
+    if (!activeUsers.length) {
+      throw new BadRequestException(
+        'No se pudo validar los responsables porque el directorio de usuarios no está disponible.',
+      );
+    }
+
+    const activeUserMap = new Map(
+      activeUsers.map((item) => [String(item.id), item]),
+    );
+    const missingIds = userIds.filter((userId) => !activeUserMap.has(userId));
+    if (missingIds.length) {
+      throw new BadRequestException(
+        'Todos los responsables por defecto deben ser usuarios activos registrados en el sistema.',
+      );
+    }
+
+    return userIds;
+  }
+
+  private async buildProcedimientoResponsabilidadesDetalle(
+    values?: string[] | null,
+  ) {
+    const userIds = this.normalizeStringArray(values);
+    if (!userIds.length) return [];
+    const users = await this.fetchSecurityUsers();
+    const userMap = new Map(
+      users
+        .filter((item) => item.id)
+        .map((item) => [String(item.id), item] as const),
+    );
+
+    return userIds.map((userId) => {
+      const user = userMap.get(userId);
+      return {
+        id: userId,
+        nameUser: user?.nameUser ?? null,
+        nameSurname: user?.nameSurname ?? null,
+        label: this.buildSecurityUserDisplayName(user ?? { id: userId }),
+        status: user?.status ?? null,
+        is_deleted: user?.isDeleted ?? false,
+      };
+    });
+  }
+
+  private async normalizeWorkOrderTaskResponsables(
+    values?: WorkOrderTareaResponsableDto[] | WorkOrderTaskResponsible[] | null,
+  ) {
+    if (!Array.isArray(values) || !values.length) return [];
+    const users = await this.fetchSecurityUsers();
+    const activeUsers = users.filter(
+      (item) => this.isActiveSecurityUser(item) && item.id,
+    );
+    if (!activeUsers.length) {
+      throw new BadRequestException(
+        'No se pudo validar los responsables porque el directorio de usuarios no está disponible.',
+      );
+    }
+    const activeUserMap = new Map(
+      activeUsers.map((item) => [String(item.id), item]),
+    );
+    const normalized = values.map((item) => {
+      const userId = this.firstNonEmptyString((item as any)?.user_id);
+      if (!userId) {
+        throw new BadRequestException(
+          'Cada responsable de la tarea debe incluir un usuario válido.',
+        );
+      }
+      const user = activeUserMap.get(userId);
+      if (!user) {
+        throw new BadRequestException(
+          'Todos los responsables de la tarea deben ser usuarios activos registrados en el sistema.',
+        );
+      }
+      return {
+        user_id: userId,
+        username: user.nameUser ?? null,
+        display_name: this.buildSecurityUserDisplayName(user),
+        horas: this.normalizeWorkOrderTaskResponsibleHours(
+          (item as any)?.horas,
+        ),
+      } as WorkOrderTaskResponsible;
+    });
+
+    return this.mapStoredWorkOrderTaskResponsables(normalized, activeUserMap);
   }
 
   private findSecurityUsersByRole(
@@ -3840,7 +4009,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async buildProcedimientoPayload(row: ProcedimientoPlantillaEntity) {
     const planCode = this.buildProcedimientoPlanCode(row);
     const materialIds = this.normalizeMaterialIdArray(row.materiales);
-    const [actividades, plan, materialesCatalogo] = await Promise.all([
+    const [actividades, plan, materialesCatalogo, responsabilidadesDetalle] =
+      await Promise.all([
       this.procedimientoActividadRepo.find({
         where: { procedimiento_id: row.id, is_deleted: false },
         order: { orden: 'ASC', created_at: 'ASC' },
@@ -3853,6 +4023,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             where: { id: In(materialIds) },
           })
         : Promise.resolve([] as ProductoEntity[]),
+      this.buildProcedimientoResponsabilidadesDetalle(row.responsabilidades),
     ]);
 
     const planTareas = plan
@@ -3873,6 +4044,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       plan_codigo: plan?.codigo ?? null,
       plan_nombre: plan?.nombre ?? null,
       plan_tareas: planTareas,
+      responsabilidades_detalle: responsabilidadesDetalle,
       materiales_detalle: materialIds
         .map((materialId) => materialesMap.get(materialId))
         .filter((material): material is ProductoEntity => Boolean(material))
@@ -3888,6 +4060,92 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private trimNullableText(value: unknown) {
     const trimmed = String(value ?? '').trim();
     return trimmed || null;
+  }
+
+  private buildAdditionalWorkOrderTaskDefinition(
+    source: {
+      actividad_adicional?: unknown;
+      field_type?: unknown;
+      required?: unknown;
+      task_meta?: Record<string, unknown> | null;
+    },
+    fallbackActivity?: string | null,
+  ) {
+    const actividad =
+      this.trimNullableText(source.actividad_adicional) ??
+      this.trimNullableText(fallbackActivity) ??
+      null;
+    if (!actividad) {
+      throw new BadRequestException(
+        'Debes indicar el nombre de la tarea adicional.',
+      );
+    }
+    const meta =
+      source.task_meta && typeof source.task_meta === 'object'
+        ? { ...source.task_meta }
+        : {};
+    const fieldType =
+      this.normalizePlanTaskFieldType(source.field_type ?? meta.field_type) ??
+      'BOOLEAN';
+    const required =
+      typeof source.required === 'boolean'
+        ? source.required
+        : Boolean(meta.required ?? false);
+
+    return {
+      actividad,
+      field_type: fieldType,
+      required,
+      task_meta: {
+        ...meta,
+        field_type: fieldType,
+        required,
+        es_adicional: true,
+        actividad,
+      },
+    };
+  }
+
+  private async resolveNextWorkOrderTaskOrder(
+    workOrderId: string,
+    planId?: string | null,
+  ) {
+    const [existingRows, planTasks] = await Promise.all([
+      this.woTareaRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+      }),
+      planId
+        ? this.planTareaRepo.find({
+            where: { plan_id: planId, is_deleted: false },
+          })
+        : Promise.resolve([] as PlanTareaEntity[]),
+    ]);
+
+    const maxOrder = Math.max(
+      0,
+      ...existingRows.map((row) => Number(row.orden_visual ?? 0)),
+      ...planTasks.map((row) => Number(row.orden ?? 0)),
+    );
+    return maxOrder + 1;
+  }
+
+  private buildWorkOrderTaskDisplayLabel(
+    task: Pick<
+      WorkOrderTareaEntity,
+      'tarea_id' | 'actividad_adicional' | 'es_adicional' | 'task_meta'
+    >,
+    definition?: Pick<PlanTareaEntity, 'actividad'> | null,
+  ) {
+    return (
+      this.firstNonEmptyString(
+        task.es_adicional ? task.actividad_adicional : null,
+        definition?.actividad,
+        (task.task_meta as Record<string, unknown> | undefined)?.actividad as
+          | string
+          | undefined,
+        task.tarea_id,
+      ) ?? task.tarea_id
+    );
   }
 
   private normalizeWorkOrderTaskPayload(
@@ -3971,29 +4229,62 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!rows.length) return [];
 
     const definitionIds = [
-      ...new Set(rows.map((row) => row.tarea_id).filter(Boolean)),
+      ...new Set(
+        rows
+          .filter((row) => !row.es_adicional)
+          .map((row) => row.tarea_id)
+          .filter(Boolean),
+      ),
     ] as string[];
-    const definitions = definitionIds.length
-      ? await this.planTareaRepo.find({
-          where: { id: In(definitionIds), is_deleted: false },
-        })
-      : [];
+    const [definitions, users] = await Promise.all([
+      definitionIds.length
+        ? this.planTareaRepo.find({
+            where: { id: In(definitionIds), is_deleted: false },
+          })
+        : Promise.resolve([] as PlanTareaEntity[]),
+      this.fetchSecurityUsers(),
+    ]);
     const definitionMap = new Map(definitions.map((row) => [row.id, row]));
+    const userMap = new Map(
+      users
+        .filter((item) => item.id)
+        .map((item) => [String(item.id), item] as const),
+    );
 
     return [...rows]
       .map((row) => {
         const definition = definitionMap.get(row.tarea_id);
+        const storedMeta =
+          row.task_meta && typeof row.task_meta === 'object' ? row.task_meta : {};
+        const mergedMeta = {
+          ...(definition?.meta ?? {}),
+          ...storedMeta,
+        };
+        const fieldType =
+          this.normalizePlanTaskFieldType(
+            mergedMeta.field_type ?? definition?.field_type,
+          ) ?? 'BOOLEAN';
+        const required =
+          typeof mergedMeta.required === 'boolean'
+            ? mergedMeta.required
+            : Boolean(definition?.required ?? false);
+        const responsables = this.mapStoredWorkOrderTaskResponsables(
+          row.responsables,
+          userMap,
+        );
+
         return {
           ...row,
-          orden: definition?.orden ?? null,
-          actividad: definition?.actividad ?? null,
-          field_type:
-            definition?.field_type ??
-            (definition
-              ? this.normalizePlanTaskFieldType(definition.field_type)
-              : null),
-          required: definition?.required ?? false,
-          task_meta: definition?.meta ?? {},
+          orden: row.orden_visual ?? definition?.orden ?? null,
+          actividad:
+            row.es_adicional
+              ? row.actividad_adicional ??
+                this.firstNonEmptyString(mergedMeta.actividad)
+              : definition?.actividad ?? row.actividad_adicional ?? null,
+          field_type: fieldType,
+          required,
+          task_meta: mergedMeta,
+          responsables,
         };
       })
       .sort((a, b) => {
@@ -8783,6 +9074,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async createProcedimientoPlantilla(dto: CreateProcedimientoPlantillaDto) {
     await this.ensureInventoryWarehouseExists(dto.bodega_id ?? null);
+    const responsabilidades =
+      await this.normalizeProcedimientoResponsabilidades(dto.responsabilidades);
     let resolution = await this.resolveRequestedProcedimientoPlantillaCode(
       dto.codigo,
     );
@@ -8816,7 +9109,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               precauciones: this.normalizeStringArray(dto.precauciones),
               herramientas: this.normalizeStringArray(dto.herramientas),
               materiales: this.normalizeMaterialIdArray(dto.materiales),
-              responsabilidades: this.normalizeStringArray(dto.responsabilidades),
+              responsabilidades,
             }),
           );
 
@@ -8895,6 +9188,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async updateProcedimientoPlantilla(id: string, dto: UpdateProcedimientoPlantillaDto) {
     await this.ensureInventoryWarehouseExists(dto.bodega_id ?? null);
+    const responsabilidades =
+      dto.responsabilidades !== undefined
+        ? await this.normalizeProcedimientoResponsabilidades(dto.responsabilidades)
+        : null;
     await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
 
     await this.dataSource.transaction(async (manager) => {
@@ -8932,9 +9229,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         materiales: dto.materiales
           ? this.normalizeMaterialIdArray(dto.materiales)
           : row.materiales,
-        responsabilidades: dto.responsabilidades
-          ? this.normalizeStringArray(dto.responsabilidades)
-          : row.responsabilidades,
+        responsabilidades:
+          responsabilidades ?? row.responsabilidades,
       });
       await procedimientoRepo.save(row);
 
@@ -13646,43 +13942,126 @@ await this.appendWorkOrderHistory(
       id: workOrderId,
       is_deleted: false,
     });
+    const resolvedPlanId =
+      this.firstNonEmptyString(dto.plan_id, workOrder.plan_id) ?? null;
+    if (!resolvedPlanId) {
+      throw new BadRequestException(
+        'La OT debe estar asociada a un plan operativo para registrar tareas.',
+      );
+    }
     await this.findOneOrFail(this.planRepo, {
-      id: dto.plan_id,
+      id: resolvedPlanId,
       is_deleted: false,
     });
-    const taskDefinition = await this.findOneOrFail(this.planTareaRepo, {
-      id: dto.tarea_id,
-      plan_id: dto.plan_id,
-      is_deleted: false,
-    });
-    if (workOrder.plan_id && workOrder.plan_id !== dto.plan_id) {
+    if (workOrder.plan_id && workOrder.plan_id !== resolvedPlanId) {
       throw new BadRequestException(
         'La tarea seleccionada no pertenece al plan operativo de la OT.',
       );
     }
-
-    const normalized = this.normalizeWorkOrderTaskPayload(taskDefinition, dto);
-    const existing = await this.woTareaRepo.findOne({
-      where: {
-        work_order_id: workOrderId,
-        plan_id: dto.plan_id,
-        tarea_id: dto.tarea_id,
-        is_deleted: false,
-      },
-    });
-    const created = await this.woTareaRepo.save(
-      this.woTareaRepo.create({
-        ...(existing ?? {}),
-        work_order_id: workOrderId,
-        plan_id: dto.plan_id,
-        tarea_id: dto.tarea_id,
-        valor_boolean: normalized.valor_boolean,
-        valor_numeric: normalized.valor_numeric,
-        valor_text: normalized.valor_text,
-        valor_json: normalized.valor_json,
-        observacion: normalized.observacion,
-      }),
+    const normalizedResponsables =
+      dto.responsables !== undefined
+        ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+        : [];
+    const isAdditional = Boolean(
+      dto.es_adicional ||
+        this.trimNullableText(dto.actividad_adicional) ||
+        !this.firstNonEmptyString(dto.tarea_id),
     );
+
+    let existing: WorkOrderTareaEntity | null = null;
+    let saved: WorkOrderTareaEntity;
+    let historyLabel = '';
+
+    if (isAdditional) {
+      const additionalDefinition = this.buildAdditionalWorkOrderTaskDefinition({
+        actividad_adicional: dto.actividad_adicional,
+        field_type: dto.field_type,
+        required: dto.required,
+        task_meta: dto.task_meta ?? null,
+      });
+      const normalized = this.normalizeWorkOrderTaskPayload(
+        additionalDefinition,
+        dto,
+      );
+      const nextOrder = await this.resolveNextWorkOrderTaskOrder(
+        workOrderId,
+        resolvedPlanId,
+      );
+      saved = await this.woTareaRepo.save(
+        this.woTareaRepo.create({
+          work_order_id: workOrderId,
+          plan_id: resolvedPlanId,
+          tarea_id: randomUUID(),
+          procedimiento_actividad_id: null,
+          valor_boolean: normalized.valor_boolean,
+          valor_numeric: normalized.valor_numeric,
+          valor_text: normalized.valor_text,
+          valor_json: normalized.valor_json,
+          task_meta: additionalDefinition.task_meta,
+          es_adicional: true,
+          actividad_adicional: additionalDefinition.actividad,
+          orden_visual: nextOrder,
+          responsables: normalizedResponsables,
+          observacion: normalized.observacion,
+        }),
+      );
+      historyLabel = additionalDefinition.actividad;
+    } else {
+      const tareaId = this.firstNonEmptyString(dto.tarea_id);
+      if (!tareaId) {
+        throw new BadRequestException(
+          'Debes seleccionar una tarea del plan o indicar una tarea adicional.',
+        );
+      }
+      const taskDefinition = await this.findOneOrFail(this.planTareaRepo, {
+        id: tareaId,
+        plan_id: resolvedPlanId,
+        is_deleted: false,
+      });
+      const normalized = this.normalizeWorkOrderTaskPayload(taskDefinition, dto);
+      existing = await this.woTareaRepo.findOne({
+        where: {
+          work_order_id: workOrderId,
+          plan_id: resolvedPlanId,
+          tarea_id: tareaId,
+          is_deleted: false,
+        },
+      });
+      const definitionMeta =
+        (taskDefinition.meta as Record<string, unknown> | undefined) ?? {};
+      saved = await this.woTareaRepo.save(
+        this.woTareaRepo.create({
+          ...(existing ?? {}),
+          work_order_id: workOrderId,
+          plan_id: resolvedPlanId,
+          tarea_id: tareaId,
+          procedimiento_actividad_id:
+            this.firstNonEmptyString(definitionMeta.procedimiento_actividad_id) ??
+            null,
+          valor_boolean: normalized.valor_boolean,
+          valor_numeric: normalized.valor_numeric,
+          valor_text: normalized.valor_text,
+          valor_json: normalized.valor_json,
+          task_meta: {
+            ...definitionMeta,
+            ...((dto.task_meta as Record<string, unknown> | undefined) ?? {}),
+            field_type:
+              this.normalizePlanTaskFieldType(taskDefinition.field_type) ??
+              'BOOLEAN',
+            required: Boolean(taskDefinition.required),
+          },
+          es_adicional: false,
+          actividad_adicional: null,
+          orden_visual: existing?.orden_visual ?? taskDefinition.orden ?? null,
+          responsables:
+            dto.responsables !== undefined
+              ? normalizedResponsables
+              : this.mapStoredWorkOrderTaskResponsables(existing?.responsables),
+          observacion: normalized.observacion,
+        }),
+      );
+      historyLabel = taskDefinition.actividad;
+    }
     this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
@@ -13691,16 +14070,22 @@ await this.appendWorkOrderHistory(
       workOrderId,
       this.normalizeWorkflowStatus(workOrder.status_workflow),
       existing
-        ? `Tarea sincronizada: ${taskDefinition.actividad}`
-        : `Tarea registrada: ${taskDefinition.actividad}`,
+        ? `Tarea sincronizada: ${historyLabel}`
+        : isAdditional
+          ? `Tarea adicional registrada: ${historyLabel}`
+          : `Tarea registrada: ${historyLabel}`,
       {
         fromStatus: workOrder.status_workflow,
         changedBy: this.resolveActorLabel(actor),
       },
     );
     return this.wrap(
-      (await this.enrichWorkOrderTareas([created]))[0] ?? created,
-      existing ? 'Tarea de OT sincronizada' : 'Tarea de OT creada',
+      (await this.enrichWorkOrderTareas([saved]))[0] ?? saved,
+      existing
+        ? 'Tarea de OT sincronizada'
+        : isAdditional
+          ? 'Tarea adicional de OT creada'
+          : 'Tarea de OT creada',
     );
   }
 
@@ -13713,25 +14098,93 @@ await this.appendWorkOrderHistory(
       id,
       is_deleted: false,
     });
-    const definition = await this.findOneOrFail(this.planTareaRepo, {
-      id: tarea.tarea_id,
-      plan_id: tarea.plan_id,
-      is_deleted: false,
-    });
-    const normalized = this.normalizeWorkOrderTaskPayload(definition, dto);
-    Object.assign(tarea, {
-      valor_boolean: normalized.valor_boolean,
-      valor_numeric: normalized.valor_numeric,
-      valor_text: normalized.valor_text,
-      valor_json: normalized.valor_json,
-      observacion: normalized.observacion,
-      status: dto.status ?? tarea.status,
-    });
-    const saved = await this.woTareaRepo.save(tarea);
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: tarea.work_order_id,
       is_deleted: false,
     });
+    let historyLabel = '';
+
+    if (tarea.es_adicional) {
+      const additionalDefinition = this.buildAdditionalWorkOrderTaskDefinition(
+        {
+          actividad_adicional:
+            dto.actividad_adicional ?? tarea.actividad_adicional ?? null,
+          field_type:
+            dto.field_type ??
+            ((tarea.task_meta as Record<string, unknown> | undefined)
+              ?.field_type as string | undefined) ??
+            null,
+          required:
+            dto.required ??
+            ((tarea.task_meta as Record<string, unknown> | undefined)
+              ?.required as boolean | undefined) ??
+            null,
+          task_meta: {
+            ...((tarea.task_meta as Record<string, unknown> | undefined) ?? {}),
+            ...((dto.task_meta as Record<string, unknown> | undefined) ?? {}),
+          },
+        },
+        tarea.actividad_adicional,
+      );
+      const normalized = this.normalizeWorkOrderTaskPayload(
+        additionalDefinition,
+        dto,
+      );
+      Object.assign(tarea, {
+        valor_boolean: normalized.valor_boolean,
+        valor_numeric: normalized.valor_numeric,
+        valor_text: normalized.valor_text,
+        valor_json: normalized.valor_json,
+        task_meta: additionalDefinition.task_meta,
+        actividad_adicional: additionalDefinition.actividad,
+        procedimiento_actividad_id: null,
+        responsables:
+          dto.responsables !== undefined
+            ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+            : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
+        observacion: normalized.observacion,
+        status: dto.status ?? tarea.status,
+      });
+      historyLabel = additionalDefinition.actividad;
+    } else {
+      const definition = await this.findOneOrFail(this.planTareaRepo, {
+        id: tarea.tarea_id,
+        plan_id: tarea.plan_id,
+        is_deleted: false,
+      });
+      const normalized = this.normalizeWorkOrderTaskPayload(definition, dto);
+      const definitionMeta =
+        (definition.meta as Record<string, unknown> | undefined) ?? {};
+      Object.assign(tarea, {
+        valor_boolean: normalized.valor_boolean,
+        valor_numeric: normalized.valor_numeric,
+        valor_text: normalized.valor_text,
+        valor_json: normalized.valor_json,
+        task_meta: {
+          ...definitionMeta,
+          ...((tarea.task_meta as Record<string, unknown> | undefined) ?? {}),
+          ...((dto.task_meta as Record<string, unknown> | undefined) ?? {}),
+          field_type:
+            this.normalizePlanTaskFieldType(definition.field_type) ?? 'BOOLEAN',
+          required: Boolean(definition.required),
+        },
+        es_adicional: false,
+        actividad_adicional: null,
+        orden_visual: tarea.orden_visual ?? definition.orden ?? null,
+        procedimiento_actividad_id:
+          this.firstNonEmptyString(definitionMeta.procedimiento_actividad_id) ??
+          null,
+        responsables:
+          dto.responsables !== undefined
+            ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+            : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
+        observacion: normalized.observacion,
+        status: dto.status ?? tarea.status,
+      });
+      historyLabel = definition.actividad;
+    }
+
+    const saved = await this.woTareaRepo.save(tarea);
     this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
@@ -13739,7 +14192,7 @@ await this.appendWorkOrderHistory(
     await this.appendWorkOrderHistory(
       tarea.work_order_id,
       this.normalizeWorkflowStatus(workOrder.status_workflow),
-      `Tarea actualizada: ${definition.actividad}`,
+      `Tarea actualizada: ${historyLabel}`,
       {
         fromStatus: workOrder.status_workflow,
         changedBy: this.resolveActorLabel(actor),
@@ -13761,12 +14214,24 @@ await this.appendWorkOrderHistory(
     });
     tarea.is_deleted = true;
     await this.woTareaRepo.save(tarea);
+    const definition =
+      !tarea.es_adicional &&
+      tarea.tarea_id &&
+      tarea.plan_id
+        ? await this.planTareaRepo.findOne({
+            where: {
+              id: tarea.tarea_id,
+              plan_id: tarea.plan_id,
+              is_deleted: false,
+            },
+          })
+        : null;
     const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
     this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
     await this.woRepo.save(workOrder);
-    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${tarea.tarea_id}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
+    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${this.buildWorkOrderTaskDisplayLabel(tarea, definition)}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
     return this.wrap(true, 'Tarea de OT eliminada');
   }
 
