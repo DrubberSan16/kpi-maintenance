@@ -244,9 +244,15 @@ export class KpiMaintenanceController {
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @Get('equipos/:id')
+  @Get('equipos/:id([0-9a-fA-F-]{36})')
   getEquipo(@Param('id') id: string, @Req() req: any) {
     return this.service.getEquipo(id, getSucursalScopeId(req));
+  }
+  @ApiTags('Equipos')
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de equipo' })
+  @Get('equipos/next-code')
+  getNextEquipoCode() {
+    return this.service.getNextEquipoCode();
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Crear un equipo' })
@@ -284,6 +290,12 @@ export class KpiMaintenanceController {
   @Get('tipo-equipo')
   listTipoEquipo(@Query() query: EquipoTipoQueryDto) {
     return this.service.listEquipoTipos(query);
+  }
+  @ApiTags('Tipo Equipo')
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de tipo de equipo' })
+  @Get('tipo-equipo/next-code')
+  getNextTipoEquipoCode() {
+    return this.service.getNextEquipoTipoCode();
   }
 
   @ApiTags('Tipo Equipo')
@@ -337,9 +349,15 @@ export class KpiMaintenanceController {
   @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Obtener locación por ID' })
   @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
-  @Get('locaciones/:id')
+  @Get('locaciones/:id([0-9a-fA-F-]{36})')
   getLocacion(@Param('id') id: string, @Req() req: any) {
     return this.service.getLocation(id, getSucursalScopeId(req));
+  }
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de ubicación' })
+  @Get('locaciones/next-code')
+  getNextLocationCode() {
+    return this.service.getNextLocationCode();
   }
 
   @ApiTags('Locaciones')
@@ -478,6 +496,12 @@ export class KpiMaintenanceController {
   @Get('planes')
   listPlanes() {
     return this.service.listPlanes();
+  }
+  @ApiTags('Planes')
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de plan' })
+  @Get('planes/next-code')
+  getNextPlanCode() {
+    return this.service.getNextPlanCode();
   }
   @ApiTags('Planes')
   @ApiOperation({ summary: 'Obtener plan por ID' })
@@ -725,9 +749,15 @@ export class KpiMaintenanceController {
 
   @ApiTags('Componentes')
   @ApiOperation({ summary: 'Obtener componente por ID' })
-  @Get('componentes/:id')
+  @Get('componentes/:id([0-9a-fA-F-]{36})')
   getComponente(@Param('id') id: string) {
     return this.service.getComponente(id);
+  }
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de componente' })
+  @Get('componentes/next-code')
+  getNextComponenteCode() {
+    return this.service.getNextComponenteCode();
   }
 
   @ApiTags('Componentes')

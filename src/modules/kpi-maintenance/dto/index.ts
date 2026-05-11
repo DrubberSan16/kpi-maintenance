@@ -145,9 +145,9 @@ export class CreateEquipoComponenteInlineDto {
 }
 
 export class CreateEquipoDto {
-  @ApiProperty({ description: 'Código único del equipo' })
+  @ApiPropertyOptional({ description: 'Código único del equipo. Si no se envía, el sistema lo genera automáticamente.' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   codigo?: string;
   @ApiProperty({ description: 'Nombre del equipo' })
   @IsString()
@@ -211,9 +211,9 @@ export class CreateEquipoDto {
 export class UpdateEquipoDto extends CreateEquipoDto {}
 
 export class CreateEquipoTipoDto {
-  @ApiProperty({ description: 'Código único del Tipo de Equipo' })
+  @ApiPropertyOptional({ description: 'Código único del Tipo de Equipo. Si no se envía, el sistema lo genera automáticamente.' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   codigo?: string;
   @ApiProperty({ description: 'Nombre del Tipo de Equipo' })
   @IsString()
@@ -301,9 +301,9 @@ export class LocationQueryDto {
 }
 
 export class CreateLocationDto {
-  @ApiProperty({ description: 'Código único de la ubicación' })
+  @ApiPropertyOptional({ description: 'Código único de la ubicación. Si no se envía, el sistema lo genera automáticamente.' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   codigo?: string;
   @ApiProperty({ description: 'Nombre de la ubicación' })
   @IsString()

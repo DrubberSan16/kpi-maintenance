@@ -2858,6 +2858,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return (letter.charCodeAt(0) - 64) * 100000 + number;
   }
 
+  private async generateNextRepositoryAlphaNumericCode<
+    T extends { codigo?: string | null; id?: string | null },
+  >(repo: Repository<T>, prefix: string) {
+    const rows = await repo.find({
+      select: { codigo: true, id: true } as any,
+    });
+    const codes = rows
+      .map((row) => String(row.codigo || '').trim())
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          this.getAlphaNumericCodeRank(prefix, b) -
+          this.getAlphaNumericCodeRank(prefix, a),
+      );
+    return this.computeNextAlphaNumericCode(prefix, codes[0] ?? null);
+  }
+
   private async generateNextWorkOrderCode() {
     const rows = await this.woRepo.find({
       select: { code: true, id: true },
@@ -2925,8 +2942,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         (a, b) =>
           this.getAlphaNumericCodeRank('PCS', b) -
           this.getAlphaNumericCodeRank('PCS', a),
-      );
+    );
     return this.computeNextAlphaNumericCode('PCS', codes[0] ?? null);
+  }
+
+  private async generateNextEquipoCode() {
+    return this.generateNextRepositoryAlphaNumericCode(this.equipoRepo, 'EQ');
+  }
+
+  private async generateNextEquipoTipoCode() {
+    return this.generateNextRepositoryAlphaNumericCode(
+      this.equipoTipoRepo,
+      'TEQ',
+    );
+  }
+
+  private async generateNextLocationCode() {
+    return this.generateNextRepositoryAlphaNumericCode(
+      this.locationRepo,
+      'UBI',
+    );
+  }
+
+  private async generateNextPlanCode() {
+    return this.generateNextRepositoryAlphaNumericCode(this.planRepo, 'PLN');
+  }
+
+  private async generateNextComponenteCode() {
+    return this.generateNextRepositoryAlphaNumericCode(
+      this.equipoComponenteRepo,
+      'CPE',
+    );
   }
 
   async getNextWorkOrderCode() {
@@ -2944,6 +2990,41 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(
       { code: await this.generateNextAnalisisLubricanteCode() },
       'Siguiente código de análisis de lubricante generado',
+    );
+  }
+
+  async getNextEquipoCode() {
+    return this.wrap(
+      { code: await this.generateNextEquipoCode() },
+      'Siguiente cÃ³digo de equipo generado',
+    );
+  }
+
+  async getNextEquipoTipoCode() {
+    return this.wrap(
+      { code: await this.generateNextEquipoTipoCode() },
+      'Siguiente cÃ³digo de tipo de equipo generado',
+    );
+  }
+
+  async getNextLocationCode() {
+    return this.wrap(
+      { code: await this.generateNextLocationCode() },
+      'Siguiente cÃ³digo de ubicaciÃ³n generado',
+    );
+  }
+
+  async getNextPlanCode() {
+    return this.wrap(
+      { code: await this.generateNextPlanCode() },
+      'Siguiente cÃ³digo de plan generado',
+    );
+  }
+
+  async getNextComponenteCode() {
+    return this.wrap(
+      { code: await this.generateNextComponenteCode() },
+      'Siguiente cÃ³digo de componente generado',
     );
   }
 
@@ -3054,6 +3135,46 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       reassignmentReason: existing.is_deleted
         ? 'El código solicitado existía en un análisis eliminado lógicamente.'
         : 'El código solicitado ya estaba en uso.',
+    };
+  }
+
+  private async resolveRequestedCatalogCode<
+    T extends { codigo?: string | null; is_deleted?: boolean | null },
+  >(
+    repo: Repository<T>,
+    requestedCode: string | null | undefined,
+    generateNextCode: () => Promise<string>,
+    deletedMessage: string,
+  ): Promise<CodeResolution> {
+    const candidate = String(requestedCode || '').trim();
+    if (!candidate) {
+      const generatedCode = await generateNextCode();
+      return {
+        requestedCode: null,
+        resolvedCode: generatedCode,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const existing = await repo.findOne({
+      where: { codigo: candidate } as any,
+    });
+    if (!existing) {
+      return {
+        requestedCode: candidate,
+        resolvedCode: candidate,
+        codeWasReassigned: false,
+        reassignmentReason: null,
+      };
+    }
+    const generatedCode = await generateNextCode();
+    return {
+      requestedCode: candidate,
+      resolvedCode: generatedCode,
+      codeWasReassigned: generatedCode !== candidate,
+      reassignmentReason: existing.is_deleted
+        ? deletedMessage
+        : 'El cÃ³digo solicitado ya estaba en uso.',
     };
   }
 
@@ -8391,23 +8512,63 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const modelo = String(dto.modelo ?? '').trim() || null;
     const codigo_lubricante =
       String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null;
-    const saved = await this.equipoRepo.save(
-      this.equipoRepo.create({
-        ...equipoPayload,
-        criticidad,
-        estado_operativo,
-        nombre_real,
-        modelo,
-        codigo_lubricante,
-        horometro_actual: dto.horometro_actual ?? 0,
-      }),
+    let resolution = await this.resolveRequestedCatalogCode(
+      this.equipoRepo,
+      dto.codigo,
+      () => this.generateNextEquipoCode(),
+      'El cÃ³digo solicitado existÃ­a en un equipo eliminado lÃ³gicamente.',
     );
+    let saved: EquipoEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        saved = await this.equipoRepo.save(
+          this.equipoRepo.create({
+            ...equipoPayload,
+            codigo: resolution.resolvedCode,
+            criticidad,
+            estado_operativo,
+            nombre_real,
+            modelo,
+            codigo_lubricante,
+            horometro_actual: dto.horometro_actual ?? 0,
+          }),
+        );
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextEquipoCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!saved) {
+      throw new ConflictException(
+        'No se pudo generar un cÃ³digo Ãºnico para el equipo.',
+      );
+    }
     if (Array.isArray(dto.componentes)) {
       await this.syncEquipmentComponents(saved.id, dto.componentes);
     } else {
       await this.ensureDefaultEquipmentComponents(saved);
     }
-    return this.wrap(saved, 'Equipo creado');
+    return this.wrap(
+      {
+        ...saved,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
+      'Equipo creado',
+    );
   }
   async updateEquipo(id: string, dto: UpdateEquipoDto) {
     const e = await this.findEquipoOrFail(id);
@@ -8426,6 +8587,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.nombre_real !== undefined
           ? String(dto.nombre_real ?? '').trim() || null
           : e.nombre_real,
+      codigo:
+        dto.codigo !== undefined
+          ? String(dto.codigo ?? '').trim() || e.codigo
+          : e.codigo,
       modelo:
         dto.modelo !== undefined ? String(dto.modelo ?? '').trim() || null : e.modelo,
       codigo_lubricante:
@@ -8466,11 +8631,52 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
   async createEquipoTipo(dto: CreateEquipoTipoDto) {
+    let resolution = await this.resolveRequestedCatalogCode(
+      this.equipoTipoRepo,
+      dto.codigo,
+      () => this.generateNextEquipoTipoCode(),
+      'El cÃ³digo solicitado existÃ­a en un tipo de equipo eliminado lÃ³gicamente.',
+    );
+    let saved: EquipoTipoEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        saved = await this.equipoTipoRepo.manager.save(
+          EquipoTipoEntity,
+          this.equipoTipoRepo.manager.create(EquipoTipoEntity, {
+            ...dto,
+            codigo: resolution.resolvedCode,
+          }),
+        );
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextEquipoTipoCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!saved) {
+      throw new ConflictException(
+        'No se pudo generar un cÃ³digo Ãºnico para el tipo de equipo.',
+      );
+    }
+
     return this.wrap(
-      await this.equipoTipoRepo.manager.save(
-        EquipoTipoEntity,
-        this.equipoTipoRepo.manager.create(EquipoTipoEntity, dto),
-      ),
+      {
+        ...saved,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
       'Tipo de equipo creado',
     );
   }
@@ -8482,7 +8688,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         is_deleted: false,
       },
     );
-    Object.assign(t, dto);
+    Object.assign(t, {
+      ...dto,
+      codigo:
+        dto.codigo !== undefined
+          ? String(dto.codigo ?? '').trim() || t.codigo
+          : t.codigo,
+    });
     return this.wrap(
       await this.equipoTipoRepo.manager.save(EquipoTipoEntity, t),
       'Tipo de equipo actualizado',
@@ -8549,11 +8761,52 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: dto.sucursal_id,
       is_deleted: false,
     } as any);
+    let resolution = await this.resolveRequestedCatalogCode(
+      this.locationRepo,
+      dto.codigo,
+      () => this.generateNextLocationCode(),
+      'El cÃ³digo solicitado existÃ­a en una ubicaciÃ³n eliminada lÃ³gicamente.',
+    );
+    let saved: LocationEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        saved = await this.locationRepo.manager.save(
+          LocationEntity,
+          this.locationRepo.manager.create(LocationEntity, {
+            ...dto,
+            codigo: resolution.resolvedCode,
+          }),
+        );
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextLocationCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!saved) {
+      throw new ConflictException(
+        'No se pudo generar un cÃ³digo Ãºnico para la ubicaciÃ³n.',
+      );
+    }
+
     return this.wrap(
-      await this.locationRepo.manager.save(
-        LocationEntity,
-        this.locationRepo.manager.create(LocationEntity, dto),
-      ),
+      {
+        ...saved,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
       'Location creada',
     );
   }
@@ -8570,7 +8823,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: dto.sucursal_id,
       is_deleted: false,
     } as any);
-    Object.assign(l, dto);
+    Object.assign(l, {
+      ...dto,
+      codigo:
+        dto.codigo !== undefined
+          ? String(dto.codigo ?? '').trim() || l.codigo
+          : l.codigo,
+    });
     return this.wrap(
       await this.locationRepo.manager.save(LocationEntity, l),
       'Location actualizada',
@@ -8731,8 +8990,51 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createPlan(dto: CreatePlanDto) {
+    let resolution = await this.resolveRequestedCatalogCode(
+      this.planRepo,
+      dto.codigo,
+      () => this.generateNextPlanCode(),
+      'El cÃ³digo solicitado existÃ­a en un plan eliminado lÃ³gicamente.',
+    );
+    let saved: PlanMantenimientoEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        saved = await this.planRepo.save(
+          this.planRepo.create({
+            ...dto,
+            codigo: resolution.resolvedCode,
+          }),
+        );
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextPlanCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!saved) {
+      throw new ConflictException(
+        'No se pudo generar un cÃ³digo Ãºnico para el plan.',
+      );
+    }
+
     return this.wrap(
-      await this.planRepo.save(this.planRepo.create(dto)),
+      {
+        ...saved,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
       'Plan creado',
     );
   }
@@ -8753,7 +9055,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
-    Object.assign(p, dto);
+    Object.assign(p, {
+      ...dto,
+      codigo:
+        dto.codigo !== undefined
+          ? String(dto.codigo ?? '').trim() || p.codigo
+          : p.codigo,
+    });
     return this.wrap(await this.planRepo.save(p), 'Plan actualizado');
   }
   async deletePlan(id: string) {
@@ -9213,6 +9521,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }));
   }
 
+  private async assignMissingComponentDraftCodes(
+    drafts: Array<{
+      codigo?: string | null;
+    }>,
+  ) {
+    const usedCodes = new Set(
+      drafts
+        .map((draft) => String(draft.codigo || '').trim().toUpperCase())
+        .filter(Boolean),
+    );
+    let nextCodeSeed: string | null = null;
+
+    for (const draft of drafts) {
+      if (String(draft.codigo || '').trim()) continue;
+      do {
+        nextCodeSeed = nextCodeSeed
+          ? this.computeNextAlphaNumericCode('CPE', nextCodeSeed)
+          : await this.generateNextComponenteCode();
+      } while (usedCodes.has(String(nextCodeSeed || '').trim().toUpperCase()));
+
+      draft.codigo = nextCodeSeed;
+      usedCodes.add(String(nextCodeSeed || '').trim().toUpperCase());
+    }
+  }
+
   private normalizeEquipmentComponentCategory(value: unknown) {
     const normalized = String(value ?? '').trim().toUpperCase();
     return normalized || null;
@@ -9223,6 +9556,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     components?: Array<Record<string, any>>,
   ) {
     const drafts = this.buildEquipmentComponentDrafts(components);
+    await this.assignMissingComponentDraftCodes(drafts);
     const existing = await this.equipoComponenteRepo.find({
       where: { equipo_id: equipoId, is_deleted: false },
       order: { orden: 'ASC' },
@@ -9290,18 +9624,57 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: dto.parent_id,
         is_deleted: false,
       });
-    const payload = {
-      ...dto,
-      nombre: String(dto.nombre || '').trim(),
-      nombre_oficial: String(dto.nombre_oficial || '').trim() || null,
-      categoria: this.normalizeEquipmentComponentCategory(dto.categoria),
-      orden: Number(dto.orden ?? 1) || 1,
-      descripcion: String(dto.descripcion || '').trim() || null,
-    };
+    let resolution = await this.resolveRequestedCatalogCode(
+      this.equipoComponenteRepo,
+      dto.codigo,
+      () => this.generateNextComponenteCode(),
+      'El cÃ³digo solicitado existÃ­a en un componente eliminado lÃ³gicamente.',
+    );
+    let saved: EquipoComponenteEntity | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const payload = {
+          ...dto,
+          codigo: resolution.resolvedCode,
+          nombre: String(dto.nombre || '').trim(),
+          nombre_oficial: String(dto.nombre_oficial || '').trim() || null,
+          categoria: this.normalizeEquipmentComponentCategory(dto.categoria),
+          orden: Number(dto.orden ?? 1) || 1,
+          descripcion: String(dto.descripcion || '').trim() || null,
+        };
+        saved = await this.equipoComponenteRepo.save(
+          this.equipoComponenteRepo.create(payload),
+        );
+        break;
+      } catch (error: any) {
+        if (!this.isDuplicateCodigoError(error) || attempt >= 2) {
+          throw error;
+        }
+        resolution = {
+          requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
+          resolvedCode: await this.generateNextComponenteCode(),
+          codeWasReassigned: true,
+          reassignmentReason:
+            resolution.reassignmentReason ||
+            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+        };
+      }
+    }
+
+    if (!saved) {
+      throw new ConflictException(
+        'No se pudo generar un cÃ³digo Ãºnico para el componente.',
+      );
+    }
+
     return this.wrap(
-      await this.equipoComponenteRepo.save(
-        this.equipoComponenteRepo.create(payload),
-      ),
+      {
+        ...saved,
+        requested_code: resolution.requestedCode,
+        code_was_reassigned: resolution.codeWasReassigned,
+        code_reassignment_reason: resolution.reassignmentReason,
+      },
       'Componente creado',
     );
   }
@@ -9312,6 +9685,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     Object.assign(item, {
       ...dto,
+      codigo:
+        dto.codigo !== undefined
+          ? String(dto.codigo ?? '').trim() || item.codigo
+          : item.codigo,
       nombre: dto.nombre !== undefined ? String(dto.nombre || '').trim() : item.nombre,
       nombre_oficial:
         dto.nombre_oficial !== undefined
