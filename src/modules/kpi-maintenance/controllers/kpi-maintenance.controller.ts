@@ -242,16 +242,22 @@ export class KpiMaintenanceController {
     return this.service.listEquipos(query, getSucursalScopeId(req));
   }
   @ApiTags('Equipos')
+  @ApiOperation({ summary: 'Obtener siguiente cÃ³digo autogenerado de equipo' })
+  @Get('equipos/next-code')
+  getNextEquipoCode() {
+    return this.service.getNextEquipoCode();
+  }
+  @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
-  @Get('equipos/:id([0-9a-fA-F-]{36})')
+  @Get('equipos/:id')
   getEquipo(@Param('id') id: string, @Req() req: any) {
     return this.service.getEquipo(id, getSucursalScopeId(req));
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener siguiente código autogenerado de equipo' })
-  @Get('equipos/next-code')
-  getNextEquipoCode() {
+  @Get('equipos/next-code-legacy')
+  getNextEquipoCodeLegacy() {
     return this.service.getNextEquipoCode();
   }
   @ApiTags('Equipos')
@@ -349,14 +355,20 @@ export class KpiMaintenanceController {
   @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Obtener locación por ID' })
   @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
-  @Get('locaciones/:id([0-9a-fA-F-]{36})')
+  @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Obtener siguiente cÃ³digo autogenerado de ubicaciÃ³n' })
+  @Get('locaciones/code/next')
+  getNextLocationCode() {
+    return this.service.getNextLocationCode();
+  }
+  @Get('locaciones/:id')
   getLocacion(@Param('id') id: string, @Req() req: any) {
     return this.service.getLocation(id, getSucursalScopeId(req));
   }
   @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Obtener siguiente código autogenerado de ubicación' })
-  @Get('locaciones/next-code')
-  getNextLocationCode() {
+  @Get('locaciones/next-code-legacy')
+  getNextLocationCodeLegacy() {
     return this.service.getNextLocationCode();
   }
 
@@ -749,14 +761,20 @@ export class KpiMaintenanceController {
 
   @ApiTags('Componentes')
   @ApiOperation({ summary: 'Obtener componente por ID' })
-  @Get('componentes/:id([0-9a-fA-F-]{36})')
+  @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Obtener siguiente cÃ³digo autogenerado de componente' })
+  @Get('componentes/code/next')
+  getNextComponenteCode() {
+    return this.service.getNextComponenteCode();
+  }
+  @Get('componentes/:id')
   getComponente(@Param('id') id: string) {
     return this.service.getComponente(id);
   }
   @ApiTags('Componentes')
   @ApiOperation({ summary: 'Obtener siguiente código autogenerado de componente' })
-  @Get('componentes/next-code')
-  getNextComponenteCode() {
+  @Get('componentes/next-code-legacy')
+  getNextComponenteCodeLegacy() {
     return this.service.getNextComponenteCode();
   }
 
