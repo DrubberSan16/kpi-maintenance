@@ -754,6 +754,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private recalculationInterval: NodeJS.Timeout | null = null;
   private recalculationRunning = false;
   private inventoryImportSuppressed = false;
+  private readonly CLOSED_WORK_ORDER_RAW_STATUSES = [
+    'CANCELLED',
+    'CANCELED',
+    'ANULADA',
+    'ANULADO',
+    'VOID',
+    'VOIDED',
+    'CLOSED',
+    'CERRADA',
+    'CERRADO',
+    'DONE',
+    'COMPLETED',
+  ];
 
   private readonly RECALCULATION_INTERVAL_MS = 60 * 1000;
   private readonly RECALCULATION_BATCH_SIZE = 100;
@@ -2465,6 +2478,116 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (['CANCELLED', 'CANCELED', 'ANULADA', 'ANULADO', 'VOID', 'VOIDED'].includes(raw)) return 'CLOSED';
     if (['CLOSED', 'CERRADA', 'CERRADO', 'DONE', 'COMPLETED'].includes(raw)) return 'CLOSED';
     return raw || 'PLANNED';
+  }
+
+  private isWorkOrderReservationActive(status: unknown) {
+    return this.normalizeWorkflowStatus(status) !== 'CLOSED';
+  }
+
+  private assertWorkOrderAllowsMaterialIssue(workOrder: WorkOrderEntity) {
+    if (this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS') {
+      throw new BadRequestException(
+        'Solo se puede registrar salida real de materiales cuando la orden de trabajo está en proceso.',
+      );
+    }
+  }
+
+  private async getActiveReservedQuantity(
+    productoId: string,
+    bodegaId: string,
+    manager?: EntityManager,
+  ) {
+    const reservaRepo =
+      manager?.getRepository(ReservaStockEntity) ?? this.reservaRepo;
+    const raw = await reservaRepo
+      .createQueryBuilder('reserva')
+      .select('COALESCE(SUM(COALESCE(reserva.cantidad, 0)), 0)', 'total')
+      .innerJoin(
+        WorkOrderEntity,
+        'work_order',
+        'work_order.id = reserva.work_order_id AND work_order.is_deleted = false',
+      )
+      .where('reserva.is_deleted = false')
+      .andWhere("UPPER(TRIM(COALESCE(reserva.estado, ''))) = 'RESERVADO'")
+      .andWhere('reserva.producto_id = :productoId', { productoId })
+      .andWhere('reserva.bodega_id = :bodegaId', { bodegaId })
+      .andWhere(
+        'UPPER(TRIM(COALESCE(work_order.status_workflow, :defaultStatus))) NOT IN (:...closedStatuses)',
+        {
+          defaultStatus: 'PLANNED',
+          closedStatuses: this.CLOSED_WORK_ORDER_RAW_STATUSES,
+        },
+      )
+      .getRawOne<{ total?: string | number | null }>();
+
+    return this.toNumeric(raw?.total, 0);
+  }
+
+  private async assertReservableStockAvailable(
+    productoId: string,
+    bodegaId: string,
+    requestedQuantity: number,
+    manager?: EntityManager,
+  ) {
+    const normalizedRequested = this.toNumeric(requestedQuantity, 0);
+    if (!(normalizedRequested > 0)) {
+      throw new BadRequestException(
+        'La cantidad a reservar debe ser mayor a cero.',
+      );
+    }
+
+    const { producto, bodega, stock } = await this.validateProductoEnBodega(
+      productoId,
+      bodegaId,
+      manager,
+    );
+    const stockActual = this.toNumeric(stock.stock_actual, 0);
+    const reservedQty = await this.getActiveReservedQuantity(
+      productoId,
+      bodegaId,
+      manager,
+    );
+    const availableQty = Math.max(stockActual - reservedQty, 0);
+
+    if (normalizedRequested > availableQty) {
+      throw new ConflictException(
+        `Stock disponible insuficiente en ${this.buildBodegaLabel(bodega) || bodega.id} para ${producto.nombre || producto.id}. Disponible ${availableQty.toFixed(
+          2,
+        )}, reservado activo ${reservedQty.toFixed(2)}, solicitado ${normalizedRequested.toFixed(2)}.`,
+      );
+    }
+
+    return {
+      producto,
+      bodega,
+      stock,
+      stockActual,
+      reservedQty,
+      availableQty,
+    };
+  }
+
+  private async releaseOpenReservationsForWorkOrder(
+    workOrderId: string,
+    manager?: EntityManager,
+  ) {
+    const reservaRepo =
+      manager?.getRepository(ReservaStockEntity) ?? this.reservaRepo;
+    const reservas = await reservaRepo
+      .createQueryBuilder('reserva')
+      .where('reserva.work_order_id = :workOrderId', { workOrderId })
+      .andWhere('reserva.is_deleted = false')
+      .andWhere("UPPER(TRIM(COALESCE(reserva.estado, ''))) = 'RESERVADO'")
+      .getMany();
+
+    if (!reservas.length) return 0;
+
+    for (const reserva of reservas) {
+      reserva.cantidad = 0;
+      reserva.estado = 'LIBERADO';
+    }
+    await reservaRepo.save(reservas);
+    return reservas.length;
   }
 
   private incrementWorkOrderPrefix(letter: string) {
@@ -13838,6 +13961,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.bodega_id,
       manager,
     );
+    await this.assertReservableStockAvailable(
+      dto.producto_id,
+      dto.bodega_id,
+      dto.cantidad,
+      manager,
+    );
     const costReference = await this.resolveInventoryCostReference(
       dto.producto_id,
       dto.bodega_id,
@@ -13877,6 +14006,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder: WorkOrderEntity,
     dto: IssueMaterialsDto,
   ) {
+    this.assertWorkOrderAllowsMaterialIssue(workOrder);
     const entregaRepo = manager.getRepository(EntregaMaterialEntity);
     const movimientoRepo = manager.getRepository(MovimientoInventarioEntity);
     const entregaDetRepo = manager.getRepository(EntregaMaterialDetEntity);
@@ -14528,6 +14658,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
+        if (
+          this.normalizeWorkflowStatus(headerResult.workOrder.status_workflow) ===
+          'CLOSED'
+        ) {
+          await this.releaseOpenReservationsForWorkOrder(
+            headerResult.workOrder.id,
+            manager,
+          );
+        }
+
         return headerResult;
       });
     } catch (error) {
@@ -14910,6 +15050,7 @@ await this.appendWorkOrderHistory(
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
     const saved = await this.woRepo.save(wo);
     if (this.normalizeWorkflowStatus(saved.status_workflow) === 'CLOSED') {
+      await this.releaseOpenReservationsForWorkOrder(saved.id);
       await this.releaseBlockedWorkOrdersFor(saved);
       await this.syncProgramacionExecutionFromLinkedWorkOrder(saved);
     }
@@ -14968,6 +15109,7 @@ await this.appendWorkOrderHistory(
       action: 'ANULADA',
     });
     await this.woRepo.save(wo);
+    await this.releaseOpenReservationsForWorkOrder(wo.id);
     await this.detachProgramacionesFromWorkOrder(wo.id);
     await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow, changedBy: this.resolveActorLabel(actor) });
     await this.writeSecurityLog({
@@ -15580,6 +15722,11 @@ await this.appendWorkOrderHistory(
       const equipment = workOrder?.equipment_id
         ? equipmentMap.get(workOrder.equipment_id)
         : null;
+      const reservationActive =
+        String(row.estado || 'RESERVADO').trim().toUpperCase() === 'RESERVADO' &&
+        workOrder
+          ? this.isWorkOrderReservationActive(workOrder.status_workflow)
+          : false;
       const workOrderLabel = workOrder
         ? [workOrder.code, workOrder.title].filter(Boolean).join(' - ')
         : `OT ${row.work_order_id}`;
@@ -15596,6 +15743,7 @@ await this.appendWorkOrderHistory(
         work_order_status: workOrder
           ? this.normalizeWorkflowStatus(workOrder.status_workflow)
           : null,
+        reserva_activa: reservationActive,
         work_order_label: workOrderLabel,
         equipment_id: workOrder?.equipment_id ?? null,
         equipment_code: equipment?.codigo ?? null,
@@ -15610,7 +15758,12 @@ await this.appendWorkOrderHistory(
       (acc, item) => acc + this.toNumeric(item.cantidad, 0),
       0,
     );
-    const activeCount = items.filter((item) => item.estado === 'RESERVADO').length;
+    const activeCount = items.filter((item) => item.reserva_activa).length;
+    const activeQuantity = items.reduce(
+      (acc, item) =>
+        acc + (item.reserva_activa ? this.toNumeric(item.cantidad, 0) : 0),
+      0,
+    );
 
     return this.wrap(
       {
@@ -15625,6 +15778,7 @@ await this.appendWorkOrderHistory(
         total_reservas: items.length,
         reservas_activas: activeCount,
         total_cantidad: totalCantidad,
+        total_cantidad_activa: activeQuantity,
         items,
       },
       'Reservas de material listadas',
@@ -15654,6 +15808,11 @@ await this.appendWorkOrderHistory(
     }
 
     const { producto, bodega } = await this.validateProductoEnBodega(dto.producto_id, dto.bodega_id);
+    await this.assertReservableStockAvailable(
+      dto.producto_id,
+      dto.bodega_id,
+      dto.cantidad,
+    );
     const costReference = await this.resolveInventoryCostReference(dto.producto_id, dto.bodega_id);
     const costoUnitario = this.toNumeric(dto.costo_unitario, costReference.costo_unitario);
     const subtotal = dto.cantidad * costoUnitario;
@@ -15758,6 +15917,7 @@ await this.appendWorkOrderHistory(
         id: workOrderId,
         is_deleted: false,
       });
+      this.assertWorkOrderAllowsMaterialIssue(workOrder);
       const em = await qr.manager.save(
         EntregaMaterialEntity,
         qr.manager.create(EntregaMaterialEntity, {
