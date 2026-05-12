@@ -3416,6 +3416,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  private isUuidLike(value: unknown) {
+    const normalized = String(value ?? '').trim();
+    if (!normalized) return false;
+    return (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        normalized,
+      ) || /^[0-9a-f]{32}$/i.test(normalized)
+    );
+  }
+
+  private firstNonOpaqueUserLabel(...values: unknown[]) {
+    for (const value of values) {
+      const normalized = this.firstNonEmptyString(value);
+      if (!normalized) continue;
+      if (this.isUuidLike(normalized)) continue;
+      return normalized;
+    }
+    return null;
+  }
+
   private normalizeEmail(value: unknown) {
     const normalized = String(value ?? '').trim().toLowerCase();
     if (!normalized) return null;
@@ -3582,12 +3602,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     item?: Partial<SecurityUserDirectoryItem> | null,
   ) {
     return (
-      this.firstNonEmptyString(
+      this.firstNonOpaqueUserLabel(
         item?.nameSurname,
         item?.nameUser,
         item?.email,
         item?.id,
-      ) ?? 'Usuario'
+      ) ?? 'Usuario asignado'
     );
   }
 
@@ -3619,16 +3639,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       grouped.set(userId, {
         user_id: userId,
         username:
-          this.firstNonEmptyString(directoryUser?.nameUser, previous?.username) ??
-          null,
+          this.firstNonOpaqueUserLabel(
+            directoryUser?.nameUser,
+            (item as any)?.username,
+            previous?.username,
+          ) ?? null,
         display_name:
-          this.firstNonEmptyString(
+          this.firstNonOpaqueUserLabel(
             directoryUser?.nameSurname,
+            directoryUser?.nameUser,
             (item as any)?.display_name,
             previous?.display_name,
             (item as any)?.username,
-            userId,
-          ) ?? userId,
+            previous?.username,
+          ) ?? 'Usuario asignado',
         horas: Number(
           (
             this.normalizeWorkOrderTaskResponsibleHours(previous?.horas) + hours
@@ -13920,12 +13944,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             responsable?.username,
           ) ?? 'SIN_USUARIO';
         const userLabel =
-          this.firstNonEmptyString(
+          this.firstNonOpaqueUserLabel(
             responsable?.display_name,
             responsable?.nameSurname,
             responsable?.username,
-            userId,
-          ) ?? userId;
+          ) ?? 'Usuario asignado';
         const summary = hoursOtMap.get(context.work_order_id);
         if (!summary) continue;
         const currentResponsible = summary._responsables.get(userId) ?? {
@@ -13949,19 +13972,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const hoursOtRows = sortRowsByDateDesc(
       [...hoursOtMap.values()].map((row) => {
-        const responsablesDetalle = [
+        const responsablesMeta = [
           ...(
             row._responsables as Map<string, { label: string; horas: number }>
-          ).values(),
+          ).entries(),
         ]
-          .sort((a, b) => b.horas - a.horas)
-          .map((item) => `${item.label} (${item.horas.toFixed(2)} h)`);
+          .sort((left, right) => right[1].horas - left[1].horas)
+          .map(([userId, item]) => ({
+            user_id: userId,
+            display_name:
+              this.firstNonOpaqueUserLabel(item.label) ?? 'Usuario asignado',
+            horas: Number(this.toNumeric(item.horas, 0).toFixed(4)),
+          }));
+        const responsablesDetalle = responsablesMeta.map(
+          (item) => `${item.display_name} (${item.horas.toFixed(2)} h)`,
+        );
         return {
           ...row,
           total_horas: Number(this.toNumeric(row.total_horas, 0).toFixed(4)),
           total_responsables: (
             row._responsables as Map<string, { label: string; horas: number }>
           ).size,
+          responsables_meta: responsablesMeta,
           responsables: responsablesDetalle.join(' | ') || 'Sin horas registradas',
         };
       }),
@@ -14104,6 +14136,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           bodega_label: row.bodega_label,
           total_horas: row.total_horas,
           total_responsables: row.total_responsables,
+          responsables_meta: row.responsables_meta,
           responsables: row.responsables,
         })),
     );
