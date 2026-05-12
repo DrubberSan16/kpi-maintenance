@@ -2052,3 +2052,34 @@ export class IntelligencePeriodQueryDto {
   @Max(12)
   month?: number;
 }
+export class SystemReportsQueryDto {
+  @ApiPropertyOptional({
+    description: 'Fecha inicial del rango de consulta (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  from?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fecha final del rango de consulta (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  to?: string;
+
+  @ApiPropertyOptional({
+    description: 'Bodega a filtrar',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  bodega_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'AgrupaciÃ³n sugerida del reporte: OT, BODEGA, EQUIPO, RESPONSABLE, MATERIAL o MES',
+  })
+  @IsOptional()
+  @IsString()
+  group_by?: string;
+}

@@ -51,6 +51,7 @@ import {
   IssueMaterialsDto,
   EventoProcesoQueryDto,
   IntelligencePeriodQueryDto,
+  SystemReportsQueryDto,
   ImportAnalisisLubricanteBatchDto,
   ProgramacionMensualQueryDto,
   PurgeAnalisisLubricanteDto,
@@ -1248,6 +1249,16 @@ export class KpiMaintenanceController {
   @Get('inteligencia/summary')
   getIntelligenceSummary(@Query() query: IntelligencePeriodQueryDto, @Req() req: any) {
     return this.service.getIntelligenceSummary(query, getSucursalScopeId(req));
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary:
+      'Obtener reportes consolidados del sistema con filtros por fecha, bodega y agrupaciÃ³n',
+  })
+  @Get('inteligencia/reportes-sistema')
+  getSystemReports(@Query() query: SystemReportsQueryDto, @Req() req: any) {
+    return this.service.getSystemReports(query, getSucursalScopeId(req));
   }
 
   @ApiTags('Work Orders')

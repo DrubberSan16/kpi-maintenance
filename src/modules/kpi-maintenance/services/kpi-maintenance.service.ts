@@ -121,6 +121,7 @@ import {
   IntelligencePeriodQueryDto,
   ImportAnalisisLubricanteBatchDto,
   IssueMaterialsDto,
+  SystemReportsQueryDto,
   PurgeAnalisisLubricanteDto,
   ProgramacionMensualQueryDto,
   UpdateAnalisisLubricanteDto,
@@ -181,6 +182,14 @@ type CodeResolution = {
   codeWasReassigned: boolean;
   reassignmentReason: string | null;
 };
+
+type SystemReportGroupBy =
+  | 'OT'
+  | 'BODEGA'
+  | 'EQUIPO'
+  | 'RESPONSABLE'
+  | 'MATERIAL'
+  | 'MES';
 
 type LubricantMetricGroupKey =
   | 'ESTADO_LUBRICANTE'
@@ -1525,6 +1534,82 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.parseOilUsageDate(workOrder.scheduled_start, { endOfDay: true }) ??
       this.parseOilUsageDate(workOrder.updated_at, { endOfDay: true }) ??
       this.parseOilUsageDate(workOrder.created_at, { endOfDay: true })
+    );
+  }
+
+  private normalizeSystemReportGroupBy(
+    value: unknown,
+  ): SystemReportGroupBy {
+    const normalized = String(value || '')
+      .trim()
+      .toUpperCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    if (
+      ['OT', 'BODEGA', 'EQUIPO', 'RESPONSABLE', 'MATERIAL', 'MES'].includes(
+        normalized,
+      )
+    ) {
+      return normalized as SystemReportGroupBy;
+    }
+    return 'OT';
+  }
+
+  private buildSystemReportsDateRange(query?: SystemReportsQueryDto) {
+    const now = new Date();
+    const defaultFrom = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      1,
+      0,
+      0,
+      0,
+      0,
+    );
+    const defaultTo = new Date(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
+    const fromDate = this.parseOilUsageDate(query?.from) ?? defaultFrom;
+    const toDate =
+      this.parseOilUsageDate(query?.to, { endOfDay: true }) ?? defaultTo;
+
+    if (fromDate.getTime() > toDate.getTime()) {
+      throw new BadRequestException(
+        'La fecha inicial no puede ser mayor que la fecha final.',
+      );
+    }
+
+    return {
+      fromDate,
+      toDate,
+      from: fromDate.toISOString().slice(0, 10),
+      to: toDate.toISOString().slice(0, 10),
+      label: `${this.formatOilUsageDateLabel(fromDate)} - ${this.formatOilUsageDateLabel(toDate)}`,
+    };
+  }
+
+  private buildSystemReportPeriodLabel(date?: Date | null) {
+    if (!date) return 'Sin periodo';
+    return new Intl.DateTimeFormat('es-EC', {
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC',
+    }).format(date);
+  }
+
+  private isMaintenanceWorkOrderType(value: unknown) {
+    const normalized = this.normalizeSearchToken(value);
+    return (
+      normalized.includes('mantenimiento') ||
+      normalized.includes('mantencion') ||
+      normalized.includes('mantto') ||
+      normalized.includes('mtto')
     );
   }
 
@@ -13510,6 +13595,1213 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         component_highlights: filteredComponents.slice(0, 5),
       },
       'Resumen de inteligencia operativa generado',
+    );
+  }
+
+  async getSystemReports(
+    query: SystemReportsQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const dateRange = this.buildSystemReportsDateRange(query);
+    const groupBy = this.normalizeSystemReportGroupBy(query?.group_by);
+    const requestedWarehouseId =
+      this.firstNonEmptyString(query?.bodega_id) ?? null;
+    if (requestedWarehouseId) {
+      await this.assertWarehouseVisibleForSucursal(
+        requestedWarehouseId,
+        sucursalId,
+      );
+    }
+
+    const [scope, rawWarehouses, rawWorkOrders, stockCandidateRows] =
+      await Promise.all([
+        this.buildSucursalScopeContext(sucursalId),
+        this.bodegaRepo.find({
+          where: { is_deleted: false, es_chatarra: false } as any,
+          order: { nombre: 'ASC', codigo: 'ASC' } as any,
+        }),
+        this.woRepo.find({
+          where: { is_deleted: false },
+          order: { created_at: 'DESC' },
+        }),
+        this.stockRepo.find({
+          where: {
+            is_deleted: false,
+            ...(requestedWarehouseId
+              ? { bodega_id: requestedWarehouseId }
+              : {}),
+          } as any,
+        }),
+      ]);
+
+    const visibleWarehouses = rawWarehouses.filter((row) =>
+      !scope ? true : scope.warehouseIds.has(String(row.id || '').trim()),
+    );
+    const visibleWarehouseIds = new Set(
+      visibleWarehouses.map((row) => String(row.id || '').trim()).filter(Boolean),
+    );
+    const visibleWorkOrders = await this.filterWorkOrdersByScope(
+      rawWorkOrders,
+      scope,
+    );
+    const datedWorkOrders = visibleWorkOrders.filter((row) => {
+      const referenceDate = this.resolveWorkOrderReferenceDate(row);
+      return (
+        !!referenceDate &&
+        referenceDate.getTime() >= dateRange.fromDate.getTime() &&
+        referenceDate.getTime() <= dateRange.toDate.getTime()
+      );
+    });
+
+    const workOrderIds = datedWorkOrders.map((row) => row.id);
+    const planIds = [
+      ...new Set(
+        datedWorkOrders
+          .map((row) => String(row.plan_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const equipmentIds = [
+      ...new Set(
+        datedWorkOrders
+          .map((row) => String(row.equipment_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const [plans, equipments, tasks, consumos] = await Promise.all([
+      planIds.length
+        ? this.planRepo.find({
+            where: { id: In(planIds), is_deleted: false },
+          })
+        : Promise.resolve([] as PlanMantenimientoEntity[]),
+      equipmentIds.length
+        ? this.equipoRepo.find({
+            where: { id: In(equipmentIds), is_deleted: false },
+          })
+        : Promise.resolve([] as EquipoEntity[]),
+      workOrderIds.length
+        ? this.woTareaRepo.find({
+            where: { work_order_id: In(workOrderIds), is_deleted: false },
+          })
+        : Promise.resolve([] as WorkOrderTareaEntity[]),
+      workOrderIds.length
+        ? this.consumoRepo.find({
+            where: { work_order_id: In(workOrderIds), is_deleted: false },
+          })
+        : Promise.resolve([] as ConsumoRepuestoEntity[]),
+    ]);
+
+    const planMap = new Map(plans.map((row) => [row.id, row]));
+    const equipmentMap = new Map(equipments.map((row) => [row.id, row]));
+    const procedureIds = new Set<string>();
+    for (const workOrder of datedWorkOrders) {
+      const payload =
+        workOrder.valor_json && typeof workOrder.valor_json === 'object'
+          ? (workOrder.valor_json as Record<string, unknown>)
+          : {};
+      const payloadProcedureId = this.firstNonEmptyString(
+        payload.procedimiento_id,
+      );
+      if (payloadProcedureId) procedureIds.add(payloadProcedureId);
+      const plan = workOrder.plan_id ? planMap.get(workOrder.plan_id) : null;
+      const planProcedureId = this.extractProcedimientoIdFromPlan(plan);
+      if (planProcedureId) procedureIds.add(planProcedureId);
+    }
+
+    const procedures = procedureIds.size
+      ? await this.procedimientoRepo.find({
+          where: { id: In([...procedureIds]), is_deleted: false },
+        })
+      : [];
+    const procedureMap = new Map(procedures.map((row) => [row.id, row]));
+
+    const inventoryProductIds = new Set<string>();
+    const inventoryWarehouseIds = new Set<string>(
+      visibleWarehouses
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean),
+    );
+    for (const row of procedures) {
+      const warehouseId = String(row.bodega_id || '').trim();
+      if (warehouseId) inventoryWarehouseIds.add(warehouseId);
+    }
+    for (const row of consumos) {
+      const productId = String(row.producto_id || '').trim();
+      const warehouseId = String(row.bodega_id || '').trim();
+      if (productId) inventoryProductIds.add(productId);
+      if (warehouseId) inventoryWarehouseIds.add(warehouseId);
+    }
+    for (const row of stockCandidateRows) {
+      const productId = String(row.producto_id || '').trim();
+      const warehouseId = String(row.bodega_id || '').trim();
+      if (productId) inventoryProductIds.add(productId);
+      if (warehouseId) inventoryWarehouseIds.add(warehouseId);
+    }
+    if (requestedWarehouseId) {
+      inventoryWarehouseIds.add(requestedWarehouseId);
+    }
+
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      [...inventoryProductIds],
+      [...inventoryWarehouseIds],
+    );
+
+    const scopedConsumos = consumos.filter((row) => {
+      const warehouseId = String(row.bodega_id || '').trim();
+      if (warehouseId && scope && !visibleWarehouseIds.has(warehouseId)) {
+        return false;
+      }
+      if (requestedWarehouseId && warehouseId !== requestedWarehouseId) {
+        return false;
+      }
+      return true;
+    });
+
+    const consumoWarehouseIdsByWorkOrder = new Map<string, Set<string>>();
+    for (const row of scopedConsumos) {
+      const workOrderId = String(row.work_order_id || '').trim();
+      const warehouseId = String(row.bodega_id || '').trim();
+      if (!workOrderId || !warehouseId) continue;
+      const current = consumoWarehouseIdsByWorkOrder.get(workOrderId) ?? new Set<string>();
+      current.add(warehouseId);
+      consumoWarehouseIdsByWorkOrder.set(workOrderId, current);
+    }
+
+    const stockRows = stockCandidateRows.filter((row) => {
+      const warehouseId = String(row.bodega_id || '').trim();
+      if (!warehouseId) return false;
+      if (scope && !visibleWarehouseIds.has(warehouseId)) return false;
+      if (requestedWarehouseId && warehouseId !== requestedWarehouseId) {
+        return false;
+      }
+      const warehouse = warehouseMap.get(warehouseId);
+      return !!warehouse && !warehouse.es_chatarra;
+    });
+
+    const workOrderContextMap = new Map<string, any>();
+    for (const workOrder of datedWorkOrders) {
+      const referenceDate = this.resolveWorkOrderReferenceDate(workOrder);
+      if (!referenceDate) continue;
+      const plan = workOrder.plan_id ? planMap.get(workOrder.plan_id) : null;
+      const payload =
+        workOrder.valor_json && typeof workOrder.valor_json === 'object'
+          ? (workOrder.valor_json as Record<string, unknown>)
+          : {};
+      const procedureId =
+        this.firstNonEmptyString(
+          payload.procedimiento_id,
+          plan ? this.extractProcedimientoIdFromPlan(plan) : null,
+        ) ?? null;
+      const procedure = procedureId ? procedureMap.get(procedureId) : null;
+      const equipment = workOrder.equipment_id
+        ? equipmentMap.get(workOrder.equipment_id)
+        : null;
+      const consumptionWarehouseIds = [
+        ...(consumoWarehouseIdsByWorkOrder.get(workOrder.id) ?? new Set<string>()),
+      ];
+      const procedureWarehouseId =
+        this.firstNonEmptyString(procedure?.bodega_id) ?? null;
+      const primaryWarehouseId =
+        procedureWarehouseId ??
+        this.firstNonEmptyString(consumptionWarehouseIds[0]) ??
+        null;
+      const procedureWarehouse = primaryWarehouseId
+        ? warehouseMap.get(primaryWarehouseId)
+        : null;
+      const consumptionWarehouseLabels = consumptionWarehouseIds
+        .map((id) => this.buildBodegaLabel(warehouseMap.get(id)) ?? id)
+        .filter(Boolean);
+      const warehouseLabel =
+        this.buildBodegaLabel(procedureWarehouse) ??
+        consumptionWarehouseLabels.join(' | ') ??
+        'Sin bodega';
+      const matchesRequestedWarehouse =
+        !requestedWarehouseId ||
+        procedureWarehouseId === requestedWarehouseId ||
+        consumptionWarehouseIds.includes(requestedWarehouseId);
+      if (!matchesRequestedWarehouse) continue;
+
+      workOrderContextMap.set(workOrder.id, {
+        work_order_id: workOrder.id,
+        work_order_code: workOrder.code,
+        work_order_title: workOrder.title,
+        work_order_status: this.normalizeWorkflowStatus(
+          workOrder.status_workflow,
+        ),
+        work_order_type: workOrder.type,
+        maintenance_kind: workOrder.maintenance_kind,
+        fecha_referencia: referenceDate.toISOString(),
+        periodo: this.buildSystemReportPeriodLabel(referenceDate),
+        period_key: referenceDate.toISOString().slice(0, 7),
+        equipment_id: equipment?.id ?? workOrder.equipment_id ?? null,
+        equipment_code: equipment?.codigo ?? null,
+        equipment_name: equipment?.nombre ?? null,
+        equipment_label:
+          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
+          'Sin equipo',
+        plan_id: plan?.id ?? workOrder.plan_id ?? null,
+        plan_code: plan?.codigo ?? null,
+        plan_name: plan?.nombre ?? null,
+        procedure_id: procedure?.id ?? procedureId,
+        procedure_code: procedure?.codigo ?? null,
+        procedure_name: procedure?.nombre ?? null,
+        procedure_label:
+          [procedure?.codigo, procedure?.nombre]
+            .filter(Boolean)
+            .join(' - ') ||
+          [plan?.codigo, plan?.nombre].filter(Boolean).join(' - ') ||
+          'Sin plantilla',
+        bodega_id: primaryWarehouseId,
+        bodega_label: warehouseLabel || 'Sin bodega',
+        consumo_bodegas: consumptionWarehouseLabels.join(' | ') || null,
+        is_maintenance: this.isMaintenanceWorkOrderType(workOrder.type),
+      });
+    }
+
+    const filteredWorkOrderIds = new Set([...workOrderContextMap.keys()]);
+    const filteredTasks = tasks.filter((row) =>
+      filteredWorkOrderIds.has(String(row.work_order_id || '').trim()),
+    );
+    const enrichedTasks = await this.enrichWorkOrderTareas(filteredTasks);
+    const filteredConsumos = scopedConsumos.filter((row) =>
+      filteredWorkOrderIds.has(String(row.work_order_id || '').trim()),
+    );
+
+    const sortRowsByDateDesc = (rows: any[]) =>
+      rows.sort((a, b) => {
+        const dateDiff = String(b.fecha_referencia || '').localeCompare(
+          String(a.fecha_referencia || ''),
+        );
+        if (dateDiff !== 0) return dateDiff;
+        return String(a.work_order_code || '').localeCompare(
+          String(b.work_order_code || ''),
+        );
+      });
+
+    const hoursOtMap = new Map<string, any>(
+      [...workOrderContextMap.values()].map((context) => [
+        context.work_order_id,
+        {
+          ...context,
+          total_horas: 0,
+          total_responsables: 0,
+          responsables: '',
+          _responsables: new Map<string, { label: string; horas: number }>(),
+        },
+      ]),
+    );
+    const hoursDetailRows: any[] = [];
+    for (const task of enrichedTasks) {
+      const context = workOrderContextMap.get(
+        String(task.work_order_id || '').trim(),
+      );
+      if (!context) continue;
+      const taskLabel =
+        this.firstNonEmptyString(
+          (task as any).actividad,
+          task.actividad_adicional,
+          (task.task_meta as Record<string, unknown> | undefined)?.actividad,
+          task.id,
+        ) ?? task.id;
+      const responsables = Array.isArray((task as any).responsables)
+        ? ((task as any).responsables as Array<Record<string, unknown>>)
+        : [];
+      for (const responsable of responsables) {
+        const horas = this.toNumeric(responsable?.horas, 0);
+        if (horas <= 0) continue;
+        const userId =
+          this.firstNonEmptyString(
+            responsable?.user_id,
+            responsable?.id,
+            responsable?.username,
+          ) ?? 'SIN_USUARIO';
+        const userLabel =
+          this.firstNonEmptyString(
+            responsable?.display_name,
+            responsable?.nameSurname,
+            responsable?.username,
+            userId,
+          ) ?? userId;
+        const summary = hoursOtMap.get(context.work_order_id);
+        if (!summary) continue;
+        const currentResponsible = summary._responsables.get(userId) ?? {
+          label: userLabel,
+          horas: 0,
+        };
+        currentResponsible.horas = Number(
+          (currentResponsible.horas + horas).toFixed(4),
+        );
+        summary._responsables.set(userId, currentResponsible);
+        summary.total_horas = Number((summary.total_horas + horas).toFixed(4));
+        hoursDetailRows.push({
+          ...context,
+          tarea: taskLabel,
+          user_id: userId,
+          responsable: userLabel,
+          horas: Number(horas.toFixed(4)),
+        });
+      }
+    }
+
+    const hoursOtRows = sortRowsByDateDesc(
+      [...hoursOtMap.values()].map((row) => {
+        const responsablesDetalle = [
+          ...(
+            row._responsables as Map<string, { label: string; horas: number }>
+          ).values(),
+        ]
+          .sort((a, b) => b.horas - a.horas)
+          .map((item) => `${item.label} (${item.horas.toFixed(2)} h)`);
+        return {
+          ...row,
+          total_horas: Number(this.toNumeric(row.total_horas, 0).toFixed(4)),
+          total_responsables: (
+            row._responsables as Map<string, { label: string; horas: number }>
+          ).size,
+          responsables: responsablesDetalle.join(' | ') || 'Sin horas registradas',
+        };
+      }),
+    ).map(({ _responsables, ...row }) => row);
+
+    let horasTrabajadasRows = hoursOtRows;
+    if (groupBy === 'RESPONSABLE') {
+      const grouped = new Map<string, any>();
+      for (const row of hoursDetailRows) {
+        const key = String(row.user_id || 'SIN_USUARIO');
+        const current = grouped.get(key) ?? {
+          user_id: row.user_id,
+          responsable: row.responsable,
+          total_horas: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+          _equipos: new Set<string>(),
+          _bodegas: new Set<string>(),
+        };
+        current.total_horas = Number(
+          (current.total_horas + this.toNumeric(row.horas, 0)).toFixed(4),
+        );
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current._equipos.add(String(row.equipment_label || '').trim());
+        current._bodegas.add(String(row.bodega_label || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      horasTrabajadasRows = [...grouped.values()]
+        .map((row) => ({
+          user_id: row.user_id,
+          responsable: row.responsable,
+          total_horas: row.total_horas,
+          total_ordenes: row.total_ordenes,
+          ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          equipos: [...row._equipos].filter(Boolean).join(' | '),
+          bodegas: [...row._bodegas].filter(Boolean).join(' | '),
+        }))
+        .sort((a, b) => b.total_horas - a.total_horas);
+    } else if (groupBy === 'EQUIPO') {
+      const grouped = new Map<string, any>();
+      for (const row of hoursOtRows) {
+        const key = String(row.equipment_label || 'Sin equipo');
+        const current = grouped.get(key) ?? {
+          equipment_label: row.equipment_label || 'Sin equipo',
+          total_horas: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+          _bodegas: new Set<string>(),
+        };
+        current.total_horas = Number(
+          (current.total_horas + this.toNumeric(row.total_horas, 0)).toFixed(4),
+        );
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current._bodegas.add(String(row.bodega_label || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      horasTrabajadasRows = [...grouped.values()]
+        .map((row) => ({
+          equipment_label: row.equipment_label,
+          total_horas: row.total_horas,
+          total_ordenes: row.total_ordenes,
+          bodegas: [...row._bodegas].filter(Boolean).join(' | '),
+          ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+        }))
+        .sort((a, b) => b.total_horas - a.total_horas);
+    } else if (groupBy === 'BODEGA') {
+      const grouped = new Map<string, any>();
+      for (const row of hoursOtRows) {
+        const key = String(row.bodega_label || 'Sin bodega');
+        const current = grouped.get(key) ?? {
+          bodega_label: row.bodega_label || 'Sin bodega',
+          total_horas: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+          _equipos: new Set<string>(),
+        };
+        current.total_horas = Number(
+          (current.total_horas + this.toNumeric(row.total_horas, 0)).toFixed(4),
+        );
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current._equipos.add(String(row.equipment_label || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      horasTrabajadasRows = [...grouped.values()]
+        .map((row) => ({
+          bodega_label: row.bodega_label,
+          total_horas: row.total_horas,
+          total_ordenes: row.total_ordenes,
+          equipos: [...row._equipos].filter(Boolean).join(' | '),
+          ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+        }))
+        .sort((a, b) => b.total_horas - a.total_horas);
+    } else if (groupBy === 'MES') {
+      const grouped = new Map<string, any>();
+      for (const row of hoursOtRows) {
+        const key = String(row.period_key || 'SIN_PERIODO');
+        const current = grouped.get(key) ?? {
+          period_key: row.period_key,
+          periodo: row.periodo,
+          total_horas: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+        };
+        current.total_horas = Number(
+          (current.total_horas + this.toNumeric(row.total_horas, 0)).toFixed(4),
+        );
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      horasTrabajadasRows = [...grouped.values()]
+        .map((row) => ({
+          periodo: row.periodo,
+          total_horas: row.total_horas,
+          total_ordenes: row.total_ordenes,
+          ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+        }))
+        .sort((a, b) =>
+          String(b.periodo || '').localeCompare(String(a.periodo || '')),
+        );
+    }
+
+    const responsablesOtRows = sortRowsByDateDesc(
+      hoursOtRows
+        .filter((row) => this.toNumeric(row.total_responsables, 0) > 0)
+        .map((row) => ({
+          fecha_referencia: row.fecha_referencia,
+          work_order_code: row.work_order_code,
+          work_order_title: row.work_order_title,
+          work_order_status: row.work_order_status,
+          maintenance_kind: row.maintenance_kind,
+          equipment_label: row.equipment_label,
+          procedure_label: row.procedure_label,
+          bodega_label: row.bodega_label,
+          total_horas: row.total_horas,
+          total_responsables: row.total_responsables,
+          responsables: row.responsables,
+        })),
+    );
+
+    const maintenanceOtMap = new Map<string, any>(
+      [...workOrderContextMap.values()]
+        .filter((row) => row.is_maintenance)
+        .map((row) => [
+          row.work_order_id,
+          {
+            ...row,
+            total_costo: 0,
+            total_cantidad: 0,
+            total_items: 0,
+            _materiales: new Set<string>(),
+          },
+        ]),
+    );
+
+    const replacedBaseMap = new Map<string, any>();
+    for (const row of filteredConsumos) {
+      const context = workOrderContextMap.get(
+        String(row.work_order_id || '').trim(),
+      );
+      if (!context) continue;
+      const product = productMap.get(String(row.producto_id || '').trim());
+      const materialLabel =
+        this.buildProductoLabel(product) ?? String(row.producto_id || '').trim();
+      const warehouseId = String(row.bodega_id || '').trim();
+      const warehouseLabel =
+        this.buildBodegaLabel(warehouseMap.get(warehouseId)) ??
+        warehouseId ??
+        'Sin bodega';
+      const quantity = this.toNumeric(row.cantidad, 0);
+      const subtotal = this.toNumeric(row.subtotal, 0);
+      const unitCost = this.toNumeric(row.costo_unitario, 0);
+
+      if (context.is_maintenance) {
+        const maintenanceRow = maintenanceOtMap.get(context.work_order_id);
+        if (maintenanceRow) {
+          maintenanceRow.total_costo = Number(
+            (maintenanceRow.total_costo + subtotal).toFixed(4),
+          );
+          maintenanceRow.total_cantidad = Number(
+            (maintenanceRow.total_cantidad + quantity).toFixed(4),
+          );
+          maintenanceRow.total_items += 1;
+          maintenanceRow._materiales.add(materialLabel);
+        }
+
+        const replacedKey = `${context.work_order_id}|${row.producto_id}|${warehouseId}`;
+        const replacedCurrent = replacedBaseMap.get(replacedKey) ?? {
+          ...context,
+          producto_id: row.producto_id,
+          material_label: materialLabel,
+          bodega_id: warehouseId || null,
+          bodega_label: warehouseLabel || 'Sin bodega',
+          total_cantidad: 0,
+          total_costo: 0,
+          total_items: 0,
+          costo_unitario_promedio: 0,
+        };
+        replacedCurrent.total_cantidad = Number(
+          (replacedCurrent.total_cantidad + quantity).toFixed(4),
+        );
+        replacedCurrent.total_costo = Number(
+          (replacedCurrent.total_costo + subtotal).toFixed(4),
+        );
+        replacedCurrent.total_items += 1;
+        replacedCurrent.costo_unitario_promedio =
+          replacedCurrent.total_cantidad > 0
+            ? Number(
+                (
+                  replacedCurrent.total_costo /
+                  replacedCurrent.total_cantidad
+                ).toFixed(4),
+              )
+            : unitCost;
+        replacedBaseMap.set(replacedKey, replacedCurrent);
+      }
+    }
+
+    const costoMantenimientoOtRows = sortRowsByDateDesc(
+      [...maintenanceOtMap.values()].map((row) => ({
+        ...row,
+        total_costo: Number(this.toNumeric(row.total_costo, 0).toFixed(4)),
+        total_cantidad: Number(
+          this.toNumeric(row.total_cantidad, 0).toFixed(4),
+        ),
+        total_items: Number(row.total_items || 0),
+        total_materiales: (
+          row._materiales as Set<string>
+        ).size,
+        materiales: [...(row._materiales as Set<string>)].join(' | ') || null,
+      })),
+    ).map(({ _materiales, ...row }) => row);
+
+    let costoMantenimientoRows = costoMantenimientoOtRows;
+    if (groupBy === 'EQUIPO') {
+      const grouped = new Map<string, any>();
+      for (const row of costoMantenimientoOtRows) {
+        const key = String(row.equipment_label || 'Sin equipo');
+        const current = grouped.get(key) ?? {
+          equipment_label: row.equipment_label || 'Sin equipo',
+          total_costo: 0,
+          total_cantidad: 0,
+          total_items: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+          _materiales: new Set<string>(),
+        };
+        current.total_costo = Number(
+          (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
+        );
+        current.total_cantidad = Number(
+          (
+            current.total_cantidad + this.toNumeric(row.total_cantidad, 0)
+          ).toFixed(4),
+        );
+        current.total_items += Number(row.total_items || 0);
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        String(row.materiales || '')
+          .split('|')
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .forEach((value) => current._materiales.add(value));
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      costoMantenimientoRows = [...grouped.values()]
+        .map((row) => ({
+          equipment_label: row.equipment_label,
+          total_costo: row.total_costo,
+          total_cantidad: row.total_cantidad,
+          total_items: row.total_items,
+          total_ordenes: row.total_ordenes,
+          materiales: [...row._materiales].join(' | '),
+          ordenes_trabajo: [...row._ordenes].join(' | '),
+        }))
+        .sort((a, b) => b.total_costo - a.total_costo);
+    } else if (groupBy === 'BODEGA') {
+      const grouped = new Map<string, any>();
+      for (const row of costoMantenimientoOtRows) {
+        const key = String(row.bodega_label || 'Sin bodega');
+        const current = grouped.get(key) ?? {
+          bodega_label: row.bodega_label || 'Sin bodega',
+          total_costo: 0,
+          total_cantidad: 0,
+          total_items: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+          _materiales: new Set<string>(),
+        };
+        current.total_costo = Number(
+          (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
+        );
+        current.total_cantidad = Number(
+          (
+            current.total_cantidad + this.toNumeric(row.total_cantidad, 0)
+          ).toFixed(4),
+        );
+        current.total_items += Number(row.total_items || 0);
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        String(row.materiales || '')
+          .split('|')
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .forEach((value) => current._materiales.add(value));
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      costoMantenimientoRows = [...grouped.values()]
+        .map((row) => ({
+          bodega_label: row.bodega_label,
+          total_costo: row.total_costo,
+          total_cantidad: row.total_cantidad,
+          total_items: row.total_items,
+          total_ordenes: row.total_ordenes,
+          materiales: [...row._materiales].join(' | '),
+          ordenes_trabajo: [...row._ordenes].join(' | '),
+        }))
+        .sort((a, b) => b.total_costo - a.total_costo);
+    } else if (groupBy === 'MES') {
+      const grouped = new Map<string, any>();
+      for (const row of costoMantenimientoOtRows) {
+        const key = String(row.period_key || 'SIN_PERIODO');
+        const current = grouped.get(key) ?? {
+          period_key: row.period_key,
+          periodo: row.periodo,
+          total_costo: 0,
+          total_cantidad: 0,
+          total_items: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+        };
+        current.total_costo = Number(
+          (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
+        );
+        current.total_cantidad = Number(
+          (
+            current.total_cantidad + this.toNumeric(row.total_cantidad, 0)
+          ).toFixed(4),
+        );
+        current.total_items += Number(row.total_items || 0);
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      costoMantenimientoRows = [...grouped.values()]
+        .map((row) => ({
+          periodo: row.periodo,
+          total_costo: row.total_costo,
+          total_cantidad: row.total_cantidad,
+          total_items: row.total_items,
+          total_ordenes: row.total_ordenes,
+          ordenes_trabajo: [...row._ordenes].join(' | '),
+        }))
+        .sort((a, b) =>
+          String(b.periodo || '').localeCompare(String(a.periodo || '')),
+        );
+    }
+
+    const replacedBaseRows = sortRowsByDateDesc(
+      [...replacedBaseMap.values()].map((row) => ({
+        fecha_referencia: row.fecha_referencia,
+        periodo: row.periodo,
+        work_order_code: row.work_order_code,
+        work_order_title: row.work_order_title,
+        equipment_label: row.equipment_label,
+        procedure_label: row.procedure_label,
+        bodega_id: row.bodega_id,
+        bodega_label: row.bodega_label,
+        producto_id: row.producto_id,
+        material_label: row.material_label,
+        total_cantidad: Number(
+          this.toNumeric(row.total_cantidad, 0).toFixed(4),
+        ),
+        total_costo: Number(this.toNumeric(row.total_costo, 0).toFixed(4)),
+        costo_unitario_promedio: Number(
+          this.toNumeric(row.costo_unitario_promedio, 0).toFixed(4),
+        ),
+        total_items: Number(row.total_items || 0),
+      })),
+    );
+
+    let repuestosCambiadosRows = replacedBaseRows;
+    if (groupBy !== 'OT') {
+      const grouped = new Map<string, any>();
+      for (const row of replacedBaseRows) {
+        let key = `${row.work_order_code}|${row.producto_id}|${row.bodega_id || ''}`;
+        let seed: any = {
+          material_label: row.material_label,
+          total_cantidad: 0,
+          total_costo: 0,
+          total_items: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+        };
+        if (groupBy === 'EQUIPO') {
+          key = `${row.equipment_label}|${row.producto_id}`;
+          seed.equipment_label = row.equipment_label;
+        } else if (groupBy === 'MATERIAL') {
+          key = `${row.producto_id}`;
+        } else if (groupBy === 'BODEGA') {
+          key = `${row.bodega_id || row.bodega_label}|${row.producto_id}`;
+          seed.bodega_label = row.bodega_label;
+        } else if (groupBy === 'MES') {
+          key = `${String(row.periodo || '')}|${row.producto_id}`;
+          seed.periodo = row.periodo;
+        }
+        const current = grouped.get(key) ?? seed;
+        current.total_cantidad = Number(
+          (current.total_cantidad + this.toNumeric(row.total_cantidad, 0)).toFixed(4),
+        );
+        current.total_costo = Number(
+          (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
+        );
+        current.total_items += Number(row.total_items || 0);
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        grouped.set(key, current);
+      }
+      repuestosCambiadosRows = [...grouped.values()]
+        .map((row) => ({
+          ...(row.periodo ? { periodo: row.periodo } : {}),
+          ...(row.equipment_label ? { equipment_label: row.equipment_label } : {}),
+          ...(row.bodega_label ? { bodega_label: row.bodega_label } : {}),
+          material_label: row.material_label,
+          total_cantidad: row.total_cantidad,
+          total_costo: row.total_costo,
+          total_items: row.total_items,
+          total_ordenes: row.total_ordenes,
+          ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+        }))
+        .sort((a, b) => b.total_costo - a.total_costo);
+    }
+
+    const consumedBaseMap = new Map<string, any>();
+    for (const row of filteredConsumos) {
+      const context = workOrderContextMap.get(
+        String(row.work_order_id || '').trim(),
+      );
+      if (!context) continue;
+      const product = productMap.get(String(row.producto_id || '').trim());
+      const materialLabel =
+        this.buildProductoLabel(product) ?? String(row.producto_id || '').trim();
+      const warehouseId = String(row.bodega_id || '').trim();
+      const warehouseLabel =
+        this.buildBodegaLabel(warehouseMap.get(warehouseId)) ??
+        warehouseId ??
+        'Sin bodega';
+      const key = `${context.work_order_id}|${warehouseId}|${row.producto_id}`;
+      const current = consumedBaseMap.get(key) ?? {
+        ...context,
+        bodega_id: warehouseId || null,
+        bodega_label: warehouseLabel || 'Sin bodega',
+        producto_id: row.producto_id,
+        material_label: materialLabel,
+        total_cantidad: 0,
+        total_costo: 0,
+        total_items: 0,
+      };
+      current.total_cantidad = Number(
+        (
+          current.total_cantidad + this.toNumeric(row.cantidad, 0)
+        ).toFixed(4),
+      );
+      current.total_costo = Number(
+        (current.total_costo + this.toNumeric(row.subtotal, 0)).toFixed(4),
+      );
+      current.total_items += 1;
+      consumedBaseMap.set(key, current);
+    }
+
+    const consumedBaseRows = sortRowsByDateDesc(
+      [...consumedBaseMap.values()].map((row) => ({
+        fecha_referencia: row.fecha_referencia,
+        periodo: row.periodo,
+        work_order_code: row.work_order_code,
+        work_order_title: row.work_order_title,
+        equipment_label: row.equipment_label,
+        bodega_id: row.bodega_id,
+        bodega_label: row.bodega_label,
+        producto_id: row.producto_id,
+        material_label: row.material_label,
+        total_cantidad: Number(
+          this.toNumeric(row.total_cantidad, 0).toFixed(4),
+        ),
+        total_costo: Number(this.toNumeric(row.total_costo, 0).toFixed(4)),
+        total_items: Number(row.total_items || 0),
+      })),
+    );
+
+    let inventarioConsumidoRows = consumedBaseRows;
+    if (groupBy !== 'OT') {
+      const grouped = new Map<string, any>();
+      for (const row of consumedBaseRows) {
+        let key = `${row.bodega_id || row.bodega_label}|${row.producto_id}`;
+        let seed: any = {
+          bodega_label: row.bodega_label,
+          material_label: row.material_label,
+          total_cantidad: 0,
+          total_costo: 0,
+          total_items: 0,
+          total_ordenes: 0,
+          _ordenes: new Set<string>(),
+        };
+        if (groupBy === 'MATERIAL') {
+          key = `${row.producto_id}`;
+          seed = {
+            material_label: row.material_label,
+            total_cantidad: 0,
+            total_costo: 0,
+            total_items: 0,
+            total_ordenes: 0,
+            _ordenes: new Set<string>(),
+            _bodegas: new Set<string>(),
+          };
+        } else if (groupBy === 'EQUIPO') {
+          key = `${row.equipment_label}|${row.producto_id}`;
+          seed = {
+            equipment_label: row.equipment_label,
+            material_label: row.material_label,
+            total_cantidad: 0,
+            total_costo: 0,
+            total_items: 0,
+            total_ordenes: 0,
+            _ordenes: new Set<string>(),
+          };
+        } else if (groupBy === 'MES') {
+          key = `${String(row.periodo || '')}|${row.producto_id}`;
+          seed = {
+            periodo: row.periodo,
+            material_label: row.material_label,
+            total_cantidad: 0,
+            total_costo: 0,
+            total_items: 0,
+            total_ordenes: 0,
+            _ordenes: new Set<string>(),
+          };
+        }
+        const current = grouped.get(key) ?? seed;
+        current.total_cantidad = Number(
+          (current.total_cantidad + this.toNumeric(row.total_cantidad, 0)).toFixed(4),
+        );
+        current.total_costo = Number(
+          (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
+        );
+        current.total_items += Number(row.total_items || 0);
+        current._ordenes.add(String(row.work_order_code || '').trim());
+        current.total_ordenes = current._ordenes.size;
+        if (current._bodegas) {
+          current._bodegas.add(String(row.bodega_label || '').trim());
+        }
+        grouped.set(key, current);
+      }
+      inventarioConsumidoRows = [...grouped.values()]
+        .map((row) => ({
+          ...(row.periodo ? { periodo: row.periodo } : {}),
+          ...(row.equipment_label ? { equipment_label: row.equipment_label } : {}),
+          ...(row.bodega_label ? { bodega_label: row.bodega_label } : {}),
+          ...(row._bodegas
+            ? { bodegas: [...row._bodegas].filter(Boolean).join(' | ') }
+            : {}),
+          material_label: row.material_label,
+          total_cantidad: row.total_cantidad,
+          total_costo: row.total_costo,
+          total_items: row.total_items,
+          total_ordenes: row.total_ordenes,
+          ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+        }))
+        .sort((a, b) => b.total_costo - a.total_costo);
+    }
+
+    const inventoryCostDetailedRows = stockRows
+      .map((row) => {
+        const product = productMap.get(String(row.producto_id || '').trim());
+        const warehouse = warehouseMap.get(String(row.bodega_id || '').trim());
+        const stockActual = this.toNumeric(row.stock_actual, 0);
+        const unitCost =
+          this.toNumeric(row.costo_promedio_bodega, 0) > 0
+            ? this.toNumeric(row.costo_promedio_bodega, 0)
+            : this.toNumeric(product?.ultimo_costo, 0);
+        const totalCost = Number((stockActual * unitCost).toFixed(4));
+        return {
+          bodega_id: row.bodega_id,
+          bodega_label:
+            this.buildBodegaLabel(warehouse) ?? String(row.bodega_id || '').trim(),
+          producto_id: row.producto_id,
+          material_label:
+            this.buildProductoLabel(product) ?? String(row.producto_id || '').trim(),
+          stock_actual: Number(stockActual.toFixed(4)),
+          costo_unitario: Number(unitCost.toFixed(4)),
+          total_costo_inventario: totalCost,
+        };
+      })
+      .sort((a, b) => b.total_costo_inventario - a.total_costo_inventario);
+
+    const costoInventarioRows =
+      groupBy === 'MATERIAL'
+        ? inventoryCostDetailedRows
+        : [...inventoryCostDetailedRows.reduce((acc, row) => {
+            const key = String(row.bodega_id || row.bodega_label);
+            const current = acc.get(key) ?? {
+              bodega_id: row.bodega_id,
+              bodega_label: row.bodega_label,
+              total_costo_inventario: 0,
+              total_stock: 0,
+              total_materiales: 0,
+              _productos: new Set<string>(),
+            };
+            current.total_costo_inventario = Number(
+              (
+                current.total_costo_inventario +
+                this.toNumeric(row.total_costo_inventario, 0)
+              ).toFixed(4),
+            );
+            current.total_stock = Number(
+              (current.total_stock + this.toNumeric(row.stock_actual, 0)).toFixed(4),
+            );
+            current._productos.add(String(row.producto_id || '').trim());
+            current.total_materiales = current._productos.size;
+            acc.set(key, current);
+            return acc;
+          }, new Map<string, any>()).values()]
+            .map((row) => ({
+              bodega_id: row.bodega_id,
+              bodega_label: row.bodega_label,
+              total_costo_inventario: row.total_costo_inventario,
+              total_stock: row.total_stock,
+              total_materiales: row.total_materiales,
+            }))
+            .sort((a, b) => b.total_costo_inventario - a.total_costo_inventario);
+
+    const requestedWarehouseLabel = requestedWarehouseId
+      ? this.buildBodegaLabel(
+          warehouseMap.get(requestedWarehouseId) ??
+            visibleWarehouses.find((row) => row.id === requestedWarehouseId) ??
+            null,
+        )
+      : null;
+
+    return this.wrap(
+      {
+        generated_at: new Date().toISOString(),
+        filters: {
+          from: dateRange.from,
+          to: dateRange.to,
+          label: dateRange.label,
+          bodega_id: requestedWarehouseId,
+          bodega_label: requestedWarehouseLabel,
+          group_by: groupBy,
+        },
+        catalogs: {
+          bodegas: visibleWarehouses.map((row) => ({
+            id: row.id,
+            codigo: row.codigo ?? null,
+            nombre: row.nombre ?? null,
+            label: this.buildBodegaLabel(row) ?? row.id,
+          })),
+        },
+        summary: [
+          {
+            label: 'Horas registradas',
+            value: Number(
+              hoursOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_horas, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+          },
+          {
+            label: 'Costo mantenimiento',
+            value: Number(
+              costoMantenimientoOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_costo, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+          },
+          {
+            label: 'Responsables con horas',
+            value: new Set(
+              hoursDetailRows
+                .map((row) => String(row.user_id || '').trim())
+                .filter(Boolean),
+            ).size,
+          },
+          {
+            label: 'Costo inventario',
+            value: Number(
+              inventoryCostDetailedRows
+                .reduce(
+                  (acc, row) =>
+                    acc + this.toNumeric(row.total_costo_inventario, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+          },
+          {
+            label: 'Repuestos cambiados',
+            value: Number(
+              replacedBaseRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_cantidad, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+          },
+          {
+            label: 'Inventario consumido',
+            value: Number(
+              consumedBaseRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_cantidad, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+          },
+        ],
+        reports: {
+          horas_trabajadas: {
+            group_by: groupBy,
+            rows: horasTrabajadasRows,
+            total_horas: Number(
+              hoursOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_horas, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_ordenes: hoursOtRows.length,
+          },
+          costo_mantenimiento: {
+            group_by:
+              groupBy === 'RESPONSABLE' || groupBy === 'MATERIAL'
+                ? 'OT'
+                : groupBy,
+            rows: costoMantenimientoRows,
+            total_costo: Number(
+              costoMantenimientoOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_costo, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_cantidad: Number(
+              costoMantenimientoOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_cantidad, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_ordenes: costoMantenimientoOtRows.length,
+          },
+          responsables_ot: {
+            group_by: 'OT',
+            rows: responsablesOtRows,
+            total_horas: Number(
+              responsablesOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_horas, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_responsables: new Set(
+              hoursDetailRows
+                .map((row) => String(row.user_id || '').trim())
+                .filter(Boolean),
+            ).size,
+          },
+          costo_inventario: {
+            group_by: groupBy === 'MATERIAL' ? 'MATERIAL' : 'BODEGA',
+            rows: costoInventarioRows,
+            total_costo: Number(
+              inventoryCostDetailedRows
+                .reduce(
+                  (acc, row) =>
+                    acc + this.toNumeric(row.total_costo_inventario, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_bodegas: new Set(
+              inventoryCostDetailedRows
+                .map((row) => String(row.bodega_id || '').trim())
+                .filter(Boolean),
+            ).size,
+          },
+          repuestos_cambiados: {
+            group_by: groupBy === 'RESPONSABLE' ? 'OT' : groupBy,
+            rows: repuestosCambiadosRows,
+            total_costo: Number(
+              replacedBaseRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_costo, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_cantidad: Number(
+              replacedBaseRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_cantidad, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_registros: replacedBaseRows.length,
+          },
+          inventario_consumido: {
+            group_by: groupBy === 'RESPONSABLE' ? 'BODEGA' : groupBy,
+            rows: inventarioConsumidoRows,
+            total_costo: Number(
+              consumedBaseRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_costo, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_cantidad: Number(
+              consumedBaseRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.total_cantidad, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
+            total_registros: consumedBaseRows.length,
+          },
+        },
+      },
+      'Reportes del sistema generados',
     );
   }
 
