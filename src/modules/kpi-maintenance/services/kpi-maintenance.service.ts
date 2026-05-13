@@ -2762,6 +2762,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private securityUsersCache:
     | { expiresAt: number; items: SecurityUserDirectoryItem[] }
     | null = null;
+  private securityUsersAuthBypassUntil = 0;
+  private securityUsersWarningCooldownUntil = 0;
   private securityLogWarningCooldownUntil = 0;
   private mailTransporter: Transporter | null = null;
   private mailTransportVerified = false;
@@ -3505,6 +3507,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ) {
       return this.securityUsersCache.items;
     }
+    if (!force && this.securityUsersAuthBypassUntil > now) {
+      return this.securityUsersCache?.items ?? [];
+    }
     if (!this.securityServiceUrl) return [];
 
     try {
@@ -3542,6 +3547,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             };
           })
         : [];
+      this.securityUsersAuthBypassUntil = 0;
       this.securityUsersCache = {
         expiresAt: now + 5 * 60 * 1000,
         items: normalized,
@@ -3549,19 +3555,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return normalized;
     } catch (error: any) {
       const message = String(error?.message ?? 'desconocido');
+      if (this.isUnauthorizedServiceError(error)) {
+        const cooldownMs = 30 * 60 * 1000;
+        this.securityUsersAuthBypassUntil = now + cooldownMs;
+        this.securityUsersCache = {
+          expiresAt: now + cooldownMs,
+          items: [],
+        };
+        if (this.securityUsersWarningCooldownUntil <= now) {
+          this.securityUsersWarningCooldownUntil = now + cooldownMs;
+          this.logger.debug(
+            'Validacion remota de responsables deshabilitada temporalmente por autenticacion en seguridad.',
+          );
+        }
+        return [];
+      }
       this.securityUsersCache = {
         expiresAt: now + 5 * 60 * 1000,
         items: [],
       };
-      if (/HTTP 401|Unauthorized/i.test(message)) {
-        this.logger.warn(
-          'No se pudo consultar usuarios de seguridad por autenticación; se omitirá temporalmente la validación remota de responsables.',
-        );
-      } else {
-        this.logger.warn(
-          `No se pudo consultar usuarios de seguridad: ${message}`,
-        );
-      }
+      this.logger.warn(
+        `No se pudo consultar usuarios de seguridad: ${message}`,
+      );
       return [];
     }
   }
