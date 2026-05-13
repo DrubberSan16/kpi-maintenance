@@ -1615,6 +1615,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private normalizeMaintenanceKind(value: unknown) {
+    return String(value || '').trim().toUpperCase();
+  }
+
+  private requiresOilProductsForMaintenanceKind(value: unknown) {
+    return this.normalizeMaintenanceKind(value) === 'CEBADA';
+  }
+
+  private assertOilProductAllowedForWorkOrder(
+    workOrder: Pick<WorkOrderEntity, 'maintenance_kind' | 'code'>,
+    producto: Pick<ProductoEntity, 'id' | 'codigo' | 'nombre' | 'es_aceite'>,
+  ) {
+    if (!this.requiresOilProductsForMaintenanceKind(workOrder.maintenance_kind)) {
+      return;
+    }
+    if (Boolean(producto?.es_aceite)) {
+      return;
+    }
+    const productLabel = this.buildProductoLabel(producto) ?? producto.id;
+    const workOrderCode = this.firstNonEmptyString(workOrder.code) ?? 'la OT';
+    throw new BadRequestException(
+      `La orden de trabajo ${workOrderCode} es de tipo CEBADA y solo permite materiales marcados como aceite. Material recibido: ${productLabel}.`,
+    );
+  }
+
   private async buildOilProductCatalog() {
     const { entities, raw } = await this.productoRepo
       .createQueryBuilder('producto')
@@ -1663,6 +1688,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       producto_codigo: producto?.codigo ?? null,
       producto_nombre: producto?.nombre ?? null,
       producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      es_aceite: Boolean(producto?.es_aceite),
       bodega_codigo: bodega?.codigo ?? null,
       bodega_nombre: bodega?.nombre ?? null,
       bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id ?? null,
@@ -1684,6 +1710,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       producto_codigo: producto?.codigo ?? null,
       producto_nombre: producto?.nombre ?? null,
       producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      es_aceite: Boolean(producto?.es_aceite),
       bodega_codigo: bodega?.codigo ?? null,
       bodega_nombre: bodega?.nombre ?? null,
       bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id,
@@ -16041,6 +16068,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.bodega_id,
       manager,
     );
+    this.assertOilProductAllowedForWorkOrder(workOrder, producto);
     await this.assertReservableStockAvailable(
       dto.producto_id,
       dto.bodega_id,
@@ -16145,6 +16173,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!producto) {
         throw new NotFoundException('Producto no encontrado');
       }
+      this.assertOilProductAllowedForWorkOrder(workOrder, producto);
 
       const costo = Number(producto.ultimo_costo);
       const subtotal = item.cantidad * costo;
@@ -18000,6 +18029,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const { producto, bodega } = await this.validateProductoEnBodega(dto.producto_id, dto.bodega_id);
+    this.assertOilProductAllowedForWorkOrder(workOrder, producto);
     await this.assertReservableStockAvailable(
       dto.producto_id,
       dto.bodega_id,
@@ -18156,6 +18186,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { id: item.producto_id },
         });
         if (!producto) throw new NotFoundException('Producto no encontrado');
+        this.assertOilProductAllowedForWorkOrder(workOrder, producto);
         const costo = Number(producto.ultimo_costo);
         const subtotal = item.cantidad * costo;
         total += subtotal;
