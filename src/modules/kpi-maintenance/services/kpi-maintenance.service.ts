@@ -2,8 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   OnModuleDestroy,
@@ -3283,6 +3285,104 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return (
       driverCode === '23505' &&
       (constraint.includes('codigo') || constraint.includes('code'))
+    );
+  }
+
+  private extractHttpExceptionMessage(error: HttpException) {
+    const response = error.getResponse();
+    if (typeof response === 'string') {
+      return response.trim();
+    }
+    if (response && typeof response === 'object') {
+      const message = (response as any).message;
+      if (Array.isArray(message)) {
+        return message
+          .map((item) => String(item ?? '').trim())
+          .filter(Boolean)
+          .join('; ');
+      }
+      if (typeof message === 'string') {
+        return message.trim();
+      }
+    }
+    return String(error.message || '').trim();
+  }
+
+  private mapWorkOrderBundlePersistenceError(
+    error: any,
+    phaseLabel: string,
+  ): HttpException | null {
+    const driverCode = String(
+      error?.driverError?.code || error?.code || '',
+    ).trim();
+    const constraint = String(
+      error?.driverError?.constraint || error?.constraint || '',
+    )
+      .trim()
+      .toLowerCase();
+    const detail = String(
+      error?.driverError?.detail || error?.detail || error?.message || '',
+    )
+      .trim()
+      .toLowerCase();
+
+    if (driverCode === '23503') {
+      if (
+        constraint === 'fk_wot_tarea' ||
+        detail.includes('tb_plan_tarea')
+      ) {
+        return new ConflictException(
+          `No se pudo guardar la orden de trabajo durante ${phaseLabel}: una o mas tareas del checklist ya no existen o fueron modificadas en la plantilla. Sincroniza el checklist y vuelve a intentar.`,
+        );
+      }
+      return new ConflictException(
+        `No se pudo guardar la orden de trabajo durante ${phaseLabel}: uno de los registros relacionados ya no existe o ya no esta disponible.`,
+      );
+    }
+
+    if (driverCode === '23505') {
+      if (constraint === 'tb_work_order_code_key') {
+        return new ConflictException(
+          `No se pudo guardar la orden de trabajo durante ${phaseLabel}: el codigo de la OT ya estaba en uso.`,
+        );
+      }
+      return new ConflictException(
+        `No se pudo guardar la orden de trabajo durante ${phaseLabel}: ya existe un registro duplicado con los datos enviados.`,
+      );
+    }
+
+    if (driverCode === '23502') {
+      return new BadRequestException(
+        `No se pudo guardar la orden de trabajo durante ${phaseLabel}: faltan datos obligatorios por completar.`,
+      );
+    }
+
+    if (driverCode === '22P02') {
+      return new BadRequestException(
+        `No se pudo guardar la orden de trabajo durante ${phaseLabel}: se envio un valor invalido en la solicitud.`,
+      );
+    }
+
+    return null;
+  }
+
+  private buildWorkOrderBundleException(
+    error: any,
+    phaseLabel: string,
+  ): HttpException {
+    const mapped = this.mapWorkOrderBundlePersistenceError(error, phaseLabel);
+    if (mapped) return mapped;
+
+    if (error instanceof HttpException) {
+      const message = this.extractHttpExceptionMessage(error);
+      const responseMessage = message
+        ? `No se pudo guardar la orden de trabajo durante ${phaseLabel}: ${message}`
+        : `No se pudo guardar la orden de trabajo durante ${phaseLabel}.`;
+      return new HttpException(responseMessage, error.getStatus());
+    }
+
+    return new InternalServerErrorException(
+      `No se pudo guardar la orden de trabajo durante ${phaseLabel}. No se aplicaron cambios.`,
     );
   }
 
@@ -16564,6 +16664,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const createdFiles: string[] = [];
     const header = dto.header ?? {};
+    let currentPhase = 'validar cabecera de la OT';
     const summary = {
       tareas_nuevas: Array.isArray(dto.tareas_nuevas)
         ? dto.tareas_nuevas.length
@@ -16593,6 +16694,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     try {
       transactionResult = await this.dataSource.transaction(async (manager) => {
+        currentPhase = 'guardar cabecera de la OT';
         const headerResult = await this.saveWorkOrderHeaderWithManager(
           manager,
           workOrderId,
@@ -16600,8 +16702,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           actor,
         );
         const attachmentMap = new Map<string, WorkOrderAttachmentReference>();
+        const totalAdjuntos = dto.adjuntos_nuevos?.length ?? 0;
 
-        for (const attachment of dto.adjuntos_nuevos ?? []) {
+        for (const [index, attachment] of (dto.adjuntos_nuevos ?? []).entries()) {
+          const attachmentName =
+            this.firstNonEmptyString(attachment?.nombre) ?? 'sin nombre';
+          currentPhase = `guardar adjunto ${index + 1} de ${totalAdjuntos} (${attachmentName})`;
           const savedAttachment = await this.uploadWorkOrderAdjuntoWithManager(
             manager,
             headerResult.workOrder.id,
@@ -16617,7 +16723,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
-        for (const row of dto.tareas_editadas ?? []) {
+        const totalEditedTasks = dto.tareas_editadas?.length ?? 0;
+        for (const [index, row] of (dto.tareas_editadas ?? []).entries()) {
+          currentPhase = `actualizar tarea ${index + 1} de ${totalEditedTasks}`;
           await this.updateWorkOrderTareaWithManager(
             manager,
             row.id,
@@ -16625,7 +16733,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
-        for (const row of dto.tareas_nuevas ?? []) {
+        const totalNewTasks = dto.tareas_nuevas?.length ?? 0;
+        for (const [index, row] of (dto.tareas_nuevas ?? []).entries()) {
+          currentPhase = `guardar tarea nueva ${index + 1} de ${totalNewTasks}`;
           await this.createWorkOrderTareaWithManager(
             manager,
             headerResult.workOrder,
@@ -16634,6 +16744,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (dto.consumo_pendiente) {
+          currentPhase = 'registrar reserva o consumo pendiente';
           await this.createConsumoWithManager(
             manager,
             headerResult.workOrder,
@@ -16642,6 +16753,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (dto.salida_materiales_pendiente?.items?.length) {
+          currentPhase = 'registrar salida real de materiales';
           await this.issueMaterialsWithManager(
             manager,
             headerResult.workOrder,
@@ -16653,6 +16765,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.normalizeWorkflowStatus(headerResult.workOrder.status_workflow) ===
           'CLOSED'
         ) {
+          currentPhase = 'liberar reservas pendientes de la OT';
           await this.releaseOpenReservationsForWorkOrder(
             headerResult.workOrder.id,
             manager,
@@ -16661,7 +16774,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
         return headerResult;
       });
-    } catch (error) {
+    } catch (error: any) {
       for (const filePath of createdFiles) {
         try {
           await unlink(filePath);
@@ -16669,7 +16782,44 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           /* ignore cleanup errors */
         }
       }
-      throw error;
+      const wrappedError = this.buildWorkOrderBundleException(
+        error,
+        currentPhase,
+      );
+      const originalMessage =
+        error instanceof HttpException
+          ? this.extractHttpExceptionMessage(error)
+          : String(error?.message ?? 'desconocido').trim();
+      const status =
+        error instanceof HttpException
+          ? error.getStatus()
+          : Number(error?.status || error?.statusCode || 500);
+      const diagnostic = {
+        phase: currentPhase,
+        workOrderId,
+        requestedCode: this.firstNonEmptyString(header.code),
+        actor: this.resolveActorLabel(actor),
+        summary,
+        status,
+        error_code: this.firstNonEmptyString(
+          error?.driverError?.code,
+          error?.code,
+        ),
+        constraint: this.firstNonEmptyString(
+          error?.driverError?.constraint,
+          error?.constraint,
+        ),
+        detail: this.firstNonEmptyString(
+          error?.driverError?.detail,
+          error?.detail,
+        ),
+        message: originalMessage || null,
+      };
+      this.logger.error(
+        `Error en guardado transaccional de OT: ${JSON.stringify(diagnostic)}`,
+        error?.stack,
+      );
+      throw wrappedError;
     }
 
     if (!transactionResult) {
