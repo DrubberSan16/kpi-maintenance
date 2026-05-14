@@ -8422,6 +8422,88 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return nextPayload;
   }
 
+  private firstNullableNumeric(...values: unknown[]) {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  }
+
+  private extractWorkOrderExecutionHours(workOrder?: WorkOrderEntity | null) {
+    const payload = (workOrder?.valor_json ?? {}) as Record<string, unknown>;
+    return this.firstNullableNumeric(
+      payload.ultima_ejecucion_horas,
+      payload.proxima_horas,
+      payload.horometro_cierre,
+      payload.horometro_final,
+      payload.horometro_actual,
+      payload.horometro_programado,
+    );
+  }
+
+  private async resolvePreviousProgramacionExecutionHours(
+    equipmentId?: string | null,
+    planId?: string | null,
+    currentWorkOrderId?: string | null,
+  ) {
+    const normalizedEquipmentId = String(equipmentId || '').trim();
+    const normalizedPlanId = String(planId || '').trim();
+    const normalizedWorkOrderId = String(currentWorkOrderId || '').trim();
+    if (!normalizedEquipmentId) return null;
+
+    const query = this.woRepo
+      .createQueryBuilder('wo')
+      .where('wo.equipment_id = :equipmentId', {
+        equipmentId: normalizedEquipmentId,
+      })
+      .andWhere('wo.is_deleted = false');
+    if (normalizedPlanId) {
+      query.andWhere('wo.plan_id = :planId', { planId: normalizedPlanId });
+    }
+    if (normalizedWorkOrderId) {
+      query.andWhere('wo.id <> :workOrderId', {
+        workOrderId: normalizedWorkOrderId,
+      });
+    }
+    const previousOrders = (await query.getMany())
+      .filter(
+        (row) => this.normalizeWorkflowStatus(row.status_workflow) === 'CLOSED',
+      )
+      .sort((a, b) => {
+        const aTime = new Date(
+          a.closed_at ?? a.updated_at ?? a.scheduled_end ?? a.created_at ?? 0,
+        ).getTime();
+        const bTime = new Date(
+          b.closed_at ?? b.updated_at ?? b.scheduled_end ?? b.created_at ?? 0,
+        ).getTime();
+        return bTime - aTime;
+      });
+
+    for (const row of previousOrders) {
+      const directHours = this.extractWorkOrderExecutionHours(row);
+      if (directHours !== null) return directHours;
+      const taskHours = await this.calculateWorkOrderTaskTotalHours(row.id);
+      if (taskHours > 0) return taskHours;
+    }
+
+    if (normalizedPlanId) {
+      const existing = await this.programacionRepo.findOne({
+        where: {
+          equipo_id: normalizedEquipmentId,
+          plan_id: normalizedPlanId,
+          is_deleted: false,
+        },
+      });
+      const existingHours = this.firstNullableNumeric(
+        existing?.ultima_ejecucion_horas,
+      );
+      if (existingHours !== null) return existingHours;
+    }
+    return null;
+  }
+
   private collectProgramacionPlannerHints(
     programacion?: ProgramacionPlanEntity | null,
   ) {
@@ -8612,13 +8694,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (scheduleMode !== 'CALENDARIO') {
       if (freqType === 'HORAS') {
+        const previousExecutionHours =
+          programacion.ultima_ejecucion_horas == null
+            ? await this.resolvePreviousProgramacionExecutionHours(
+                programacion.equipo_id,
+                programacion.plan_id,
+                programacion.work_order_id,
+              )
+            : null;
         const baseHours =
           programacion.ultima_ejecucion_horas != null
             ? this.toNumeric(programacion.ultima_ejecucion_horas)
+            : previousExecutionHours != null
+              ? this.toNumeric(previousExecutionHours)
             : this.toNumeric(equipo.horometro_actual);
         patch.proxima_horas = Number((baseHours + freqValue).toFixed(2));
         if (
-          !programacion.ultima_ejecucion_horas &&
+          programacion.ultima_ejecucion_horas == null &&
+          previousExecutionHours != null
+        ) {
+          patch.ultima_ejecucion_horas =
+            this.toNumeric(previousExecutionHours);
+        } else if (
+          programacion.ultima_ejecucion_horas == null &&
           equipo.horometro_actual != null
         ) {
           patch.ultima_ejecucion_horas = this.toNumeric(equipo.horometro_actual);
