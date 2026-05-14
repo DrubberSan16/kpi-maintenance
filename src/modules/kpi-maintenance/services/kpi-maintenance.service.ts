@@ -9566,27 +9566,47 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
-    const entity = this.programacionRepo.create({
-      codigo: dto.codigo?.trim() || null,
+    const existing = await this.programacionRepo.findOne({
+      where: {
+        equipo_id: resolvedEquipmentId,
+        plan_id: resolvedPlanId,
+      },
+    });
+    const isUpdate = Boolean(existing);
+    const entity =
+      existing ??
+      this.programacionRepo.create({
+        equipo_id: resolvedEquipmentId,
+        plan_id: resolvedPlanId,
+      });
+    Object.assign(entity, {
+      codigo: dto.codigo?.trim() || existing?.codigo || null,
       equipo_id: resolvedEquipmentId,
       plan_id: resolvedPlanId,
-      work_order_id: linkedWorkOrder?.id ?? null,
+      work_order_id: linkedWorkOrder.id,
       modo_programacion: String(
-        dto.modo_programacion || 'DINAMICA',
+        dto.modo_programacion || existing?.modo_programacion || 'DINAMICA',
       ).toUpperCase(),
       origen_programacion: String(
-        dto.origen_programacion || 'MANUAL',
+        dto.origen_programacion || existing?.origen_programacion || 'MANUAL',
       ).toUpperCase(),
-      ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? null,
-      ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? null,
-      proxima_fecha: dto.proxima_fecha ?? null,
-      proxima_horas: dto.proxima_horas ?? null,
-      documento_origen: dto.documento_origen ?? null,
+      ultima_ejecucion_fecha:
+        dto.ultima_ejecucion_fecha ?? existing?.ultima_ejecucion_fecha ?? null,
+      ultima_ejecucion_horas:
+        dto.ultima_ejecucion_horas ?? existing?.ultima_ejecucion_horas ?? null,
+      proxima_fecha: dto.proxima_fecha ?? existing?.proxima_fecha ?? null,
+      proxima_horas: dto.proxima_horas ?? existing?.proxima_horas ?? null,
+      documento_origen: dto.documento_origen ?? existing?.documento_origen ?? null,
       payload_json: this.mergeProgramacionWorkOrderPayload(
-        dto.payload_json ?? {},
+        {
+          ...((existing?.payload_json ?? {}) as Record<string, unknown>),
+          ...((dto.payload_json ?? {}) as Record<string, unknown>),
+        },
         linkedWorkOrder,
       ),
-      activo: dto.activo ?? true,
+      activo: dto.activo ?? existing?.activo ?? true,
+      status: existing?.status ?? 'ACTIVE',
+      is_deleted: false,
     });
     const saved = await this.programacionRepo.save(entity);
     const enriched = await this.recalculateProgramacionFields(saved);
