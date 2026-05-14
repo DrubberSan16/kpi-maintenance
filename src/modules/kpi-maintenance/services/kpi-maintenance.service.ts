@@ -1210,6 +1210,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         hora_inicio: item?.hora_inicio ?? null,
         hora_fin: item?.hora_fin ?? null,
         duracion_horas: this.toNumeric(item?.duracion_horas, 0),
+        work_order_id: item?.work_order_id ?? null,
         responsable_area: item?.responsable_area ?? null,
         observacion: item?.observacion ?? null,
       });
@@ -7235,9 +7236,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         item.hora_inicio,
         item.hora_fin,
       );
+      const horasAsignadas = this.toNumeric(item.horas_asignadas, 0);
       return {
         ...item,
-        duracion_horas: duracionHoras,
+        duracion_horas: horasAsignadas > 0 ? horasAsignadas : duracionHoras,
+        duracion_horario: duracionHoras,
         equipo_id: matchedEquipment?.id ?? null,
         equipo_nombre: matchedEquipment?.nombre ?? null,
         equipo_codigo: matchedEquipment?.codigo ?? item.equipo_codigo ?? null,
@@ -7273,6 +7276,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           hora_inicio: string | null;
           hora_fin: string | null;
           duracion_horas: number;
+          work_order_id: string | null;
           responsable_area: string | null;
           observacion: string | null;
         }>;
@@ -7306,6 +7310,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         hora_inicio: item.hora_inicio ?? null,
         hora_fin: item.hora_fin ?? null,
         duracion_horas: this.toNumeric(item.duracion_horas, 0),
+        work_order_id: item.work_order_id ?? null,
         responsable_area: item.responsable_area ?? null,
         observacion: item.observacion ?? null,
       });
@@ -8559,6 +8564,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
     linkedProgramacion?: ProgramacionPlanEntity | null,
   ) {
+    const roleName = String(actor?.roleName || '')
+      .trim()
+      .toUpperCase();
+    if (roleName.includes('ADMIN')) return true;
+
     const actorUserId = this.firstNonEmptyString(actor?.userId);
     const actorUsername = this.normalizeUsername(actor?.username);
     if (!actorUserId && !actorUsername) return false;
@@ -12413,6 +12423,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         total_horas_ot: payload.total_horas_ot ?? payload.horas_programadas ?? null,
       });
     }
+    const weeklyWorkOrderIds = [
+      ...new Set(
+        filtered
+          .map((item) => this.firstNonEmptyString((item as any).work_order_id))
+          .filter(Boolean) as string[],
+      ),
+    ];
+    const weeklyWorkOrders = weeklyWorkOrderIds.length
+      ? await this.woRepo.find({
+          where: { id: In(weeklyWorkOrderIds), is_deleted: false },
+        })
+      : [];
+    const weeklyWorkOrderById = new Map(
+      weeklyWorkOrders.map((item) => [
+        item.id,
+        {
+          work_order_id: item.id,
+          work_order_code: item.code ?? null,
+          work_order_title: item.title ?? null,
+          total_horas_ot: null,
+        } as Record<string, unknown>,
+      ]),
+    );
     const aggregates = new Map<
       string,
       {
@@ -12449,8 +12482,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         item.hora_inicio,
         item.hora_fin,
       );
+      const assignedHours = this.toNumeric(item.horas_asignadas, 0);
+      const effectiveHours = assignedHours > 0 ? assignedHours : duration;
       const key = `${fecha}::${this.normalizeWorkbookToken(equipoCodigo)}`;
-      const monthlyWorkOrder = monthlyWorkOrderByDayAndEquipment.get(key) ?? null;
+      const weeklyWorkOrder = item.work_order_id
+        ? weeklyWorkOrderById.get(item.work_order_id) ?? null
+        : null;
+      const monthlyWorkOrder =
+        monthlyWorkOrderByDayAndEquipment.get(key) ?? weeklyWorkOrder ?? null;
       const current = aggregates.get(key) ?? {
         id: `weekly:${key}`,
         programacion_mensual_id: programacionMensualId,
@@ -12481,7 +12520,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       };
       const nextTotal = Number(
         (
-          this.toNumeric(current.payload_json.total_horas_agendadas, 0) + duration
+          this.toNumeric(current.payload_json.total_horas_agendadas, 0) + effectiveHours
         ).toFixed(2),
       );
       const nextActivities =
@@ -12512,7 +12551,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         hora_fin: item.hora_fin ?? null,
         responsable_area: item.responsable_area ?? null,
         observacion: item.observacion ?? null,
-        duracion_horas: duration,
+        duracion_horas: effectiveHours,
+        duracion_horario: duration,
+        work_order_id: item.work_order_id ?? null,
         monthly_work_order: monthlyWorkOrder,
       });
       current.valor_crudo = `${nextTotal.toFixed(2)} h`;
@@ -13323,6 +13364,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               hora_fin: this.toTimeOnlyString(detalle.hora_fin),
               tipo_proceso: detalle.tipo_proceso ?? null,
               actividad: detalle.actividad,
+              work_order_id: detalle.work_order_id ?? null,
+              horas_asignadas:
+                detalle.horas_asignadas != null
+                  ? this.toNumeric(detalle.horas_asignadas, 0)
+                  : null,
               responsable_area: detalle.responsable_area ?? null,
               equipo_codigo: detalle.equipo_codigo ?? null,
               observacion: detalle.observacion ?? null,
@@ -13410,6 +13456,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 hora_fin: this.toTimeOnlyString(detalle.hora_fin),
                 tipo_proceso: detalle.tipo_proceso ?? null,
                 actividad: detalle.actividad,
+                work_order_id: detalle.work_order_id ?? null,
+                horas_asignadas:
+                  detalle.horas_asignadas != null
+                    ? this.toNumeric(detalle.horas_asignadas, 0)
+                    : null,
                 responsable_area: detalle.responsable_area ?? null,
                 equipo_codigo: detalle.equipo_codigo ?? null,
                 observacion: detalle.observacion ?? null,

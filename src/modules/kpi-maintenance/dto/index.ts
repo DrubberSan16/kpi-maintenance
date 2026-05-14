@@ -1705,6 +1705,15 @@ export class CronogramaSemanalDetalleDto {
   @IsString()
   @IsNotEmpty()
   actividad: string;
+  @ApiPropertyOptional({ description: 'Orden de trabajo a ejecutar' })
+  @IsOptional()
+  @IsUUID()
+  work_order_id?: string;
+  @ApiPropertyOptional({ description: 'Horas asignadas al bloque', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_asignadas?: number;
   @ApiPropertyOptional({ description: 'Área responsable' })
   @IsOptional()
   @IsString()

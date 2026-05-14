@@ -472,6 +472,9 @@ export class CronogramaSemanalDetalleEntity {
     | null;
   @Column({ type: 'text', nullable: true }) tipo_proceso?: string | null;
   @Column() actividad: string;
+  @Column({ type: 'uuid', nullable: true }) work_order_id?: string | null;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horas_asignadas?: number | null;
   @Column({ type: 'text', nullable: true }) responsable_area?: string | null;
   @Column({ type: 'text', nullable: true }) equipo_codigo?: string | null;
   @Column({ type: 'text', nullable: true }) observacion?: string | null;
