@@ -263,6 +263,7 @@ type RequestActorContext = {
   userId?: string | null;
   username?: string | null;
   displayName?: string | null;
+  roleName?: string | null;
 };
 
 type SecurityUserDirectoryItem = {
@@ -771,7 +772,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     'CORRECTIVO',
     'PREVENTIVO',
     'PREDICTIVO',
-    'CEBADA',
+    'CEBADO',
   ] as const;
   private recalculationInterval: NodeJS.Timeout | null = null;
   private recalculationRunning = false;
@@ -1636,6 +1637,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (['REPARACION', 'REPARACIÓN'].includes(raw)) {
       return 'CORRECTIVO';
     }
+    if (raw === 'CEBADA') {
+      return 'CEBADO';
+    }
     return raw;
   }
 
@@ -1657,7 +1661,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private requiresOilProductsForMaintenanceKind(value: unknown) {
-    return this.normalizeMaintenanceKind(value) === 'CEBADA';
+    return this.normalizeMaintenanceKind(value) === 'CEBADO';
+  }
+
+  private isOperatorActor(actor?: RequestActorContext | null) {
+    const role = String(actor?.roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return role === 'OPERADOR';
+  }
+
+  private assertOperatorWorkOrderKind(
+    actor: RequestActorContext | null | undefined,
+    maintenanceKind: string,
+  ) {
+    if (!this.isOperatorActor(actor)) return;
+    if (maintenanceKind === 'CEBADO') return;
+    throw new BadRequestException(
+      'El perfil operador solo puede crear ordenes de trabajo de tipo mantenimiento CEBADO.',
+    );
   }
 
   private assertOilProductAllowedForWorkOrder(
@@ -1673,7 +1697,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const productLabel = this.buildProductoLabel(producto) ?? producto.id;
     const workOrderCode = this.firstNonEmptyString(workOrder.code) ?? 'la OT';
     throw new BadRequestException(
-      `La orden de trabajo ${workOrderCode} es de tipo CEBADA y solo permite materiales marcados como aceite. Material recibido: ${productLabel}.`,
+      `La orden de trabajo ${workOrderCode} es de tipo CEBADO y solo permite materiales marcados como aceite. Material recibido: ${productLabel}.`,
     );
   }
 
@@ -3431,6 +3455,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         constraint.includes('maintenance') &&
         constraint.includes('kind')) ||
       detail.includes('maintenance_kind') ||
+      detail.includes('cebado') ||
       detail.includes('cebada')
     );
   }
@@ -3512,7 +3537,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
       if (this.isWorkOrderMaintenanceKindConstraintError(error)) {
         return new ConflictException(
-          `No se pudo guardar la orden de trabajo durante ${phaseLabel}: la configuracion actual de tipos de mantenimiento en base de datos no admite el valor enviado. Si estas usando CEBADA, aplica la migracion de BD correspondiente y vuelve a intentar.`,
+          `No se pudo guardar la orden de trabajo durante ${phaseLabel}: la configuracion actual de tipos de mantenimiento en base de datos no admite el valor enviado. Si estas usando CEBADO, aplica la migracion de BD correspondiente y vuelve a intentar.`,
         );
       }
       return new BadRequestException(
@@ -5221,6 +5246,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         if (orderDiff !== 0) return orderDiff;
         return String(a.id || '').localeCompare(String(b.id || ''));
       });
+  }
+
+  private async calculateWorkOrderTaskTotalHours(workOrderId: string) {
+    const tasks = await this.woTareaRepo.find({
+      where: { work_order_id: workOrderId, is_deleted: false },
+    });
+    const total = tasks.reduce((acc, task) => {
+      const responsables = this.mapStoredWorkOrderTaskResponsables(
+        task.responsables,
+      );
+      const responsibleHours = responsables.reduce(
+        (sum, responsable) => sum + this.toNumeric(responsable.horas, 0),
+        0,
+      );
+      return acc + responsibleHours;
+    }, 0);
+    return Number(total.toFixed(2));
   }
 
   private normalizeSearchToken(value: unknown) {
@@ -12238,6 +12280,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     if (!filtered.length) return [];
     const equipos = await this.equipoRepo.find({ where: { is_deleted: false } });
+    const monthlyDetails = await this.programacionMensualDetRepo.find({
+      where: { programacion_mensual_id: programacionMensualId, is_deleted: false },
+    });
+    const monthlyWorkOrderByDayAndEquipment = new Map<string, Record<string, unknown>>();
+    for (const detail of monthlyDetails) {
+      const fecha = this.toDateOnlyString(detail.fecha_programada);
+      const payload = (detail.payload_json ?? {}) as Record<string, unknown>;
+      const workOrderId = this.firstNonEmptyString(payload.work_order_id);
+      if (!fecha || !workOrderId) continue;
+      const key = `${fecha}::${this.normalizeWorkbookToken(
+        detail.equipo_codigo || detail.equipo_id || '',
+      )}`;
+      monthlyWorkOrderByDayAndEquipment.set(key, {
+        work_order_id: workOrderId,
+        work_order_code: payload.work_order_code ?? null,
+        work_order_title: payload.work_order_title ?? null,
+        total_horas_ot: payload.total_horas_ot ?? payload.horas_programadas ?? null,
+      });
+    }
     const aggregates = new Map<
       string,
       {
@@ -12275,6 +12336,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         item.hora_fin,
       );
       const key = `${fecha}::${this.normalizeWorkbookToken(equipoCodigo)}`;
+      const monthlyWorkOrder = monthlyWorkOrderByDayAndEquipment.get(key) ?? null;
       const current = aggregates.get(key) ?? {
         id: `weekly:${key}`,
         programacion_mensual_id: programacionMensualId,
@@ -12337,6 +12399,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         responsable_area: item.responsable_area ?? null,
         observacion: item.observacion ?? null,
         duracion_horas: duration,
+        monthly_work_order: monthlyWorkOrder,
       });
       current.valor_crudo = `${nextTotal.toFixed(2)} h`;
       current.valor_normalizado = `${nextTotal.toFixed(2)} H`;
@@ -12347,6 +12410,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         total_actividades: nextActivities,
         cronograma_ids: cronogramaIds,
         cronograma_codigos: cronogramaCodigos,
+        monthly_work_order: monthlyWorkOrder ?? current.payload_json.monthly_work_order ?? null,
         weekly_items: weeklyItems,
       };
       aggregates.set(key, current);
@@ -12517,6 +12581,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             descriptor.tipo_mantenimiento,
         ).toUpperCase(),
     } as Record<string, unknown>;
+    const workOrderId = this.firstNonEmptyString(nextPayload.work_order_id);
+    if (workOrderId) {
+      const workOrder = await this.findOneOrFail(this.woRepo, {
+        id: workOrderId,
+        is_deleted: false,
+      });
+      if (workOrder.equipment_id && workOrder.equipment_id !== equipo.id) {
+        throw new BadRequestException(
+          'La orden de trabajo seleccionada no pertenece al equipo del bloque mensual.',
+        );
+      }
+      const workOrderHours = await this.calculateWorkOrderTaskTotalHours(workOrderId);
+      nextPayload.work_order_id = workOrder.id;
+      nextPayload.work_order_code = workOrder.code ?? null;
+      nextPayload.work_order_title = workOrder.title ?? null;
+      nextPayload.total_horas_ot = workOrderHours;
+      if (workOrderHours > 0) {
+        nextPayload.horas_programadas = workOrderHours;
+      }
+    }
     const horometroUltimo =
       nextPayload.horometro_ultimo != null
         ? this.toNumeric(nextPayload.horometro_ultimo, 0)
@@ -12530,7 +12614,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (proximaHoras != null) {
       nextPayload.horometro_programado = proximaHoras;
     }
-    nextPayload.horas_programadas = descriptor.frecuencia_horas ?? null;
+    nextPayload.horas_programadas =
+      nextPayload.horas_programadas ?? descriptor.frecuencia_horas ?? null;
 
     return {
       equipo,
@@ -13727,7 +13812,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       eventos,
       overdueProgramaciones,
       pendingWorkOrders,
-      componentesRecientes,
     ] = await Promise.all([
       this.procedimientoRepo.find({ where: { is_deleted: false } }),
       this.analisisLubricanteRepo.find({
@@ -13750,10 +13834,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.woRepo.find({
         where: { is_deleted: false, status_workflow: In(['PLANNED', 'IN_PROGRESS']) },
         order: { scheduled_start: 'DESC' },
-      }),
-      this.controlComponenteRepo.find({
-        where: { is_deleted: false },
-        order: { updated_at: 'DESC', created_at: 'DESC' },
       }),
     ]);
     const scope = await this.buildSucursalScopeContext(sucursalId);
@@ -13794,12 +13874,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       pendingWorkOrders,
       scope,
     );
-    const scopedComponents = !scope
-      ? componentesRecientes
-      : componentesRecientes.filter((row) =>
-          this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
-        );
-
     const filteredAnalyses = scopedAnalyses.filter((row) =>
       this.valueMatchesIntelligencePeriod(
         row.fecha_reporte || row.fecha_muestra || row.created_at,
@@ -13843,18 +13917,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ),
     );
 
-    const reportIds = new Set(
-      filteredReportes.map((row) => String(row.id || '')).filter(Boolean),
-    );
-    const filteredComponents = scopedComponents.filter((row) =>
-      row.reporte_id
-        ? reportIds.has(String(row.reporte_id))
-        : this.valueMatchesIntelligencePeriod(
-            row.updated_at || row.created_at,
-            periodRange,
-          ),
-    );
-
     const breakdown = filteredEventos.reduce<Record<string, number>>((acc, event) => {
       const key = String(event.tipo_proceso || 'SIN_TIPO');
       acc[key] = (acc[key] ?? 0) + 1;
@@ -13889,7 +13951,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           eventos_proceso: filteredEventos.length,
           programaciones_vencidas: vencidas.length,
           work_orders_pendientes: filteredPendingWorkOrders.length,
-          componentes_monitoreados: filteredComponents.length,
         },
         process_breakdown: Object.entries(breakdown).map(([tipo_proceso, total]) => ({
           tipo_proceso,
@@ -13899,7 +13960,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         recent_analyses: filteredAnalyses.slice(0, 5),
         recent_weekly_schedules: filteredCronogramas.slice(0, 5),
         recent_daily_reports: filteredReportes.slice(0, 5),
-        component_highlights: filteredComponents.slice(0, 5),
       },
       'Resumen de inteligencia operativa generado',
     );
@@ -16666,6 +16726,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const nextWorkflowStatus = this.normalizeWorkflowStatus(
       header.status_workflow ?? workOrder?.status_workflow ?? 'PLANNED',
     );
+    const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
+      header.maintenance_kind,
+      workOrder?.maintenance_kind,
+      'CORRECTIVO',
+    );
+    if (isNew) {
+      this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
+    }
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
     }
@@ -16724,11 +16792,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             entity.provider_type,
             'INTERNO',
           ) || 'INTERNO',
-        maintenance_kind: this.resolveWorkOrderMaintenanceKind(
-          header.maintenance_kind,
-          entity.maintenance_kind,
-          'CORRECTIVO',
-        ),
+        maintenance_kind: resolvedMaintenanceKind,
         safety_permit_required:
           header.safety_permit_required ??
           entity.safety_permit_required ??
@@ -17191,6 +17255,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
 
     const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
+    const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
+      dto.maintenance_kind,
+      'CORRECTIVO',
+    );
+    this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     let resolution = await this.resolveRequestedWorkOrderCode(dto.code);
     let created: WorkOrderEntity | null = null;
 
@@ -17216,10 +17285,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         blocked_reason: String(dto.blocked_reason || '').trim() || null,
         priority: dto.priority ?? 5,
         provider_type: dto.provider_type ?? 'INTERNO',
-        maintenance_kind: this.resolveWorkOrderMaintenanceKind(
-          dto.maintenance_kind,
-          'CORRECTIVO',
-        ),
+        maintenance_kind: resolvedMaintenanceKind,
         safety_permit_required: dto.safety_permit_required ?? false,
         safety_permit_code: dto.safety_permit_code ?? null,
         vendor_id: dto.vendor_id ?? null,

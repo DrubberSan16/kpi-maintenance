@@ -99,6 +99,13 @@ function getRequestActor(req?: any) {
       String(
         req?.user?.nameSurname || req?.user?.nameUser || req?.user?.username || '',
       ).trim() || null,
+    roleName:
+      String(
+        req?.headers?.['x-role-name'] ||
+          req?.user?.role?.nombre ||
+          req?.user?.roleName ||
+          '',
+      ).trim() || null,
   };
 }
 
