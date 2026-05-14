@@ -1637,9 +1637,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (['REPARACION', 'REPARACIÓN'].includes(raw)) {
       return 'CORRECTIVO';
     }
-    if (raw === 'CEBADA') {
-      return 'CEBADO';
-    }
     return raw;
   }
 
@@ -3455,8 +3452,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         constraint.includes('maintenance') &&
         constraint.includes('kind')) ||
       detail.includes('maintenance_kind') ||
-      detail.includes('cebado') ||
-      detail.includes('cebada')
+      detail.includes('cebado')
     );
   }
 
