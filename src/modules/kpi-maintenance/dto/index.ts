@@ -1631,7 +1631,7 @@ export class AnalisisAceiteKpiQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'Periodo del KPI: SEMANAL, MENSUAL, ANUAL o PERSONALIZADO',
+      'Periodo del KPI: DIARIO, SEMANAL, MENSUAL, ANUAL o PERSONALIZADO',
   })
   @IsOptional()
   @IsString()
@@ -2083,6 +2083,14 @@ export class SystemReportsQueryDto {
   @IsOptional()
   @IsUUID()
   bodega_id?: string;
+
+  @ApiPropertyOptional({
+    description: 'Equipo a filtrar',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  equipment_id?: string;
 
   @ApiPropertyOptional({
     description:

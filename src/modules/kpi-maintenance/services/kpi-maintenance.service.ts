@@ -1476,7 +1476,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     let fromDate: Date;
     let toDate: Date;
 
-    if (normalizedPeriod === 'SEMANAL') {
+    if (normalizedPeriod === 'DIARIO') {
+      fromDate = new Date(referenceDate);
+      fromDate.setHours(0, 0, 0, 0);
+      toDate = new Date(referenceDate);
+      toDate.setHours(23, 59, 59, 999);
+    } else if (normalizedPeriod === 'SEMANAL') {
       fromDate = new Date(referenceDate);
       fromDate.setHours(0, 0, 0, 0);
       fromDate.setDate(fromDate.getDate() - fromDate.getDay());
@@ -1516,6 +1521,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         month: 'long',
         year: 'numeric',
       }).format(fromDate);
+    } else if (normalizedPeriod === 'DIARIO') {
+      label = `Dia ${this.formatOilUsageDateLabel(fromDate)}`;
     } else if (normalizedPeriod === 'ANUAL') {
       label = `Año ${fromDate.getFullYear()}`;
     } else if (normalizedPeriod === 'SEMANAL') {
@@ -1524,6 +1531,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return {
       periodo:
+        normalizedPeriod === 'DIARIO' ||
         normalizedPeriod === 'SEMANAL' ||
         normalizedPeriod === 'ANUAL' ||
         normalizedPeriod === 'PERSONALIZADO'
@@ -1537,6 +1545,97 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       month: fromDate.getMonth() + 1,
       label,
       reference_date: referenceDate.toISOString().slice(0, 10),
+    };
+  }
+
+  private buildOilStatisticsBucket(dateValue: Date, periodo: string) {
+    if (periodo === 'ANUAL') {
+      const key = `${dateValue.getFullYear()}-${String(dateValue.getMonth() + 1).padStart(2, '0')}`;
+      const baseDate = new Date(dateValue.getFullYear(), dateValue.getMonth(), 1);
+      return {
+        key,
+        label: this.formatOilUsageBucketLabel(baseDate, periodo),
+      };
+    }
+    return {
+      key: dateValue.toISOString().slice(0, 10),
+      label: this.formatOilUsageBucketLabel(dateValue, periodo),
+    };
+  }
+
+  private extractNumericRecordValue(
+    source: Record<string, unknown> | null | undefined,
+    ...keys: string[]
+  ) {
+    if (!source) return null;
+    for (const key of keys) {
+      const raw = source[key];
+      if (raw === null || raw === undefined || String(raw).trim() === '') {
+        continue;
+      }
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric)) {
+        return Number(numeric.toFixed(2));
+      }
+    }
+    return null;
+  }
+
+  private buildWorkOrderHorometerPayload(
+    payload: Record<string, unknown> | null | undefined,
+    equipment?: EquipoEntity | null,
+    procedure?: ProcedimientoPlantillaEntity | null,
+  ) {
+    const basePayload = payload ? { ...payload } : {};
+    const horometroActual =
+      this.extractNumericRecordValue(basePayload, 'horometro_actual') ??
+      (equipment?.horometro_actual != null
+        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
+        : null);
+    const horasARealizar =
+      this.extractNumericRecordValue(
+        basePayload,
+        'horas_a_realizar',
+        'horas_plantilla',
+      ) ??
+      (procedure?.frecuencia_horas != null
+        ? Number(this.toNumeric(procedure.frecuencia_horas, 0).toFixed(2))
+        : null);
+    const horometroProyectado =
+      horometroActual != null && horasARealizar != null
+        ? Number((horometroActual + horasARealizar).toFixed(2))
+        : null;
+
+    return {
+      ...basePayload,
+      horometro_actual: horometroActual,
+      horas_a_realizar: horasARealizar,
+      horas_plantilla: horasARealizar,
+      horometro_proyectado: horometroProyectado,
+      horometro_equipo_referencia:
+        equipment?.horometro_actual != null
+          ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
+          : null,
+    };
+  }
+
+  private extractWorkOrderHorometerSnapshot(
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    return {
+      horometro_actual: this.extractNumericRecordValue(
+        payload,
+        'horometro_actual',
+      ),
+      horas_a_realizar: this.extractNumericRecordValue(
+        payload,
+        'horas_a_realizar',
+        'horas_plantilla',
+      ),
+      horometro_proyectado: this.extractNumericRecordValue(
+        payload,
+        'horometro_proyectado',
+      ),
     };
   }
 
@@ -8856,10 +8955,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       actor,
       linkedProgramacion,
     );
-    const auditPayload = (workOrder.valor_json ?? {}) as Record<string, unknown>;
+    const auditPayload: Record<string, unknown> = this.buildWorkOrderHorometerPayload(
+      (workOrder.valor_json ?? {}) as Record<string, unknown>,
+      equipo,
+      procedimiento,
+    );
+    const horometerSnapshot =
+      this.extractWorkOrderHorometerSnapshot(auditPayload);
 
     return {
       ...workOrder,
+      valor_json: auditPayload,
       status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
       equipment_nombre: equipo?.nombre ?? null,
       equipment_nombre_real: equipo?.nombre_real ?? null,
@@ -8922,6 +9028,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           auditPayload.created_by_user_id,
           workOrder.requested_by,
         ) ?? null,
+      ...horometerSnapshot,
       processed_by_label:
         this.firstNonEmptyString(
           auditPayload.processed_by_name,
@@ -14138,12 +14245,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const groupBy = this.normalizeSystemReportGroupBy(query?.group_by);
     const requestedWarehouseId =
       this.firstNonEmptyString(query?.bodega_id) ?? null;
+    const requestedEquipmentId =
+      this.firstNonEmptyString(query?.equipment_id) ?? null;
     if (requestedWarehouseId) {
       await this.assertWarehouseVisibleForSucursal(
         requestedWarehouseId,
         sucursalId,
       );
     }
+    const requestedEquipment = requestedEquipmentId
+      ? await this.findEquipoOrFail(requestedEquipmentId)
+      : null;
 
     const [scope, rawWarehouses, rawWorkOrders, stockCandidateRows] =
       await Promise.all([
@@ -14176,7 +14288,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       rawWorkOrders,
       scope,
     );
-    const datedWorkOrders = visibleWorkOrders.filter((row) => {
+    const scopedWorkOrders = requestedEquipmentId
+      ? visibleWorkOrders.filter(
+          (row) => String(row.equipment_id || '').trim() === requestedEquipmentId,
+        )
+      : visibleWorkOrders;
+    const datedWorkOrders = scopedWorkOrders.filter((row) => {
       const referenceDate = this.resolveWorkOrderReferenceDate(row);
       return (
         !!referenceDate &&
@@ -14193,6 +14310,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           .filter(Boolean),
       ),
     ];
+    const catalogEquipmentIds = [
+      ...new Set(
+        visibleWorkOrders
+          .map((row) => String(row.equipment_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
     const equipmentIds = [
       ...new Set(
         datedWorkOrders
@@ -14206,9 +14330,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             where: { id: In(planIds), is_deleted: false },
           })
         : Promise.resolve([] as PlanMantenimientoEntity[]),
-      equipmentIds.length
+      [...new Set([...catalogEquipmentIds, ...equipmentIds])].length
         ? this.equipoRepo.find({
-            where: { id: In(equipmentIds), is_deleted: false },
+            where: {
+              id: In([...new Set([...catalogEquipmentIds, ...equipmentIds])]),
+              is_deleted: false,
+            },
           })
         : Promise.resolve([] as EquipoEntity[]),
       workOrderIds.length
@@ -14328,6 +14455,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const equipment = workOrder.equipment_id
         ? equipmentMap.get(workOrder.equipment_id)
         : null;
+      const horometerPayload = this.buildWorkOrderHorometerPayload(
+        payload,
+        equipment,
+        procedure,
+      );
+      const horometerSnapshot =
+        this.extractWorkOrderHorometerSnapshot(horometerPayload);
       const consumptionWarehouseIds = [
         ...(consumoWarehouseIdsByWorkOrder.get(workOrder.id) ?? new Set<string>()),
       ];
@@ -14391,6 +14525,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         bodega_label: warehouseLabel || 'Sin bodega',
         consumo_bodegas: consumptionWarehouseLabels.join(' | ') || null,
         is_maintenance: this.isMaintenanceWorkOrderType(workOrder.type),
+        horometro_actual_ot: horometerSnapshot.horometro_actual,
+        horas_a_realizar_ot: horometerSnapshot.horas_a_realizar,
+        horometro_proyectado_ot: horometerSnapshot.horometro_proyectado,
       });
     }
 
@@ -15147,6 +15284,77 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             }))
             .sort((a, b) => b.total_costo_inventario - a.total_costo_inventario);
 
+    const closedScopedWorkOrders = scopedWorkOrders
+      .map((row) => ({
+        row,
+        referenceDate: this.resolveWorkOrderReferenceDate(row),
+      }))
+      .filter(
+        (item) =>
+          !!item.referenceDate &&
+          this.normalizeWorkflowStatus(item.row.status_workflow) === 'CLOSED',
+      ) as Array<{ row: WorkOrderEntity; referenceDate: Date }>;
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(now);
+    endOfToday.setHours(23, 59, 59, 999);
+    const startOfWeek = new Date(startOfToday);
+    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(endOfWeek.getDate() + 6);
+    endOfWeek.setHours(23, 59, 59, 999);
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    endOfMonth.setHours(23, 59, 59, 999);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const endOfYear = new Date(now.getFullYear(), 11, 31);
+    endOfYear.setHours(23, 59, 59, 999);
+    const countClosedWorkOrders = (from: Date, to: Date) =>
+      closedScopedWorkOrders.filter(
+        (item) =>
+          item.referenceDate.getTime() >= from.getTime() &&
+          item.referenceDate.getTime() <= to.getTime(),
+      ).length;
+    const topMaterialesRows = [...consumedBaseRows.reduce((acc, row) => {
+      const key = String(row.producto_id || row.material_label || 'SIN_PRODUCTO');
+      const current = acc.get(key) ?? {
+        material_label: row.material_label,
+        total_cantidad: 0,
+        total_costo: 0,
+        total_items: 0,
+        total_ordenes: 0,
+        _ordenes: new Set<string>(),
+        _equipos: new Set<string>(),
+        _bodegas: new Set<string>(),
+      };
+      current.total_cantidad = Number(
+        (current.total_cantidad + this.toNumeric(row.total_cantidad, 0)).toFixed(4),
+      );
+      current.total_costo = Number(
+        (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
+      );
+      current.total_items += Number(row.total_items || 0);
+      current._ordenes.add(String(row.work_order_code || '').trim());
+      current._equipos.add(String(row.equipment_label || '').trim());
+      current._bodegas.add(String(row.bodega_label || '').trim());
+      current.total_ordenes = current._ordenes.size;
+      acc.set(key, current);
+      return acc;
+    }, new Map<string, any>()).values()]
+      .map((row) => ({
+        material_label: row.material_label,
+        total_cantidad: row.total_cantidad,
+        total_costo: row.total_costo,
+        total_items: row.total_items,
+        total_ordenes: row.total_ordenes,
+        equipos: [...row._equipos].filter(Boolean).join(' | '),
+        bodegas: [...row._bodegas].filter(Boolean).join(' | '),
+        ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+      }))
+      .sort((a, b) => b.total_cantidad - a.total_cantidad)
+      .slice(0, 10);
+
     const requestedWarehouseLabel = requestedWarehouseId
       ? this.buildBodegaLabel(
           warehouseMap.get(requestedWarehouseId) ??
@@ -15164,6 +15372,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           label: dateRange.label,
           bodega_id: requestedWarehouseId,
           bodega_label: requestedWarehouseLabel,
+          equipment_id: requestedEquipmentId,
+          equipment_label:
+            requestedEquipment != null
+              ? [requestedEquipment.codigo, requestedEquipment.nombre]
+                  .filter(Boolean)
+                  .join(' - ') || requestedEquipment.id
+              : null,
           group_by: groupBy,
         },
         catalogs: {
@@ -15173,6 +15388,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             nombre: row.nombre ?? null,
             label: this.buildBodegaLabel(row) ?? row.id,
           })),
+          equipos: [...equipmentMap.values()]
+            .map((row) => ({
+              id: row.id,
+              codigo: row.codigo ?? null,
+              nombre: row.nombre ?? null,
+              label:
+                [row.codigo, row.nombre].filter(Boolean).join(' - ') || row.id,
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label)),
         },
         summary: [
           {
@@ -15239,7 +15463,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 .toFixed(4),
             ),
           },
+          { label: 'OT hoy', value: countClosedWorkOrders(startOfToday, endOfToday) },
+          {
+            label: 'OT semana',
+            value: countClosedWorkOrders(startOfWeek, endOfWeek),
+          },
+          {
+            label: 'OT mes',
+            value: countClosedWorkOrders(startOfMonth, endOfMonth),
+          },
+          {
+            label: 'OT año',
+            value: countClosedWorkOrders(startOfYear, endOfYear),
+          },
+          {
+            label: 'OT rango actual',
+            value: countClosedWorkOrders(dateRange.fromDate, dateRange.toDate),
+          },
         ],
+        kpis_ordenes_realizadas: {
+          hoy: countClosedWorkOrders(startOfToday, endOfToday),
+          semana: countClosedWorkOrders(startOfWeek, endOfWeek),
+          mes: countClosedWorkOrders(startOfMonth, endOfMonth),
+          anio: countClosedWorkOrders(startOfYear, endOfYear),
+          personalizado: countClosedWorkOrders(
+            dateRange.fromDate,
+            dateRange.toDate,
+          ),
+        },
         reports: {
           horas_trabajadas: {
             group_by: groupBy,
@@ -15355,6 +15606,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             ),
             total_registros: consumedBaseRows.length,
           },
+          top_materiales_utilizados: {
+            group_by: 'TOP_10',
+            rows: topMaterialesRows,
+            total_registros: topMaterialesRows.length,
+          },
         },
       },
       'Reportes del sistema generados',
@@ -15398,6 +15654,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             total_costo: 0,
           },
           trend: [],
+          statistics: {
+            quantity_trend: [],
+            cost_trend: [],
+            orders_trend: [],
+          },
           work_orders: [],
           by_equipment: [],
         },
@@ -15651,6 +15912,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_ids: Set<string>;
       }
     >();
+    const statisticsMap = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        total_cantidad: number;
+        total_costo: number;
+        work_order_ids: Set<string>;
+      }
+    >();
     for (const row of workOrderRows) {
       const dateValue = new Date(row.fecha_referencia);
       const key =
@@ -15668,6 +15939,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       current.total_cantidad += this.toNumeric(row.cantidad, 0);
       current.work_order_ids.add(row.work_order_id);
       trendMap.set(key, current);
+
+      const statsBucket = this.buildOilStatisticsBucket(dateValue, range.periodo);
+      const currentStats =
+        statisticsMap.get(statsBucket.key) ??
+        {
+          key: statsBucket.key,
+          label: statsBucket.label,
+          total_cantidad: 0,
+          total_costo: 0,
+          work_order_ids: new Set<string>(),
+        };
+      currentStats.total_cantidad += this.toNumeric(row.cantidad, 0);
+      currentStats.total_costo += this.toNumeric(row.subtotal, 0);
+      currentStats.work_order_ids.add(row.work_order_id);
+      statisticsMap.set(statsBucket.key, currentStats);
     }
 
     const trend = [...trendMap.values()]
@@ -15678,6 +15964,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         cantidad: Number(row.total_cantidad.toFixed(4)),
         total_ordenes: row.work_order_ids.size,
       }));
+    const statisticsRows = [...statisticsMap.values()].sort((a, b) =>
+      a.key.localeCompare(b.key),
+    );
+    const statistics = {
+      quantity_trend: statisticsRows.map((row) => ({
+        key: row.key,
+        label: row.label,
+        cantidad: Number(row.total_cantidad.toFixed(4)),
+        total_ordenes: row.work_order_ids.size,
+      })),
+      cost_trend: statisticsRows.map((row) => ({
+        key: row.key,
+        label: row.label,
+        costo: Number(row.total_costo.toFixed(2)),
+        total_ordenes: row.work_order_ids.size,
+      })),
+      orders_trend: statisticsRows.map((row) => ({
+        key: row.key,
+        label: row.label,
+        total_ordenes: row.work_order_ids.size,
+        cantidad: Number(row.total_cantidad.toFixed(4)),
+      })),
+    };
 
     const totalCantidad = workOrderRows.reduce(
       (acc, row) => acc + this.toNumeric(row.cantidad, 0),
@@ -15716,6 +16025,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               : 0,
         },
         trend,
+        statistics,
         work_orders: workOrderRows,
         by_equipment: byEquipment,
       },
@@ -16864,7 +17174,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!equipmentId) {
       throw new BadRequestException('Equipo es obligatorio.');
     }
-    await this.findEquipoOrFail(equipmentId);
+    const equipment = await this.findEquipoOrFail(equipmentId);
 
     let resolvedPlanId =
       this.firstNonEmptyString(header.plan_id, workOrder?.plan_id) ?? null;
@@ -16879,10 +17189,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'Debes seleccionar una plantilla MPG para la OT.',
       );
     }
-    await this.findOneOrFail(planRepo, {
+    const resolvedPlan = await this.findOneOrFail(planRepo, {
       id: resolvedPlanId,
       is_deleted: false,
     } as FindOptionsWhere<PlanMantenimientoEntity>);
+    const resolvedProcedure = header.procedimiento_id
+      ? await this.procedimientoRepo.findOne({
+          where: { id: header.procedimiento_id, is_deleted: false },
+        })
+      : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
     const componentContext = await this.resolveWorkOrderComponentContext(
       equipmentId,
@@ -16927,6 +17242,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             requested_by: this.firstNonEmptyString(actor?.userId) ?? null,
             created_by: this.firstNonEmptyString(actor?.username) ?? null,
           });
+      const nextHeaderPayload = this.buildWorkOrderHorometerPayload(
+        header.valor_json || header.procedimiento_id
+          ? {
+              ...((entity.valor_json as Record<string, unknown> | null) ?? {}),
+              ...((header.valor_json ?? {}) as Record<string, unknown>),
+              ...(header.procedimiento_id
+                ? { procedimiento_id: header.procedimiento_id }
+                : {}),
+            }
+          : ((entity.valor_json as Record<string, unknown> | null) ?? {}),
+        equipment,
+        resolvedProcedure,
+      );
 
       Object.assign(entity, {
         code: isNew ? resolution.resolvedCode : entity.code,
@@ -16974,17 +17302,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           header.purchase_request_id !== undefined
             ? header.purchase_request_id ?? null
             : entity.purchase_request_id ?? null,
-        valor_json:
-          header.valor_json || header.procedimiento_id
-            ? {
-                ...((entity.valor_json as Record<string, unknown> | null) ??
-                  {}),
-                ...((header.valor_json ?? {}) as Record<string, unknown>),
-                ...(header.procedimiento_id
-                  ? { procedimiento_id: header.procedimiento_id }
-                  : {}),
-              }
-            : entity.valor_json,
+        valor_json: nextHeaderPayload,
         updated_by:
           this.firstNonEmptyString(actor?.username) ?? entity.updated_by ?? null,
       });
@@ -17403,7 +17721,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: CreateWorkOrderDto,
     actor?: RequestActorContext | null,
   ) {
-    if (dto.equipment_id) await this.findEquipoOrFail(dto.equipment_id);
+    const equipment = dto.equipment_id
+      ? await this.findEquipoOrFail(dto.equipment_id)
+      : null;
     const componentContext = await this.resolveWorkOrderComponentContext(
       dto.equipment_id ?? null,
       dto.equipo_componente_id ?? null,
@@ -17413,11 +17733,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
       resolvedPlanId = synced.plan.id;
     }
-    if (resolvedPlanId)
-      await this.findOneOrFail(this.planRepo, {
+    const resolvedPlan = resolvedPlanId
+      ? await this.findOneOrFail(this.planRepo, {
         id: resolvedPlanId,
         is_deleted: false,
-      });
+      })
+      : null;
+    const resolvedProcedure = dto.procedimiento_id
+      ? await this.procedimientoRepo.findOne({
+          where: { id: dto.procedimiento_id, is_deleted: false },
+        })
+      : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
     const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
     const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
@@ -17459,6 +17785,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         created_by: this.firstNonEmptyString(actor?.username) ?? null,
         updated_by: this.firstNonEmptyString(actor?.username) ?? null,
       });
+      entity.valor_json = this.buildWorkOrderHorometerPayload(
+        (entity.valor_json as Record<string, unknown> | null) ?? {},
+        equipment,
+        resolvedProcedure,
+      );
       await this.applyBlockingRelationship(
         entity,
         dto.blocked_by_work_order_id ?? null,
@@ -17587,12 +17918,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    const equipment = wo.equipment_id
+      ? await this.findEquipoOrFail(wo.equipment_id)
+      : null;
     const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
     let resolvedPlanId = wo.plan_id ?? null;
     if (dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
       resolvedPlanId = synced.plan.id;
     }
+    const resolvedPlan = resolvedPlanId
+      ? await this.findOneOrFail(this.planRepo, {
+          id: resolvedPlanId,
+          is_deleted: false,
+        })
+      : null;
+    const resolvedProcedure = dto.procedimiento_id
+      ? await this.procedimientoRepo.findOne({
+          where: { id: dto.procedimiento_id, is_deleted: false },
+        })
+      : await this.resolveProcedimientoFromPlan(resolvedPlan);
     const componentContext = await this.resolveWorkOrderComponentContext(
       wo.equipment_id ?? null,
       dto.equipo_componente_id ?? wo.equipo_componente_id ?? null,
@@ -17626,6 +17971,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       updated_by:
         this.firstNonEmptyString(actor?.username) ?? wo.updated_by ?? null,
     });
+    wo.valor_json = this.buildWorkOrderHorometerPayload(
+      (wo.valor_json as Record<string, unknown> | null) ?? {},
+      equipment,
+      resolvedProcedure,
+    );
     wo.maintenance_kind = this.resolveWorkOrderMaintenanceKind(
       dto.maintenance_kind,
       wo.maintenance_kind,
