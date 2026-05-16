@@ -94,10 +94,23 @@ function getRequestActor(req?: any) {
   return {
     userId: String(req?.user?.userId || '').trim() || null,
     username:
-      String(req?.user?.nameUser || req?.user?.username || '').trim() || null,
+      String(
+        req?.headers?.['x-user-name'] ||
+          req?.user?.nameUser ||
+          req?.user?.username ||
+          '',
+      ).trim() || null,
     displayName:
       String(
-        req?.user?.nameSurname || req?.user?.nameUser || req?.user?.username || '',
+        req?.headers?.['x-user-display-name'] ||
+          req?.user?.nameSurname ||
+          req?.user?.nameUser ||
+          req?.user?.username ||
+          '',
+      ).trim() || null,
+    email:
+      String(
+        req?.headers?.['x-user-email'] || req?.user?.email || '',
       ).trim() || null,
     roleName:
       String(

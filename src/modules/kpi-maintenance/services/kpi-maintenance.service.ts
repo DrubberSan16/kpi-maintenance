@@ -263,6 +263,7 @@ type RequestActorContext = {
   userId?: string | null;
   username?: string | null;
   displayName?: string | null;
+  email?: string | null;
   roleName?: string | null;
 };
 
@@ -2790,6 +2791,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       actor_user_id: this.firstNonEmptyString(actor?.userId) ?? null,
       actor_username: this.firstNonEmptyString(actor?.username) ?? null,
       actor_name: this.firstNonEmptyString(actor?.displayName, actor?.username) ?? null,
+      actor_email: this.normalizeEmail(
+        actor?.email ??
+          ((workOrder.valor_json ?? {}) as Record<string, unknown>)?.processed_by_email ??
+          ((workOrder.valor_json ?? {}) as Record<string, unknown>)?.created_by_email,
+      ),
       created_by: workOrder.created_by ?? null,
       updated_by: workOrder.updated_by ?? null,
       requested_by: workOrder.requested_by ?? null,
@@ -8566,6 +8572,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       actor?.displayName,
       actor?.username,
     );
+    const actorEmail = this.normalizeEmail(actor?.email);
     const payload = {
       ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
     };
@@ -8591,16 +8598,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actorUsername ?? this.firstNonEmptyString(payload.created_by_username);
       payload.created_by_name =
         actorDisplayName ?? this.firstNonEmptyString(payload.created_by_name);
+      payload.created_by_email =
+        actorEmail ?? this.normalizeEmail(payload.created_by_email);
       payload.created_at = payload.created_at ?? now;
     } else if (mode === 'PROCESSED') {
       payload.processed_by_user_id = actorUserId ?? null;
       payload.processed_by_username = actorUsername ?? null;
       payload.processed_by_name = actorDisplayName ?? null;
+      payload.processed_by_email = actorEmail ?? null;
       payload.processed_at = now;
     } else {
       payload.approved_by_user_id = actorUserId ?? null;
       payload.approved_by_username = actorUsername ?? null;
       payload.approved_by_name = actorDisplayName ?? null;
+      payload.approved_by_email = actorEmail ?? null;
       payload.approved_at = now;
       payload.approval_action =
         this.firstNonEmptyString(options?.action, payload.approval_action) ?? null;
