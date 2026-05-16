@@ -18266,12 +18266,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrder?.maintenance_kind,
       'CORRECTIVO',
     );
-    const emergencyState = this.resolveWorkOrderEmergencyState(
-      header.is_emergency ?? workOrder?.is_emergency ?? false,
-      header.emergency_reason !== undefined
-        ? header.emergency_reason
-        : workOrder?.emergency_reason,
-    );
+    const emergencyState = isNew
+      ? this.resolveWorkOrderEmergencyState(
+          header.is_emergency ?? workOrder?.is_emergency ?? false,
+          header.emergency_reason !== undefined
+            ? header.emergency_reason
+            : workOrder?.emergency_reason,
+        )
+      : this.resolveWorkOrderEmergencyState(
+          workOrder?.is_emergency ?? false,
+          workOrder?.emergency_reason,
+        );
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
@@ -19089,10 +19094,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'cerrar');
     }
     const emergencyState = this.resolveWorkOrderEmergencyState(
-      dto.is_emergency !== undefined ? dto.is_emergency : wo.is_emergency,
-      dto.emergency_reason !== undefined
-        ? dto.emergency_reason
-        : wo.emergency_reason,
+      wo.is_emergency,
+      wo.emergency_reason,
     );
     Object.assign(wo, {
       ...dto,
