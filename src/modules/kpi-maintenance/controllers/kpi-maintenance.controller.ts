@@ -92,7 +92,13 @@ import { getSucursalScopeId } from '../../../common/http/sucursal-scope.util';
 
 function getRequestActor(req?: any) {
   return {
-    userId: String(req?.user?.userId || '').trim() || null,
+    userId: String(
+      req?.headers?.['x-user-id'] ||
+        req?.user?.userId ||
+        req?.user?.id ||
+        req?.user?.sub ||
+        '',
+    ).trim() || null,
     username:
       String(
         req?.headers?.['x-user-name'] ||
