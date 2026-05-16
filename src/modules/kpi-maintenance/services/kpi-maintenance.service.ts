@@ -1972,6 +1972,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const workOrder = await this.woRepo.findOne({
+      where: { id: workOrderId, is_deleted: false },
+    });
+    if (!workOrder) {
+      throw new NotFoundException('Orden de trabajo no encontrada.');
+    }
+
+    const canAccessAsOwner = await this.canActorCloseOrVoidWorkOrder(
+      workOrder,
+      actor,
+    );
+    if (canAccessAsOwner) {
+      return;
+    }
+
     const assignment = await this.woTareaRepo
       .createQueryBuilder('tarea')
       .select('1')
@@ -1995,7 +2010,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     throw new ForbiddenException(
-      'El perfil operador solo puede acceder a ordenes de trabajo donde este asignado como responsable.',
+      'El perfil operador solo puede acceder a ordenes de trabajo donde este asignado como responsable o a sus propias ordenes de CEBADO.',
     );
   }
 
@@ -17479,22 +17494,61 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         kind: this.resolveWorkOrderMaintenanceKind(q.maintenance_kind),
       });
     const operatorActorUserId = this.resolveOperatorActorUserId(actor, false);
+    const operatorActorUsername = this.normalizeUsername(actor?.username);
     if (this.isOperatorActor(actor)) {
       if (!operatorActorUserId) {
         return this.wrap([], 'Work orders listadas');
       }
       qb.andWhere(
-        `
-          EXISTS (
-            SELECT 1
-            FROM kpi_maintenance.tb_work_order_tarea tarea
-            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tarea.responsables, '[]'::jsonb)) AS responsable
-            WHERE tarea.work_order_id = wo.id
-              AND tarea.is_deleted = false
-              AND COALESCE(responsable->>'user_id', responsable->>'id', '') = :operatorActorUserId
-          )
-        `,
-        { operatorActorUserId },
+        new Brackets((operatorQb) => {
+          operatorQb.where(
+            `
+              EXISTS (
+                SELECT 1
+                FROM kpi_maintenance.tb_work_order_tarea tarea
+                CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tarea.responsables, '[]'::jsonb)) AS responsable
+                WHERE tarea.work_order_id = wo.id
+                  AND tarea.is_deleted = false
+                  AND COALESCE(responsable->>'user_id', responsable->>'id', '') = :operatorActorUserId
+              )
+            `,
+            { operatorActorUserId },
+          );
+          operatorQb.orWhere(
+            new Brackets((ownerQb) => {
+              ownerQb.where(`UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'`);
+              ownerQb.andWhere(
+                new Brackets((identityQb) => {
+                  identityQb.where('wo.requested_by = :operatorActorUserId', {
+                    operatorActorUserId,
+                  });
+                  identityQb.orWhere(
+                    `COALESCE(wo.valor_json->>'created_by_user_id', '') = :operatorActorUserId`,
+                    { operatorActorUserId },
+                  );
+                  identityQb.orWhere(
+                    `COALESCE(wo.valor_json->>'actor_user_id', '') = :operatorActorUserId`,
+                    { operatorActorUserId },
+                  );
+                  if (operatorActorUsername) {
+                    identityQb.orWhere(
+                      'LOWER(COALESCE(wo.created_by, \'\')) = :operatorActorUsername',
+                      { operatorActorUsername },
+                    );
+                    identityQb.orWhere(
+                      'LOWER(COALESCE(wo.valor_json->>\'created_by_username\', \'\')) = :operatorActorUsername',
+                      { operatorActorUsername },
+                    );
+                    identityQb.orWhere(
+                      'LOWER(COALESCE(wo.valor_json->>\'actor_username\', \'\')) = :operatorActorUsername',
+                      { operatorActorUsername },
+                    );
+                  }
+                }),
+              );
+            }),
+          );
+        }),
       );
     }
     if (fechaDesde) {
