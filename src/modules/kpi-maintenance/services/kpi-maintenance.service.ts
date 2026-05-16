@@ -8911,14 +8911,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
     };
 
-    addOwnerUserId(workOrder.requested_by);
-    addOwnerUsername(workOrder.created_by);
+    const workOrderPayload =
+      ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
+        {}) as Record<string, unknown>;
+    addOwnerUserId(
+      workOrder.requested_by,
+      workOrderPayload.created_by_user_id,
+    );
+    addOwnerUsername(
+      workOrder.created_by,
+      workOrderPayload.created_by_username,
+    );
+
+    const isDirectOwner =
+      (!!actorUserId && ownerUserIds.has(actorUserId)) ||
+      (!!actorUsername && ownerUsernames.has(actorUsername));
+
+    if (this.isOperatorActor(actor)) {
+      return (
+        this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO' &&
+        isDirectOwner
+      );
+    }
 
     const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
     plannerHints.userIds.forEach((value) => ownerUserIds.add(value));
     plannerHints.usernames.forEach((value) => ownerUsernames.add(value));
 
     return (
+      isDirectOwner ||
       (!!actorUserId && ownerUserIds.has(actorUserId)) ||
       (!!actorUsername && ownerUsernames.has(actorUsername))
     );
@@ -8939,6 +8960,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     if (allowed) {
       return { linkedProgramacion, canCloseOrVoid: true };
+    }
+
+    if (this.isOperatorActor(actor)) {
+      if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) !== 'CEBADO') {
+        throw new ForbiddenException(
+          `El perfil operador solo puede ${actionLabel} ordenes de trabajo de tipo mantenimiento CEBADO creadas por el mismo.`,
+        );
+      }
+      throw new ForbiddenException(
+        `Solo el operador que creo esta orden de trabajo de tipo CEBADO puede ${actionLabel}.`,
+      );
     }
 
     const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
