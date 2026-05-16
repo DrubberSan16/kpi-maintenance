@@ -633,6 +633,26 @@ export class UpdateProgramacionMensualDetalleDto {
   payload_json?: Record<string, unknown>;
 }
 
+export class ReprogramProgramacionMensualDetalleDto {
+  @ApiProperty({ description: 'Nueva fecha programada (ISO 8601)' })
+  @IsDateString()
+  fecha_programada: string;
+
+  @ApiProperty({
+    description: 'Observación obligatoria que justifica la reprogramación',
+  })
+  @IsString()
+  @IsNotEmpty()
+  observacion_reprogramacion: string;
+
+  @ApiPropertyOptional({
+    description: 'Payload auxiliar de auditoría para la reprogramación',
+  })
+  @IsOptional()
+  @IsObject()
+  payload_json?: Record<string, unknown>;
+}
+
 export class UpdateProgramacionMensualConfigDto {
   @ApiPropertyOptional({ description: 'Payload auxiliar del encabezado mensual' })
   @IsOptional()

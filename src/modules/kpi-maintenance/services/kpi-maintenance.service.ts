@@ -112,6 +112,7 @@ import {
   CreateProgramacionDto,
   CreateProgramacionMensualDetalleDto,
   CreateReporteOperacionDiariaDto,
+  ReprogramProgramacionMensualDetalleDto,
   ScrapMaterialsDto,
   CreateWorkOrderDto,
   DateRangeDto,
@@ -2862,6 +2863,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     row: Pick<AlertaMantenimientoEntity, 'tipo_alerta' | 'origen' | 'payload_json'>,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const publicAlertType = this.firstNonEmptyString(payload.tipo_alerta_publico);
+    if (publicAlertType) {
+      return publicAlertType;
+    }
     const payloadSource = String(payload.source || '').trim().toUpperCase();
     if (
       row.origen === 'WORK_ORDER' &&
@@ -13018,9 +13023,161 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.programacionRepo.save(row);
   }
 
+  private resolveAuditActorSnapshot(
+    actor?: RequestActorContext | null,
+    payload?: Record<string, unknown> | null,
+  ) {
+    const source = (payload ?? {}) as Record<string, unknown>;
+    const username = this.firstNonEmptyString(
+      actor?.username,
+      source.actor_username,
+      source.updated_by,
+      source.created_by,
+      source.requested_by,
+    );
+    return {
+      userId: this.firstNonEmptyString(
+        actor?.userId,
+        source.actor_user_id,
+        source.user_id,
+        source.requested_user_id,
+      ),
+      username,
+      displayName: this.firstNonEmptyString(
+        actor?.displayName,
+        source.actor_name,
+        source.requested_by_name,
+        username,
+      ),
+      email: this.normalizeEmail(
+        actor?.email ??
+          this.firstNonEmptyString(
+            source.actor_email,
+            source.updated_by_email,
+            source.created_by_email,
+            source.requested_by_email,
+          ),
+      ),
+      roleName: this.firstNonEmptyString(actor?.roleName, source.actor_role),
+    };
+  }
+
+  private buildProgramacionMensualReprogramObservation(
+    currentObservation: unknown,
+    summary: {
+      previousDate: string;
+      nextDate: string;
+      reason: string;
+      actorLabel?: string | null;
+      registeredAt: string;
+    },
+  ) {
+    const base = String(currentObservation ?? '').trim();
+    const actorLabel = this.firstNonEmptyString(summary.actorLabel);
+    const stamp = summary.registeredAt
+      .replace('T', ' ')
+      .replace(/\.\d{3}Z$/, '')
+      .slice(0, 16);
+    const line = [
+      `[Reprogramacion ${stamp}]`,
+      `${summary.previousDate} -> ${summary.nextDate}`,
+      actorLabel ? `por ${actorLabel}` : '',
+      `Motivo: ${summary.reason}`,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return base ? `${base}\n${line}` : line;
+  }
+
+  private async createProgramacionMensualReprogramAlert(params: {
+    header: ProgramacionMensualEntity;
+    detail: ProgramacionMensualDetalleEntity;
+    previousDate: string;
+    nextDate: string;
+    reason: string;
+    actor?: RequestActorContext | null;
+    payload?: Record<string, unknown> | null;
+  }) {
+    const actorSnapshot = this.resolveAuditActorSnapshot(
+      params.actor,
+      params.payload,
+    );
+    const now = new Date();
+    const payloadJson = {
+      ...((params.detail.payload_json ?? {}) as Record<string, unknown>),
+      ...((params.payload ?? {}) as Record<string, unknown>),
+      tipo_alerta_publico: 'PROGRAMACION_REPROGRAMADA',
+      programacion_mensual_id: params.header.id,
+      programacion_mensual_codigo: params.header.codigo ?? null,
+      programacion_mensual_documento:
+        params.header.nombre_archivo ?? params.header.documento_origen ?? null,
+      programacion_mensual_detalle_id: params.detail.id,
+      programacion_id: params.detail.programacion_id ?? null,
+      equipo_id: params.detail.equipo_id ?? null,
+      equipo_codigo: params.detail.equipo_codigo ?? null,
+      equipo_nombre: params.detail.equipo_nombre ?? null,
+      valor_crudo: params.detail.valor_crudo ?? null,
+      tipo_mantenimiento: params.detail.tipo_mantenimiento ?? null,
+      fecha_programada_anterior: params.previousDate,
+      fecha_programada_nueva: params.nextDate,
+      reprogramacion_observacion: params.reason,
+      actor_user_id: actorSnapshot.userId ?? null,
+      actor_username: actorSnapshot.username ?? null,
+      actor_name: actorSnapshot.displayName ?? null,
+      actor_email: actorSnapshot.email ?? null,
+      actor_role: actorSnapshot.roleName ?? null,
+      updated_by: actorSnapshot.username ?? null,
+      updated_by_email: actorSnapshot.email ?? null,
+    } satisfies Record<string, unknown>;
+
+    const buildAlertRow = (storedAlertType: string) =>
+      this.alertaRepo.create({
+        equipo_id: params.detail.equipo_id ?? null,
+        tipo_alerta: storedAlertType,
+        categoria: 'MANTENIMIENTO' as AlertCategory,
+        nivel: 'INFO' as AlertLevel,
+        origen: 'PROGRAMACION' as AlertOrigin,
+        referencia_tipo: 'PROGRAMACION_MENSUAL',
+        referencia: `PROGRAMACION_MENSUAL:REPROGRAMACION:${params.detail.id}:${now.getTime()}`,
+        detalle: `${
+          params.detail.equipo_codigo ||
+          params.detail.equipo_nombre ||
+          'Equipo'
+        } · ${
+          params.detail.valor_crudo || params.detail.tipo_mantenimiento || 'bloque mensual'
+        } reprogramado de ${params.previousDate} a ${params.nextDate}`,
+        payload_json: payloadJson,
+        fecha_generada: now,
+        ultima_evaluacion_at: now,
+        resolved_at: null,
+        estado: 'ABIERTA',
+      });
+
+    let alertRow: AlertaMantenimientoEntity;
+    try {
+      alertRow = await this.alertaRepo.save(
+        buildAlertRow('PROGRAMACION_REPROGRAMADA'),
+      );
+    } catch (error: any) {
+      if (!this.isAlertTypeConstraintError(error)) {
+        throw error;
+      }
+      this.logger.warn(
+        'La BD aun no admite el tipo de alerta PROGRAMACION_REPROGRAMADA; se utilizara compatibilidad temporal con MANTENIMIENTO_PROXIMO.',
+      );
+      alertRow = await this.alertaRepo.save(
+        buildAlertRow('MANTENIMIENTO_PROXIMO'),
+      );
+    }
+
+    await this.dispatchAlertTriggeredNotifications(alertRow);
+    return alertRow;
+  }
+
   private async prepareProgramacionMensualDetailInput(
     dto: CreateProgramacionMensualDetalleDto | UpdateProgramacionMensualDetalleDto,
     current?: ProgramacionMensualDetalleEntity | null,
+    options?: { allowScheduleDateChange?: boolean },
   ) {
     const rawValue = this.normalizeProgramacionWorkbookValue(
       dto.valor_crudo ?? current?.valor_crudo ?? '',
@@ -13087,6 +13244,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!fechaProgramada) {
       throw new BadRequestException(
         'Debes indicar la fecha del bloque mensual.',
+      );
+    }
+    const currentFechaProgramada = this.toDateOnlyString(current?.fecha_programada);
+    if (
+      current &&
+      !options?.allowScheduleDateChange &&
+      dto.fecha_programada != null &&
+      currentFechaProgramada &&
+      fechaProgramada !== currentFechaProgramada
+    ) {
+      throw new BadRequestException(
+        'La fecha programada del bloque mensual no puede modificarse desde esta edición. Usa la opción Reprogramar.',
       );
     }
     const previousPayload = (current?.payload_json ?? {}) as Record<string, unknown>;
@@ -13269,6 +13438,193 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(
       await this.buildProgramacionMensualPayload(header),
       'Detalle mensual actualizado',
+    );
+  }
+
+  async reprogramProgramacionMensualDetalle(
+    detailId: string,
+    dto: ReprogramProgramacionMensualDetalleDto,
+    actor?: RequestActorContext | null,
+  ) {
+    const detail = await this.findOneOrFail(this.programacionMensualDetRepo, {
+      id: detailId,
+      is_deleted: false,
+    });
+    const header = await this.findOneOrFail(this.programacionMensualRepo, {
+      id: detail.programacion_mensual_id,
+      is_deleted: false,
+    });
+
+    const previousDate = this.toDateOnlyString(detail.fecha_programada);
+    const nextDate = this.toDateOnlyString(dto.fecha_programada);
+    const reason = String(dto.observacion_reprogramacion || '').trim();
+    if (!nextDate) {
+      throw new BadRequestException(
+        'Debes indicar la nueva fecha de reprogramación.',
+      );
+    }
+    if (!previousDate) {
+      throw new BadRequestException(
+        'El bloque mensual no tiene una fecha base para reprogramar.',
+      );
+    }
+    if (nextDate === previousDate) {
+      throw new BadRequestException(
+        'Debes seleccionar una fecha distinta a la actual para reprogramar.',
+      );
+    }
+    if (!reason) {
+      throw new BadRequestException(
+        'Debes registrar la observación que justifica la reprogramación.',
+      );
+    }
+
+    const payloadOverrides = (dto.payload_json ?? {}) as Record<string, unknown>;
+    const actorSnapshot = this.resolveAuditActorSnapshot(actor, payloadOverrides);
+    const registeredAt = new Date().toISOString();
+    const historyEntry = {
+      previous_date: previousDate,
+      next_date: nextDate,
+      observacion: reason,
+      registered_at: registeredAt,
+      actor_user_id: actorSnapshot.userId ?? null,
+      actor_username: actorSnapshot.username ?? null,
+      actor_name: actorSnapshot.displayName ?? null,
+      actor_email: actorSnapshot.email ?? null,
+      actor_role: actorSnapshot.roleName ?? null,
+    };
+    const currentPayload = (detail.payload_json ?? {}) as Record<string, unknown>;
+    const previousHistory = Array.isArray(currentPayload.reprogramaciones_historial)
+      ? [...(currentPayload.reprogramaciones_historial as Record<string, unknown>[])]
+      : [];
+
+    const prepared = await this.prepareProgramacionMensualDetailInput(
+      {
+        equipo_id: detail.equipo_id ?? undefined,
+        equipo_codigo: detail.equipo_codigo ?? undefined,
+        fecha_programada: nextDate,
+        valor_crudo: detail.valor_crudo,
+        procedimiento_id: detail.procedimiento_id ?? undefined,
+        observacion: this.buildProgramacionMensualReprogramObservation(
+          detail.observacion,
+          {
+            previousDate,
+            nextDate,
+            reason,
+            actorLabel:
+              actorSnapshot.displayName ?? actorSnapshot.username ?? null,
+            registeredAt,
+          },
+        ),
+        payload_json: {
+          ...payloadOverrides,
+          actor_user_id: actorSnapshot.userId ?? null,
+          actor_username: actorSnapshot.username ?? null,
+          actor_name: actorSnapshot.displayName ?? null,
+          actor_email: actorSnapshot.email ?? null,
+          actor_role: actorSnapshot.roleName ?? null,
+          updated_by: actorSnapshot.username ?? null,
+          updated_by_email: actorSnapshot.email ?? null,
+          reprogramado: true,
+          reprogramado_at: registeredAt,
+          reprogramado_por_user_id: actorSnapshot.userId ?? null,
+          reprogramado_por: actorSnapshot.username ?? null,
+          reprogramado_por_nombre: actorSnapshot.displayName ?? null,
+          reprogramado_por_email: actorSnapshot.email ?? null,
+          fecha_programada_anterior: previousDate,
+          fecha_programada_nueva: nextDate,
+          reprogramacion_actual: historyEntry,
+          reprogramacion_observacion: reason,
+          reprogramaciones_historial: [...previousHistory, historyEntry],
+        },
+      },
+      detail,
+      { allowScheduleDateChange: true },
+    );
+
+    let programacionId = detail.programacion_id ?? null;
+    if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id) {
+      const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
+        equipo_id: prepared.equipo.id,
+        plan_id: prepared.mapping.plan_id,
+        fecha_programada: prepared.fechaProgramada,
+        documento_origen: header.documento_origen || 'MENSUAL_REPROGRAMACION',
+        valor_crudo: prepared.descriptor.raw,
+        frecuencia_horas: prepared.descriptor.frecuencia_horas,
+        ultima_ejecucion_horas:
+          prepared.nextPayload.horometro_ultimo != null
+            ? this.toNumeric(prepared.nextPayload.horometro_ultimo, 0)
+            : null,
+        proxima_horas: prepared.proximaHoras,
+        payload_json: {
+          programacion_mensual_codigo: header.codigo,
+          tipo_mantenimiento: prepared.descriptor.tipo_mantenimiento,
+          valor_normalizado: prepared.descriptor.normalized,
+          ...prepared.nextPayload,
+        },
+      });
+      if (detail.programacion_id && detail.programacion_id !== programacion.id) {
+        await this.disableProgramacionLink(detail.programacion_id);
+      }
+      programacionId = programacion.id;
+    } else if (detail.programacion_id) {
+      await this.disableProgramacionLink(detail.programacion_id);
+      programacionId = null;
+    }
+
+    Object.assign(detail, {
+      programacion_id: programacionId,
+      equipo_id: prepared.equipo.id,
+      equipo_codigo: prepared.equipo.codigo,
+      equipo_nombre: prepared.equipo.nombre,
+      fecha_programada: prepared.fechaProgramada,
+      dia_mes: Number(prepared.fechaProgramada.slice(-2)),
+      valor_crudo: prepared.descriptor.raw,
+      valor_normalizado: prepared.descriptor.normalized,
+      tipo_mantenimiento: prepared.descriptor.tipo_mantenimiento,
+      frecuencia_horas: prepared.descriptor.frecuencia_horas,
+      procedimiento_id: prepared.mapping.procedimiento_id,
+      plan_id: prepared.mapping.plan_id,
+      es_sincronizable:
+        Boolean(prepared.mapping.es_sincronizable) &&
+        Boolean(prepared.equipo.id),
+      observacion: prepared.observacion,
+      payload_json: prepared.nextPayload,
+    });
+    await this.programacionMensualDetRepo.save(detail);
+    await this.createProgramacionMensualReprogramAlert({
+      header,
+      detail,
+      previousDate,
+      nextDate: prepared.fechaProgramada,
+      reason,
+      actor,
+      payload: prepared.nextPayload,
+    });
+    await this.writeSecurityLog({
+      typeLog: 'PROGRAMACION_MENSUAL_REPROGRAMADA',
+      description: `[PROG_MENSUAL:${detail.id}] ${detail.equipo_codigo || detail.equipo_nombre || 'Equipo'} reprogramado de ${previousDate} a ${prepared.fechaProgramada}`,
+    });
+    await this.registerProcessEvent({
+      tipo_proceso: 'PROGRAMACION_MENSUAL',
+      accion: 'REPROGRAMMED',
+      referencia_tabla: 'tb_programacion_mensual_det',
+      referencia_id: detail.id,
+      referencia_codigo: header.codigo,
+      equipo_id: detail.equipo_id ?? null,
+      title: 'Bloque mensual reprogramado',
+      body: `${detail.equipo_codigo || detail.equipo_nombre || 'Equipo'} · ${previousDate} -> ${prepared.fechaProgramada}`,
+      payload_kpi: {
+        valor_crudo: detail.valor_crudo,
+        tipo_mantenimiento: detail.tipo_mantenimiento,
+        fecha_anterior: previousDate,
+        fecha_nueva: prepared.fechaProgramada,
+      },
+    });
+
+    return this.wrap(
+      await this.buildProgramacionMensualPayload(header),
+      'Bloque mensual reprogramado',
     );
   }
 

@@ -55,6 +55,7 @@ import {
   ImportAnalisisLubricanteBatchDto,
   ProgramacionMensualQueryDto,
   PurgeAnalisisLubricanteDto,
+  ReprogramProgramacionMensualDetalleDto,
   ScrapMaterialsDto,
   UpdateAnalisisLubricanteDto,
   UpdateBitacoraDto,
@@ -672,6 +673,24 @@ export class KpiMaintenanceController {
     @Body() dto: UpdateProgramacionMensualDetalleDto,
   ) {
     return this.service.updateProgramacionMensualDetalle(detailId, dto);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({
+    summary:
+      'Reprogramar la fecha de un detalle mensual importado con observación obligatoria',
+  })
+  @Patch('programaciones/mensuales/detalles/:detailId/reprogramacion')
+  reprogramProgramacionMensualDetalle(
+    @Param('detailId') detailId: string,
+    @Body() dto: ReprogramProgramacionMensualDetalleDto,
+    @Req() req: any,
+  ) {
+    return this.service.reprogramProgramacionMensualDetalle(
+      detailId,
+      dto,
+      getRequestActor(req),
+    );
   }
 
   @ApiTags('Programaciones')
