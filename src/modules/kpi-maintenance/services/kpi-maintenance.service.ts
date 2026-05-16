@@ -1639,6 +1639,120 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private haveDifferentNumericValue(left: number | null, right: number | null) {
+    if (left == null && right == null) return false;
+    if (left == null || right == null) return true;
+    return Math.abs(left - right) >= 0.0001;
+  }
+
+  private formatHorometerHistoryValue(value: number | null) {
+    return value == null ? 'N/D' : Number(value.toFixed(2)).toString();
+  }
+
+  private async syncEquipmentHorometerFromWorkOrder(
+    workOrder: WorkOrderEntity,
+    previousPayload?: Record<string, unknown> | null,
+    actor?: RequestActorContext | null,
+    manager?: EntityManager,
+  ) {
+    const equipmentId = this.firstNonEmptyString(workOrder.equipment_id);
+    if (!equipmentId) {
+      return [] as string[];
+    }
+
+    const repo =
+      manager?.getRepository(EquipoEntity) ?? this.equipoRepo;
+    const equipment = await this.findOneOrFail(repo, {
+      id: equipmentId,
+      is_deleted: false,
+    } as FindOptionsWhere<EquipoEntity>);
+    const currentPayload =
+      (workOrder.valor_json as Record<string, unknown> | null | undefined) ?? {};
+    const previousSnapshot = this.extractWorkOrderHorometerSnapshot(
+      previousPayload ?? null,
+    );
+    const currentSnapshot = this.extractWorkOrderHorometerSnapshot(
+      currentPayload,
+    );
+    const notes: string[] = [];
+
+    if (
+      this.haveDifferentNumericValue(
+        previousSnapshot.horometro_actual,
+        currentSnapshot.horometro_actual,
+      )
+    ) {
+      notes.push(
+        previousSnapshot.horometro_actual == null
+          ? `Horómetro actual OT registrado: ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`
+          : `Horómetro actual OT actualizado: ${this.formatHorometerHistoryValue(previousSnapshot.horometro_actual)} -> ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`,
+      );
+    }
+
+    if (
+      this.haveDifferentNumericValue(
+        previousSnapshot.horometro_proyectado,
+        currentSnapshot.horometro_proyectado,
+      )
+    ) {
+      notes.push(
+        previousSnapshot.horometro_proyectado == null
+          ? `Horómetro proyectado OT calculado: ${this.formatHorometerHistoryValue(currentSnapshot.horometro_proyectado)}`
+          : `Horómetro proyectado OT actualizado: ${this.formatHorometerHistoryValue(previousSnapshot.horometro_proyectado)} -> ${this.formatHorometerHistoryValue(currentSnapshot.horometro_proyectado)}`,
+      );
+    }
+
+    let shouldPersistEquipment = false;
+    const now = new Date();
+    const equipmentCurrentHorometer =
+      equipment.horometro_actual != null
+        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
+        : null;
+    if (
+      currentSnapshot.horometro_actual != null &&
+      this.haveDifferentNumericValue(
+        equipmentCurrentHorometer,
+        currentSnapshot.horometro_actual,
+      )
+    ) {
+      equipment.horometro_actual = currentSnapshot.horometro_actual;
+      equipment.fecha_ultima_lectura = now;
+      shouldPersistEquipment = true;
+      notes.push(
+        `Equipo sincronizado con horómetro actual OT: ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`,
+      );
+    }
+
+    const normalizedStatus = this.normalizeWorkflowStatus(
+      workOrder.status_workflow,
+    );
+    if (
+      normalizedStatus === 'CLOSED' &&
+      currentSnapshot.horometro_proyectado != null &&
+      this.haveDifferentNumericValue(
+        equipment.horometro_actual != null
+          ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
+          : null,
+        currentSnapshot.horometro_proyectado,
+      )
+    ) {
+      equipment.horometro_actual = currentSnapshot.horometro_proyectado;
+      equipment.fecha_ultima_lectura = now;
+      shouldPersistEquipment = true;
+      notes.push(
+        `OT finalizada: equipo actualizado con horómetro proyectado ${this.formatHorometerHistoryValue(currentSnapshot.horometro_proyectado)}`,
+      );
+    }
+
+    if (shouldPersistEquipment) {
+      equipment.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? equipment.updated_by ?? null;
+      await repo.save(equipment);
+    }
+
+    return [...new Set(notes.filter(Boolean))];
+  }
+
   private resolveWorkOrderReferenceDate(workOrder?: WorkOrderEntity | null) {
     if (!workOrder) return null;
     return (
@@ -17167,6 +17281,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const previousStatus = this.normalizeWorkflowStatus(
       workOrder?.status_workflow ?? 'PLANNED',
     );
+    const previousHeaderPayload =
+      ((workOrder?.valor_json as Record<string, unknown> | null | undefined) ??
+        null);
     const equipmentId =
       this.firstNonEmptyString(header.equipment_id, workOrder?.equipment_id) ??
       null;
@@ -17211,9 +17328,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrder?.maintenance_kind,
       'CORRECTIVO',
     );
-    if (isNew) {
-      this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
-    }
+    this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
     }
@@ -17376,6 +17491,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           saved,
           actor,
         );
+    const horometerHistoryNotes =
+      await this.syncEquipmentHorometerFromWorkOrder(
+        saved,
+        previousHeaderPayload,
+        actor,
+        manager,
+      );
 
     return {
       workOrder: saved,
@@ -17384,6 +17506,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       resolution,
       alertaId: explicitAlertId ?? automaticAlert?.alert.id ?? null,
       alertWasAutoCreated: Boolean(automaticAlert?.created),
+      horometerHistoryNotes,
     };
   }
 
@@ -17419,6 +17542,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             resolution: CodeResolution;
             alertaId: string | null;
             alertWasAutoCreated: boolean;
+            horometerHistoryNotes: string[];
           }
       | null = null;
 
@@ -17609,6 +17733,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           changedBy: this.resolveActorLabel(actor),
         },
       ));
+    }
+
+    for (const note of transactionResult.horometerHistoryNotes ?? []) {
+      await safePostCommit('el historial de horometro', () =>
+        this.appendWorkOrderHistory(saved.id, normalizedSavedStatus, note, {
+          fromStatus: transactionResult!.previousStatus,
+          changedBy: this.resolveActorLabel(actor),
+        }),
+      );
     }
 
     if (transactionResult.alertaId) {
@@ -17825,6 +17958,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!created) {
       throw new ConflictException('No se pudo generar un código único para la orden de trabajo.');
     }
+    const createdHorometerHistoryNotes =
+      await this.syncEquipmentHorometerFromWorkOrder(created, null, actor);
 
         if (created.blocked_by_work_order_id) {
       const blocker = await this.woRepo.findOne({
@@ -17842,6 +17977,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'Orden de trabajo creada',
       { changedBy: this.resolveActorLabel(actor) },
     );
+    for (const note of createdHorometerHistoryNotes) {
+      await this.appendWorkOrderHistory(
+        created.id,
+        this.normalizeWorkflowStatus(created.status_workflow),
+        note,
+        { changedBy: this.resolveActorLabel(actor) },
+      );
+    }
     const generatedWorkOrderAlert = dto.alerta_id
       ? null
       : await this.ensureAutomaticWorkOrderAlertWithManager(
@@ -17918,6 +18061,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    const previousPayload =
+      ((wo.valor_json as Record<string, unknown> | null | undefined) ?? null);
     const equipment = wo.equipment_id
       ? await this.findEquipoOrFail(wo.equipment_id)
       : null;
@@ -17981,6 +18126,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.maintenance_kind,
       'CORRECTIVO',
     );
+    this.assertOperatorWorkOrderKind(actor, wo.maintenance_kind);
     wo.status_workflow = nextWorkflowStatus;
     if (nextWorkflowStatus === 'CLOSED') {
       this.applyWorkOrderAuditStamp(wo, actor, 'APPROVED', {
@@ -18000,6 +18146,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
     const saved = await this.woRepo.save(wo);
+    const updatedHorometerHistoryNotes =
+      await this.syncEquipmentHorometerFromWorkOrder(
+        saved,
+        previousPayload,
+        actor,
+      );
     const generatedWorkOrderAlert = await this.ensureAutomaticWorkOrderAlertWithManager(
       this.dataSource.manager,
       saved,
@@ -18022,6 +18174,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus, changedBy: this.resolveActorLabel(actor) });
     } else {
       await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus, changedBy: this.resolveActorLabel(actor) });
+    }
+    for (const note of updatedHorometerHistoryNotes) {
+      await this.appendWorkOrderHistory(
+        saved.id,
+        this.normalizeWorkflowStatus(saved.status_workflow),
+        note,
+        {
+          fromStatus: previousStatus,
+          changedBy: this.resolveActorLabel(actor),
+        },
+      );
     }
     await this.syncAlertsForWorkOrder(saved);
     const enriched = await this.enrichWorkOrder(saved, actor);
