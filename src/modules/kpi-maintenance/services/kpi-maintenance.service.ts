@@ -17573,9 +17573,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               ownerQb.andWhere(
                 new Brackets((identityQb) => {
                   if (operatorActorUserId) {
-                    identityQb.where('wo.requested_by = :operatorActorUserId', {
-                      operatorActorUserId,
-                    });
+                    identityQb.where(
+                      `COALESCE(wo.requested_by::text, '') = :operatorActorUserId`,
+                      {
+                        operatorActorUserId,
+                      },
+                    );
                     identityQb.orWhere(
                       `COALESCE(wo.valor_json->>'created_by_user_id', '') = :operatorActorUserId`,
                       { operatorActorUserId },
