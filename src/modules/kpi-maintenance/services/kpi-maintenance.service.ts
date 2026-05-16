@@ -1963,12 +1963,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  private resolveOperatorActorIdentity(
+    actor?: RequestActorContext | null,
+    throwWhenMissing = true,
+  ) {
+    if (!this.isOperatorActor(actor)) {
+      return { userId: null, username: null };
+    }
+    const userId = this.firstNonEmptyString(actor?.userId);
+    const username = this.normalizeUsername(actor?.username);
+    if (userId || username) {
+      return { userId: userId ?? null, username: username ?? null };
+    }
+    if (throwWhenMissing) {
+      throw new ForbiddenException(
+        'No se pudo identificar al operador autenticado para validar sus ordenes de trabajo asignadas.',
+      );
+    }
+    return { userId: null, username: null };
+  }
+
   private async assertOperatorAssignedToWorkOrder(
     workOrderId: string,
     actor?: RequestActorContext | null,
   ) {
-    const actorUserId = this.resolveOperatorActorUserId(actor);
-    if (!actorUserId) {
+    const {
+      userId: actorUserId,
+      username: actorUsername,
+    } = this.resolveOperatorActorIdentity(actor);
+    if (!actorUserId && !actorUsername) {
       return;
     }
 
@@ -1997,10 +2020,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           EXISTS (
             SELECT 1
             FROM jsonb_array_elements(COALESCE(tarea.responsables, '[]'::jsonb)) AS responsable
-            WHERE COALESCE(responsable->>'user_id', responsable->>'id', '') = :actorUserId
+            WHERE (
+              ${
+                actorUserId
+                  ? `COALESCE(responsable->>'user_id', responsable->>'id', '') = :actorUserId`
+                  : `1 = 0`
+              }
+              ${
+                actorUsername
+                  ? ` OR LOWER(COALESCE(responsable->>'username', '')) = :actorUsername`
+                  : ''
+              }
+            )
           )
         `,
-        { actorUserId },
+        {
+          ...(actorUserId ? { actorUserId } : {}),
+          ...(actorUsername ? { actorUsername } : {}),
+        },
       )
       .limit(1)
       .getRawOne();
@@ -17493,10 +17530,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       qb.andWhere('wo.maintenance_kind = :kind', {
         kind: this.resolveWorkOrderMaintenanceKind(q.maintenance_kind),
       });
-    const operatorActorUserId = this.resolveOperatorActorUserId(actor, false);
-    const operatorActorUsername = this.normalizeUsername(actor?.username);
+    const {
+      userId: operatorActorUserId,
+      username: operatorActorUsername,
+    } = this.resolveOperatorActorIdentity(actor, false);
     if (this.isOperatorActor(actor)) {
-      if (!operatorActorUserId) {
+      if (!operatorActorUserId && !operatorActorUsername) {
         return this.wrap([], 'Work orders listadas');
       }
       qb.andWhere(
@@ -17509,32 +17548,55 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tarea.responsables, '[]'::jsonb)) AS responsable
                 WHERE tarea.work_order_id = wo.id
                   AND tarea.is_deleted = false
-                  AND COALESCE(responsable->>'user_id', responsable->>'id', '') = :operatorActorUserId
+                  AND (
+                    ${
+                      operatorActorUserId
+                        ? `COALESCE(responsable->>'user_id', responsable->>'id', '') = :operatorActorUserId`
+                        : `1 = 0`
+                    }
+                    ${
+                      operatorActorUsername
+                        ? ` OR LOWER(COALESCE(responsable->>'username', '')) = :operatorActorUsername`
+                        : ''
+                    }
+                  )
               )
             `,
-            { operatorActorUserId },
+            {
+              ...(operatorActorUserId ? { operatorActorUserId } : {}),
+              ...(operatorActorUsername ? { operatorActorUsername } : {}),
+            },
           );
           operatorQb.orWhere(
             new Brackets((ownerQb) => {
               ownerQb.where(`UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'`);
               ownerQb.andWhere(
                 new Brackets((identityQb) => {
-                  identityQb.where('wo.requested_by = :operatorActorUserId', {
-                    operatorActorUserId,
-                  });
-                  identityQb.orWhere(
-                    `COALESCE(wo.valor_json->>'created_by_user_id', '') = :operatorActorUserId`,
-                    { operatorActorUserId },
-                  );
-                  identityQb.orWhere(
-                    `COALESCE(wo.valor_json->>'actor_user_id', '') = :operatorActorUserId`,
-                    { operatorActorUserId },
-                  );
-                  if (operatorActorUsername) {
+                  if (operatorActorUserId) {
+                    identityQb.where('wo.requested_by = :operatorActorUserId', {
+                      operatorActorUserId,
+                    });
                     identityQb.orWhere(
-                      'LOWER(COALESCE(wo.created_by, \'\')) = :operatorActorUsername',
-                      { operatorActorUsername },
+                      `COALESCE(wo.valor_json->>'created_by_user_id', '') = :operatorActorUserId`,
+                      { operatorActorUserId },
                     );
+                    identityQb.orWhere(
+                      `COALESCE(wo.valor_json->>'actor_user_id', '') = :operatorActorUserId`,
+                      { operatorActorUserId },
+                    );
+                  }
+                  if (operatorActorUsername) {
+                    if (operatorActorUserId) {
+                      identityQb.orWhere(
+                        'LOWER(COALESCE(wo.created_by, \'\')) = :operatorActorUsername',
+                        { operatorActorUsername },
+                      );
+                    } else {
+                      identityQb.where(
+                        'LOWER(COALESCE(wo.created_by, \'\')) = :operatorActorUsername',
+                        { operatorActorUsername },
+                      );
+                    }
                     identityQb.orWhere(
                       'LOWER(COALESCE(wo.valor_json->>\'created_by_username\', \'\')) = :operatorActorUsername',
                       { operatorActorUsername },
