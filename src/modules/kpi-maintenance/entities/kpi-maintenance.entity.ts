@@ -727,6 +727,8 @@ export class WorkOrderEntity {
   @Column({ type: 'text', nullable: true }) updated_by?: string | null;
   @Column({ default: 'INTERNO' }) provider_type: string;
   @Column({ default: 'CORRECTIVO' }) maintenance_kind: string;
+  @Column({ default: false }) is_emergency: boolean;
+  @Column({ type: 'text', nullable: true }) emergency_reason?: string | null;
   @Column({ default: false }) safety_permit_required: boolean;
   @Column({ type: 'text', nullable: true }) safety_permit_code?: string | null;
   @Column({ type: 'uuid', nullable: true }) vendor_id?: string | null;

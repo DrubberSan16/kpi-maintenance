@@ -1419,6 +1419,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  private async ensureWorkOrderEmergencySchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_process.tb_work_order
+      ADD COLUMN IF NOT EXISTS is_emergency boolean NOT NULL DEFAULT false
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_process.tb_work_order
+      ADD COLUMN IF NOT EXISTS emergency_reason text NULL
+    `);
+  }
+
   private parseOilUsageDate(
     value: unknown,
     options?: { endOfDay?: boolean },
@@ -1895,6 +1906,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private resolveWorkOrderEmergencyState(
+    isEmergency: unknown,
+    emergencyReason: unknown,
+  ) {
+    const resolvedIsEmergency =
+      typeof isEmergency === 'string'
+        ? ['TRUE', '1', 'SI', 'SÍ', 'YES', 'Y', 'ON'].includes(
+            isEmergency.trim().toUpperCase(),
+          )
+        : Boolean(isEmergency);
+    const resolvedEmergencyReason = this.trimNullableText(emergencyReason);
+    if (resolvedIsEmergency && !resolvedEmergencyReason) {
+      throw new BadRequestException(
+        'Debes indicar el motivo por el que la OT es emergente.',
+      );
+    }
+    return {
+      is_emergency: resolvedIsEmergency,
+      emergency_reason: resolvedIsEmergency ? resolvedEmergencyReason : null,
+    };
+  }
+
   private assertOilProductAllowedForWorkOrder(
     workOrder: Pick<WorkOrderEntity, 'maintenance_kind' | 'code'>,
     producto: Pick<ProductoEntity, 'id' | 'codigo' | 'nombre' | 'es_aceite'>,
@@ -2211,6 +2244,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     await this.ensureInventoryOilSchema();
+    await this.ensureWorkOrderEmergencySchema();
     this.scheduleAlertRecalculation();
     this.triggerAlertRecalculation('startup').catch((e: any) => {
       this.logger.error(
@@ -17328,6 +17362,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrder?.maintenance_kind,
       'CORRECTIVO',
     );
+    const emergencyState = this.resolveWorkOrderEmergencyState(
+      header.is_emergency ?? workOrder?.is_emergency ?? false,
+      header.emergency_reason !== undefined
+        ? header.emergency_reason
+        : workOrder?.emergency_reason,
+    );
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
@@ -17401,6 +17441,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             'INTERNO',
           ) || 'INTERNO',
         maintenance_kind: resolvedMaintenanceKind,
+        is_emergency: emergencyState.is_emergency,
+        emergency_reason: emergencyState.emergency_reason,
         safety_permit_required:
           header.safety_permit_required ??
           entity.safety_permit_required ??
@@ -17883,6 +17925,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.maintenance_kind,
       'CORRECTIVO',
     );
+    const emergencyState = this.resolveWorkOrderEmergencyState(
+      dto.is_emergency ?? false,
+      dto.emergency_reason,
+    );
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     let resolution = await this.resolveRequestedWorkOrderCode(dto.code);
     let created: WorkOrderEntity | null = null;
@@ -17910,6 +17956,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         priority: dto.priority ?? 5,
         provider_type: dto.provider_type ?? 'INTERNO',
         maintenance_kind: resolvedMaintenanceKind,
+        is_emergency: emergencyState.is_emergency,
+        emergency_reason: emergencyState.emergency_reason,
         safety_permit_required: dto.safety_permit_required ?? false,
         safety_permit_code: dto.safety_permit_code ?? null,
         vendor_id: dto.vendor_id ?? null,
@@ -18093,12 +18141,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'cerrar');
     }
+    const emergencyState = this.resolveWorkOrderEmergencyState(
+      dto.is_emergency !== undefined ? dto.is_emergency : wo.is_emergency,
+      dto.emergency_reason !== undefined
+        ? dto.emergency_reason
+        : wo.emergency_reason,
+    );
     Object.assign(wo, {
       ...dto,
       plan_id: resolvedPlanId,
       equipo_componente_id: componentContext.componentId,
       equipo_componente_nombre: componentContext.componentName,
       equipo_componente_nombre_oficial: componentContext.componentOfficialName,
+      is_emergency: emergencyState.is_emergency,
+      emergency_reason: emergencyState.emergency_reason,
       blocked_reason:
         dto.blocked_reason !== undefined
           ? String(dto.blocked_reason || '').trim() || null

@@ -952,6 +952,14 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsString()
   maintenance_kind?: string;
+  @ApiPropertyOptional({ description: 'Indica si la OT es emergente' })
+  @IsOptional()
+  @IsBoolean()
+  is_emergency?: boolean;
+  @ApiPropertyOptional({ description: 'Motivo por el que la OT es emergente' })
+  @IsOptional()
+  @IsString()
+  emergency_reason?: string;
   @ApiPropertyOptional({ description: 'Requiere permiso de seguridad' })
   @IsOptional()
   @IsBoolean()
@@ -1003,6 +1011,14 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsString()
   maintenance_kind?: string;
+  @ApiPropertyOptional({ description: 'Indica si la OT es emergente' })
+  @IsOptional()
+  @IsBoolean()
+  is_emergency?: boolean;
+  @ApiPropertyOptional({ description: 'Motivo por el que la OT es emergente' })
+  @IsOptional()
+  @IsString()
+  emergency_reason?: string;
   @ApiPropertyOptional({ description: 'Prioridad', type: Number })
   @IsOptional()
   @Type(() => Number)

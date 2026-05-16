@@ -62,6 +62,14 @@ export class SaveWorkOrderHeaderDto {
   @IsOptional()
   @IsString()
   maintenance_kind?: string | null;
+  @ApiPropertyOptional({ description: 'Indica si la OT es emergente' })
+  @IsOptional()
+  @IsBoolean()
+  is_emergency?: boolean | null;
+  @ApiPropertyOptional({ description: 'Motivo por el que la OT es emergente' })
+  @IsOptional()
+  @IsString()
+  emergency_reason?: string | null;
 
   @ApiPropertyOptional({ description: 'ID del plan', format: 'uuid' })
   @IsOptional()
