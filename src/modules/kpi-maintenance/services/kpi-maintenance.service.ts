@@ -8600,12 +8600,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     note: string,
     options?: { fromStatus?: string | null; changedBy?: string | null },
   ) {
+    const changedBy =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        String(options?.changedBy || '').trim(),
+      )
+        ? String(options?.changedBy || '').trim()
+        : null;
     return this.woHistoryRepo.save(
       this.woHistoryRepo.create({
         work_order_id: workOrderId,
         from_status: options?.fromStatus ?? null,
         to_status: toStatus,
-        changed_by: options?.changedBy ?? null,
+        changed_by: changedBy,
         note,
       }),
     );
@@ -8613,6 +8619,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private resolveActorLabel(actor?: RequestActorContext | null) {
     return this.firstNonEmptyString(actor?.displayName, actor?.username);
+  }
+
+  private resolveActorHistoryUserId(actor?: RequestActorContext | null) {
+    return this.firstNonEmptyString(actor?.userId);
   }
 
   private applyWorkOrderAuditStamp(
@@ -17840,7 +17850,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         saved.id,
         normalizedSavedStatus,
         'Orden de trabajo creada y detalle guardado correctamente',
-        { changedBy: this.resolveActorLabel(actor) },
+        { changedBy: this.resolveActorHistoryUserId(actor) },
       ));
     } else if (transactionResult.previousStatus !== normalizedSavedStatus) {
       await safePostCommit('el historial de cambio de estado', () =>
@@ -17850,7 +17860,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `Orden de trabajo guardada (${transactionResult.previousStatus} -> ${normalizedSavedStatus})`,
         {
           fromStatus: transactionResult.previousStatus,
-          changedBy: this.resolveActorLabel(actor),
+          changedBy: this.resolveActorHistoryUserId(actor),
         },
       ));
     } else {
@@ -17861,7 +17871,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'Orden de trabajo y detalle actualizados correctamente',
         {
           fromStatus: transactionResult.previousStatus,
-          changedBy: this.resolveActorLabel(actor),
+          changedBy: this.resolveActorHistoryUserId(actor),
         },
       ));
     }
@@ -17870,7 +17880,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await safePostCommit('el historial de horometro', () =>
         this.appendWorkOrderHistory(saved.id, normalizedSavedStatus, note, {
           fromStatus: transactionResult!.previousStatus,
-          changedBy: this.resolveActorLabel(actor),
+          changedBy: this.resolveActorHistoryUserId(actor),
         }),
       );
     }
@@ -18112,14 +18122,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       created.id,
       this.normalizeWorkflowStatus(created.status_workflow),
       'Orden de trabajo creada',
-      { changedBy: this.resolveActorLabel(actor) },
+      { changedBy: this.resolveActorHistoryUserId(actor) },
     );
     for (const note of createdHorometerHistoryNotes) {
       await this.appendWorkOrderHistory(
         created.id,
         this.normalizeWorkflowStatus(created.status_workflow),
         note,
-        { changedBy: this.resolveActorLabel(actor) },
+        { changedBy: this.resolveActorHistoryUserId(actor) },
       );
     }
     const generatedWorkOrderAlert = dto.alerta_id
@@ -18317,9 +18327,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.syncProgramacionExecutionFromLinkedWorkOrder(saved);
     }
     if (previousStatus !== saved.status_workflow) {
-      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus, changedBy: this.resolveActorLabel(actor) });
+      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus, changedBy: this.resolveActorHistoryUserId(actor) });
     } else {
-      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus, changedBy: this.resolveActorLabel(actor) });
+      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus, changedBy: this.resolveActorHistoryUserId(actor) });
     }
     for (const note of updatedHorometerHistoryNotes) {
       await this.appendWorkOrderHistory(
@@ -18328,7 +18338,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         note,
         {
           fromStatus: previousStatus,
-          changedBy: this.resolveActorLabel(actor),
+          changedBy: this.resolveActorHistoryUserId(actor),
         },
       );
     }
@@ -18385,7 +18395,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.woRepo.save(wo);
     await this.releaseOpenReservationsForWorkOrder(wo.id);
     await this.detachProgramacionesFromWorkOrder(wo.id);
-    await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow, changedBy: this.resolveActorLabel(actor) });
+    await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
     await this.writeSecurityLog({
       description: `[WO:${wo.id}] Eliminación lógica de OT ${wo.code}`,
       typeLog: 'WORK_ORDER',
@@ -18556,7 +18566,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : `Tarea registrada: ${historyLabel}`,
       {
         fromStatus: workOrder.status_workflow,
-        changedBy: this.resolveActorLabel(actor),
+        changedBy: this.resolveActorHistoryUserId(actor),
       },
     );
     return this.wrap(
@@ -18676,7 +18686,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       `Tarea actualizada: ${historyLabel}`,
       {
         fromStatus: workOrder.status_workflow,
-        changedBy: this.resolveActorLabel(actor),
+        changedBy: this.resolveActorHistoryUserId(actor),
       },
     );
     return this.wrap(
@@ -18713,7 +18723,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
     await this.woRepo.save(workOrder);
-    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${this.buildWorkOrderTaskDisplayLabel(tarea, definition)}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
+    await this.appendWorkOrderHistory(tarea.work_order_id, this.normalizeWorkflowStatus(workOrder.status_workflow), `Tarea eliminada: ${this.buildWorkOrderTaskDisplayLabel(tarea, definition)}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
     return this.wrap(true, 'Tarea de OT eliminada');
   }
 
@@ -18760,7 +18770,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
     await this.woRepo.save(workOrder);
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto agregado: ${originalName}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto agregado: ${originalName}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Adjunto agregado ${originalName}`,
       typeLog: 'ADJUNTO',
@@ -18876,7 +18886,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
     await this.woRepo.save(workOrder);
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto eliminado: ${adjunto.nombre ?? adjunto.id}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Adjunto eliminado: ${adjunto.nombre ?? adjunto.id}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Adjunto eliminado ${adjunto.id}`,
       typeLog: 'ADJUNTO',
@@ -19143,7 +19153,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
     await this.woRepo.save(workOrder);
-    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Consumo registrado para producto ${dto.producto_id} por ${dto.cantidad}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
+    await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Consumo registrado para producto ${dto.producto_id} por ${dto.cantidad}`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
     await this.writeSecurityLog({
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
@@ -19333,7 +19343,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
       await qr.manager.save(workOrder);
       await qr.commitTransaction();
-      await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Salida de materiales registrada (${dto.items.length} items)`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorLabel(actor) });
+      await this.appendWorkOrderHistory(workOrderId, this.normalizeWorkflowStatus(workOrder.status_workflow), `Salida de materiales registrada (${dto.items.length} items)`, { fromStatus: workOrder.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
       await this.writeSecurityLog({
         description: `[WO:${workOrderId}] Emisión de materiales por total ${total}`,
         typeLog: 'MATERIALES',
@@ -19818,7 +19828,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `Material desechado enviado a chatarra (${items.length} items) desde ${this.buildBodegaLabel(sourceWarehouse) || sourceWarehouse.id}`,
         {
           fromStatus: workOrder.status_workflow,
-          changedBy: this.resolveActorLabel(actor),
+          changedBy: this.resolveActorHistoryUserId(actor),
         },
       );
       await this.writeSecurityLog({
