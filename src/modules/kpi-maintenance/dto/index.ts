@@ -195,6 +195,48 @@ export class CreateEquipoDto {
   @Type(() => Number)
   @IsNumber()
   horometro_actual?: number;
+  @ApiPropertyOptional({
+    description: 'Indica si el equipo requiere mantenimiento por tiempo',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_servicio?: boolean;
+  @ApiPropertyOptional({
+    description: 'Intervalo de mantenimiento por tiempo',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  intervalo_mantenimiento_valor?: number;
+  @ApiPropertyOptional({
+    description: 'Unidad del intervalo por tiempo (DIAS, SEMANAS, ANIOS)',
+  })
+  @IsOptional()
+  @IsString()
+  intervalo_mantenimiento_unidad?: string;
+  @ApiPropertyOptional({
+    description: 'Fecha del ultimo servicio confirmado',
+    format: 'date',
+  })
+  @IsOptional()
+  @IsDateString()
+  ultimo_servicio_fecha?: string;
+  @ApiPropertyOptional({
+    description: 'Fecha del proximo servicio calculado',
+    format: 'date',
+  })
+  @IsOptional()
+  @IsDateString()
+  proximo_servicio_fecha?: string;
+  @ApiPropertyOptional({ description: 'Usuario creador' })
+  @IsOptional()
+  @IsString()
+  created_by?: string;
+  @ApiPropertyOptional({ description: 'Usuario actualizador' })
+  @IsOptional()
+  @IsString()
+  updated_by?: string;
 
   @ApiPropertyOptional({
     description:

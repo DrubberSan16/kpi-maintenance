@@ -1432,6 +1432,42 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  private async ensureEquipmentServiceSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS es_servicio boolean NOT NULL DEFAULT false
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS intervalo_mantenimiento_valor integer NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS intervalo_mantenimiento_unidad text NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS ultimo_servicio_fecha date NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS proximo_servicio_fecha date NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS ultimo_servicio_orden_id uuid NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS ultimo_servicio_orden_codigo text NULL
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_equipo_servicio_fecha
+      ON kpi_maintenance.tb_equipo (es_servicio, proximo_servicio_fecha)
+      WHERE is_deleted = false
+    `);
+  }
+
   private parseOilUsageDate(
     value: unknown,
     options?: { endOfDay?: boolean },
@@ -2302,6 +2338,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     await this.ensureInventoryOilSchema();
     await this.ensureWorkOrderEmergencySchema();
+    await this.ensureEquipmentServiceSchema();
     this.scheduleAlertRecalculation();
     this.triggerAlertRecalculation('startup').catch((e: any) => {
       this.logger.error(
@@ -8207,10 +8244,113 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ];
   }
 
+  private resolveEquipmentServiceReminder(daysRemaining: number) {
+    if (daysRemaining === 10) {
+      return { stage: 'D-10', label: 'faltan 10 dias' };
+    }
+    if (daysRemaining === 5) {
+      return { stage: 'D-5', label: 'faltan 5 dias' };
+    }
+    if (daysRemaining === 3) {
+      return { stage: 'D-3', label: 'faltan 3 dias' };
+    }
+    if (daysRemaining === 1) {
+      return { stage: 'D-1', label: 'falta 1 dia' };
+    }
+    if (daysRemaining === 0) {
+      return { stage: 'D0', label: 'vence hoy' };
+    }
+    if (daysRemaining < 0 && daysRemaining >= -5) {
+      return {
+        stage: `OVERDUE-${Math.abs(daysRemaining)}`,
+        label: `vencido hace ${Math.abs(daysRemaining)} dia(s)`,
+      };
+    }
+    return null;
+  }
+
+  private diffDateOnlyStrings(targetDate: string, baseDate: string) {
+    const target = new Date(`${targetDate}T00:00:00`);
+    const base = new Date(`${baseDate}T00:00:00`);
+    if (Number.isNaN(target.getTime()) || Number.isNaN(base.getTime())) return null;
+    return Math.round((target.getTime() - base.getTime()) / 86400000);
+  }
+
+  private async buildEquipmentServiceAlertCandidates(): Promise<AlertCandidate[]> {
+    const rows = await this.equipoRepo.find({
+      where: {
+        is_deleted: false,
+        es_servicio: true,
+      } as any,
+      order: { proximo_servicio_fecha: 'ASC', codigo: 'ASC' } as any,
+    });
+    const today = this.currentGuayaquilDateString();
+
+    return rows.flatMap((row) => {
+      const nextDate = this.safeDateOnlyString(row.proximo_servicio_fecha);
+      if (!nextDate) return [];
+
+      const daysRemaining = this.diffDateOnlyStrings(nextDate, today);
+      if (daysRemaining == null) return [];
+
+      const reminder = this.resolveEquipmentServiceReminder(daysRemaining);
+      if (!reminder) return [];
+
+      const equipmentLabel =
+        row.codigo || row.nombre || row.nombre_real || row.id || 'Equipo';
+      const overdue = daysRemaining < 0;
+
+      return [
+        {
+          equipo_id: row.id,
+          tipo_alerta: overdue
+            ? 'MANTENIMIENTO_VENCIDO'
+            : 'MANTENIMIENTO_PROXIMO',
+          categoria: 'MANTENIMIENTO' as AlertCategory,
+          nivel: overdue ? 'CRITICAL' : 'WARNING',
+          origen: 'SYSTEM' as AlertOrigin,
+          referencia_tipo: 'EQUIPO_SERVICIO_TIEMPO',
+          referencia: `EQUIPO_SERVICIO:${row.id}:${reminder.stage}:${nextDate}`,
+          detalle: `${equipmentLabel} · mantenimiento por tiempo · ${reminder.label} · proximo servicio ${nextDate}`,
+          payload_json: {
+            tipo_alerta_publico: 'SERVICIO_EQUIPO_TIEMPO',
+            equipment_service_stage: reminder.stage,
+            equipo_id: row.id,
+            equipo_codigo: row.codigo ?? null,
+            equipo_nombre: row.nombre ?? null,
+            equipo_nombre_real: row.nombre_real ?? null,
+            ultimo_servicio_fecha: row.ultimo_servicio_fecha ?? null,
+            proximo_servicio_fecha: nextDate,
+            dias_restantes: daysRemaining,
+            intervalo_mantenimiento_valor:
+              row.intervalo_mantenimiento_valor ?? null,
+            intervalo_mantenimiento_unidad:
+              row.intervalo_mantenimiento_unidad ?? null,
+            actor_username: this.firstNonEmptyString(
+              row.updated_by,
+              row.created_by,
+            ),
+            actor_email: null,
+            actor_user_id: null,
+            actor_name: null,
+            actor_role: null,
+          },
+        },
+      ];
+    });
+  }
+
   private async buildAlertCandidates(options?: { includeInventory?: boolean }) {
     const includeInventory = options?.includeInventory !== false;
 
-    const [programaciones, reportesDiarios, lubricantes, combustibles, inventario] =
+    const [
+      programaciones,
+      reportesDiarios,
+      lubricantes,
+      combustibles,
+      inventario,
+      equipmentServices,
+    ] =
       await Promise.all([
         this.buildProgramacionAlertCandidates(),
         this.buildReporteDiarioAlertCandidates(),
@@ -8219,6 +8359,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         includeInventory
           ? this.buildInventoryAlertCandidates()
           : Promise.resolve([] as AlertCandidate[]),
+        this.buildEquipmentServiceAlertCandidates(),
       ]);
 
     return [
@@ -8227,6 +8368,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...lubricantes,
       ...combustibles,
       ...inventario,
+      ...equipmentServices,
     ];
   }
 
@@ -8630,22 +8772,60 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.firstNonEmptyString(actor?.userId);
   }
 
+  private resolveWorkOrderOwnershipHints(
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    const source = payload ?? {};
+    return {
+      userId: this.firstNonEmptyString(
+        source.created_by_user_id,
+        source.actor_user_id,
+        source.requested_by_user_id,
+        source.user_id,
+      ),
+      username: this.firstNonEmptyString(
+        source.created_by_username,
+        source.actor_username,
+        source.created_by,
+        source.updated_by,
+        source.requested_by,
+      ),
+      email: this.normalizeEmail(
+        this.firstNonEmptyString(
+          source.created_by_email,
+          source.actor_email,
+          source.updated_by_email,
+          source.requested_by_email,
+        ),
+      ),
+      displayName: this.firstNonEmptyString(
+        source.created_by_name,
+        source.actor_name,
+      ),
+    };
+  }
+
   private applyWorkOrderAuditStamp(
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
     mode: 'CREATED' | 'PROCESSED' | 'APPROVED' = 'PROCESSED',
     options?: { action?: string | null; clearApproval?: boolean },
   ) {
-    const actorUserId = this.firstNonEmptyString(actor?.userId);
-    const actorUsername = this.firstNonEmptyString(actor?.username);
-    const actorDisplayName = this.firstNonEmptyString(
-      actor?.displayName,
-      actor?.username,
-    );
-    const actorEmail = this.normalizeEmail(actor?.email);
     const payload = {
       ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
     };
+    const ownershipHints = this.resolveWorkOrderOwnershipHints(payload);
+    const actorUserId = this.firstNonEmptyString(actor?.userId, ownershipHints.userId);
+    const actorUsername = this.firstNonEmptyString(
+      actor?.username,
+      ownershipHints.username,
+    );
+    const actorDisplayName = this.firstNonEmptyString(
+      actor?.displayName,
+      ownershipHints.displayName,
+      actorUsername,
+    );
+    const actorEmail = this.normalizeEmail(actor?.email ?? ownershipHints.email);
 
     if (options?.clearApproval) {
       delete payload.approved_by_user_id;
@@ -8719,6 +8899,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     if (type === 'MESES') {
       date.setMonth(date.getMonth() + value);
+      return date;
+    }
+    if (type === 'ANIOS' || type === 'AÑOS' || type === 'ANIO' || type === 'AÑO') {
+      date.setFullYear(date.getFullYear() + value);
       return date;
     }
     date.setDate(date.getDate() + value);
@@ -8919,13 +9103,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const workOrderPayload =
       ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
         {}) as Record<string, unknown>;
+    const ownershipHints = this.resolveWorkOrderOwnershipHints(workOrderPayload);
     addOwnerUserId(
       workOrder.requested_by,
       workOrderPayload.created_by_user_id,
+      workOrderPayload.actor_user_id,
+      workOrderPayload.requested_by_user_id,
+      ownershipHints.userId,
     );
     addOwnerUsername(
       workOrder.created_by,
       workOrderPayload.created_by_username,
+      workOrderPayload.actor_username,
+      workOrderPayload.created_by,
+      workOrderPayload.updated_by,
+      workOrderPayload.requested_by,
+      ownershipHints.username,
     );
 
     const isDirectOwner =
@@ -9406,6 +9599,79 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     return this.wrap(equipo, 'Equipo obtenido');
   }
+
+  private currentGuayaquilDateString() {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'America/Guayaquil',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const year = parts.find((item) => item.type === 'year')?.value ?? '';
+    const month = parts.find((item) => item.type === 'month')?.value ?? '';
+    const day = parts.find((item) => item.type === 'day')?.value ?? '';
+    return `${year}-${month}-${day}`;
+  }
+
+  private normalizeEquipmentServiceIntervalUnit(value: unknown) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (['SEMANA', 'SEMANAS', 'WEEK', 'WEEKS'].includes(raw)) return 'SEMANAS';
+    if (['ANIO', 'ANIOS', 'AÑO', 'AÑOS', 'YEAR', 'YEARS'].includes(raw)) {
+      return 'ANIOS';
+    }
+    return 'DIAS';
+  }
+
+  private resolveEquipmentServiceSchedule(
+    source: Partial<CreateEquipoDto & UpdateEquipoDto>,
+    current?: EquipoEntity | null,
+  ) {
+    const esServicio = Boolean(source.es_servicio ?? current?.es_servicio ?? false);
+    if (!esServicio) {
+      return {
+        es_servicio: false,
+        intervalo_mantenimiento_valor: null,
+        intervalo_mantenimiento_unidad: null,
+        ultimo_servicio_fecha: null,
+        proximo_servicio_fecha: null,
+      };
+    }
+
+    const intervaloValor = Math.round(
+      this.toNumeric(
+        source.intervalo_mantenimiento_valor,
+        current?.intervalo_mantenimiento_valor ?? 0,
+      ),
+    );
+    if (!(intervaloValor > 0)) {
+      throw new BadRequestException(
+        'Debes configurar un intervalo de mantenimiento valido para el equipo de servicio.',
+      );
+    }
+
+    const intervaloUnidad = this.normalizeEquipmentServiceIntervalUnit(
+      source.intervalo_mantenimiento_unidad ??
+        current?.intervalo_mantenimiento_unidad ??
+        'DIAS',
+    );
+    const ultimoServicioFecha =
+      this.safeDateOnlyString(
+        source.ultimo_servicio_fecha ?? current?.ultimo_servicio_fecha,
+      ) ?? this.currentGuayaquilDateString();
+    const proximoServicioFecha =
+      this.toDateOnlyString(
+        this.addInterval(ultimoServicioFecha, intervaloUnidad, intervaloValor),
+      ) ?? ultimoServicioFecha;
+
+    return {
+      es_servicio: true,
+      intervalo_mantenimiento_valor: intervaloValor,
+      intervalo_mantenimiento_unidad: intervaloUnidad,
+      ultimo_servicio_fecha: ultimoServicioFecha,
+      proximo_servicio_fecha: proximoServicioFecha,
+    };
+  }
+
   async createEquipo(dto: CreateEquipoDto) {
     const { componentes: _componentes, ...equipoPayload } = dto;
     const criticidad = this.normalizeEquipoCriticidad(
@@ -9418,6 +9684,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const modelo = String(dto.modelo ?? '').trim() || null;
     const codigo_lubricante =
       String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null;
+    const serviceSchedule = this.resolveEquipmentServiceSchedule(dto);
     let resolution = await this.resolveRequestedCatalogCode(
       this.equipoRepo,
       dto.codigo,
@@ -9438,6 +9705,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             modelo,
             codigo_lubricante,
             horometro_actual: dto.horometro_actual ?? 0,
+            es_servicio: serviceSchedule.es_servicio,
+            intervalo_mantenimiento_valor:
+              serviceSchedule.intervalo_mantenimiento_valor,
+            intervalo_mantenimiento_unidad:
+              serviceSchedule.intervalo_mantenimiento_unidad,
+            ultimo_servicio_fecha: serviceSchedule.ultimo_servicio_fecha,
+            proximo_servicio_fecha: serviceSchedule.proximo_servicio_fecha,
+            created_by:
+              String(dto.created_by ?? dto.updated_by ?? '').trim() || null,
+            updated_by:
+              String(dto.updated_by ?? dto.created_by ?? '').trim() || null,
           }),
         );
         break;
@@ -9479,6 +9757,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async updateEquipo(id: string, dto: UpdateEquipoDto) {
     const e = await this.findEquipoOrFail(id);
     const { componentes: _componentes, ...equipoPayload } = dto;
+    const serviceSchedule = this.resolveEquipmentServiceSchedule(dto, e);
     Object.assign(e, {
       ...equipoPayload,
       criticidad:
@@ -9503,6 +9782,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.codigo_lubricante !== undefined
           ? String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null
           : e.codigo_lubricante,
+      es_servicio: serviceSchedule.es_servicio,
+      intervalo_mantenimiento_valor:
+        serviceSchedule.intervalo_mantenimiento_valor,
+      intervalo_mantenimiento_unidad:
+        serviceSchedule.intervalo_mantenimiento_unidad,
+      ultimo_servicio_fecha: serviceSchedule.ultimo_servicio_fecha,
+      proximo_servicio_fecha: serviceSchedule.proximo_servicio_fecha,
+      updated_by:
+        dto.updated_by !== undefined
+          ? String(dto.updated_by ?? '').trim() || null
+          : e.updated_by,
     });
     const saved = await this.equipoRepo.save(e);
     if (Array.isArray(dto.componentes)) {
@@ -17805,6 +18095,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const previousHeaderPayload =
       ((workOrder?.valor_json as Record<string, unknown> | null | undefined) ??
         null);
+    const headerOwnershipHints = this.resolveWorkOrderOwnershipHints(
+      (header.valor_json ?? null) as Record<string, unknown> | null,
+    );
+    const ownerUserId =
+      this.firstNonEmptyString(actor?.userId, headerOwnershipHints.userId) ?? null;
+    const ownerUsername =
+      this.firstNonEmptyString(actor?.username, headerOwnershipHints.username) ??
+      null;
     const equipmentId =
       this.firstNonEmptyString(header.equipment_id, workOrder?.equipment_id) ??
       null;
@@ -17881,8 +18179,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             title:
               this.firstNonEmptyString(header.title, 'ORDEN DE TRABAJO') ||
               'ORDEN DE TRABAJO',
-            requested_by: this.firstNonEmptyString(actor?.userId) ?? null,
-            created_by: this.firstNonEmptyString(actor?.username) ?? null,
+            requested_by: ownerUserId,
+            created_by: ownerUsername,
           });
       const nextHeaderPayload = this.buildWorkOrderHorometerPayload(
         header.valor_json || header.procedimiento_id
@@ -17948,8 +18246,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             : entity.purchase_request_id ?? null,
         valor_json: nextHeaderPayload,
         updated_by:
-          this.firstNonEmptyString(actor?.username) ?? entity.updated_by ?? null,
+          this.firstNonEmptyString(actor?.username, ownerUsername) ??
+          entity.updated_by ??
+          null,
       });
+      entity.requested_by =
+        entity.requested_by ??
+        ownerUserId ??
+        this.firstNonEmptyString(
+          (entity.valor_json as Record<string, unknown> | null)?.created_by_user_id,
+        ) ??
+        null;
+      entity.created_by =
+        entity.created_by ??
+        ownerUsername ??
+        this.firstNonEmptyString(
+          (entity.valor_json as Record<string, unknown> | null)?.created_by_username,
+          (entity.valor_json as Record<string, unknown> | null)?.created_by,
+        ) ??
+        null;
 
       entity.status_workflow = nextWorkflowStatus;
       await this.applyBlockingRelationship(
@@ -18383,6 +18698,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: CreateWorkOrderDto,
     actor?: RequestActorContext | null,
   ) {
+    const dtoOwnershipHints = this.resolveWorkOrderOwnershipHints(
+      (dto.valor_json ?? null) as Record<string, unknown> | null,
+    );
+    const ownerUserId =
+      this.firstNonEmptyString(actor?.userId, dtoOwnershipHints.userId) ?? null;
+    const ownerUsername =
+      this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ?? null;
     const equipment = dto.equipment_id
       ? await this.findEquipoOrFail(dto.equipment_id)
       : null;
@@ -18449,15 +18771,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         safety_permit_code: dto.safety_permit_code ?? null,
         vendor_id: dto.vendor_id ?? null,
         purchase_request_id: dto.purchase_request_id ?? null,
-        requested_by: this.firstNonEmptyString(actor?.userId) ?? null,
-        created_by: this.firstNonEmptyString(actor?.username) ?? null,
-        updated_by: this.firstNonEmptyString(actor?.username) ?? null,
+        requested_by: ownerUserId,
+        created_by: ownerUsername,
+        updated_by: this.firstNonEmptyString(actor?.username, ownerUsername) ?? null,
       });
       entity.valor_json = this.buildWorkOrderHorometerPayload(
         (entity.valor_json as Record<string, unknown> | null) ?? {},
         equipment,
         resolvedProcedure,
       );
+      entity.requested_by =
+        entity.requested_by ??
+        ownerUserId ??
+        this.firstNonEmptyString(
+          (entity.valor_json as Record<string, unknown> | null)?.created_by_user_id,
+        ) ??
+        null;
+      entity.created_by =
+        entity.created_by ??
+        ownerUsername ??
+        this.firstNonEmptyString(
+          (entity.valor_json as Record<string, unknown> | null)?.created_by_username,
+          (entity.valor_json as Record<string, unknown> | null)?.created_by,
+        ) ??
+        null;
       await this.applyBlockingRelationship(
         entity,
         dto.blocked_by_work_order_id ?? null,
@@ -18597,6 +18934,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
     await this.assertOperatorAssignedToWorkOrder(id, actor);
+    const dtoOwnershipHints = this.resolveWorkOrderOwnershipHints(
+      (dto.valor_json ?? null) as Record<string, unknown> | null,
+    );
     const previousPayload =
       ((wo.valor_json as Record<string, unknown> | null | undefined) ?? null);
     const equipment = wo.equipment_id
@@ -18658,7 +18998,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             }
           : wo.valor_json,
       updated_by:
-        this.firstNonEmptyString(actor?.username) ?? wo.updated_by ?? null,
+        this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ??
+        wo.updated_by ??
+        null,
     });
     wo.valor_json = this.buildWorkOrderHorometerPayload(
       (wo.valor_json as Record<string, unknown> | null) ?? {},
@@ -18670,6 +19012,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.maintenance_kind,
       'CORRECTIVO',
     );
+    wo.requested_by =
+      wo.requested_by ??
+      this.firstNonEmptyString(actor?.userId, dtoOwnershipHints.userId) ??
+      null;
+    wo.created_by =
+      wo.created_by ??
+      this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ??
+      null;
     this.assertOperatorWorkOrderKind(actor, wo.maintenance_kind);
     wo.status_workflow = nextWorkflowStatus;
     if (nextWorkflowStatus === 'CLOSED') {

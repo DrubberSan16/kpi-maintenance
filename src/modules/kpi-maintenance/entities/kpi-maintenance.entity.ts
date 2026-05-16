@@ -16,6 +16,20 @@ export class EquipoEntity {
   horometro_actual: number;
   @Column({ type: 'timestamp without time zone', nullable: true })
   fecha_ultima_lectura?: Date | null;
+  @Column({ type: 'boolean', default: false })
+  es_servicio: boolean;
+  @Column({ type: 'integer', nullable: true })
+  intervalo_mantenimiento_valor?: number | null;
+  @Column({ type: 'text', nullable: true })
+  intervalo_mantenimiento_unidad?: string | null;
+  @Column({ type: 'date', nullable: true })
+  ultimo_servicio_fecha?: string | null;
+  @Column({ type: 'date', nullable: true })
+  proximo_servicio_fecha?: string | null;
+  @Column({ type: 'uuid', nullable: true })
+  ultimo_servicio_orden_id?: string | null;
+  @Column({ type: 'text', nullable: true })
+  ultimo_servicio_orden_codigo?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' })
   created_at: Date;
