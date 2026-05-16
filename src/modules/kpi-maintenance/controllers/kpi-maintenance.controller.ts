@@ -1429,8 +1429,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Get('work-orders/:id/tareas')
-  listWorkOrderTareas(@Param('id') id: string) {
-    return this.service.listWorkOrderTareas(id);
+  listWorkOrderTareas(@Param('id') id: string, @Req() req: any) {
+    return this.service.listWorkOrderTareas(id, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Tareas')
@@ -1507,8 +1507,9 @@ export class KpiMaintenanceController {
   listWorkOrderAdjuntos(
     @Param('id') id: string,
     @Query() query: WorkOrderAdjuntoQueryDto,
+    @Req() req: any,
   ) {
-    return this.service.listWorkOrderAdjuntos(id, query);
+    return this.service.listWorkOrderAdjuntos(id, query, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Adjuntos')
@@ -1527,8 +1528,9 @@ export class KpiMaintenanceController {
   getWorkOrderAdjunto(
     @Param('id') id: string,
     @Param('adjuntoId') adjuntoId: string,
+    @Req() req: any,
   ) {
-    return this.service.getWorkOrderAdjunto(id, adjuntoId);
+    return this.service.getWorkOrderAdjunto(id, adjuntoId, getRequestActor(req));
   }
 
   @ApiTags('Work Orders - Adjuntos')
@@ -1547,9 +1549,14 @@ export class KpiMaintenanceController {
   async viewWorkOrderAdjunto(
     @Param('id') id: string,
     @Param('adjuntoId') adjuntoId: string,
+    @Req() req: any,
     @Res() res: Response,
   ) {
-    const file = await this.service.resolveWorkOrderAdjuntoFile(id, adjuntoId);
+    const file = await this.service.resolveWorkOrderAdjuntoFile(
+      id,
+      adjuntoId,
+      getRequestActor(req),
+    );
     res.setHeader('Content-Type', file.mimeType);
     res.setHeader(
       'Content-Disposition',
@@ -1648,7 +1655,11 @@ export class KpiMaintenanceController {
   })
   @Get('work-orders/:id/consumos')
   listConsumos(@Param('id') id: string, @Req() req: any) {
-    return this.service.listConsumos(id, getSucursalScopeId(req));
+    return this.service.listConsumos(
+      id,
+      getSucursalScopeId(req),
+      getRequestActor(req),
+    );
   }
 
   @ApiTags('Work Orders')
@@ -1659,8 +1670,8 @@ export class KpiMaintenanceController {
     required: true,
   })
   @Get('work-orders/:id/history')
-  listWorkOrderHistory(@Param('id') id: string) {
-    return this.service.listWorkOrderHistory(id);
+  listWorkOrderHistory(@Param('id') id: string, @Req() req: any) {
+    return this.service.listWorkOrderHistory(id, getRequestActor(req));
   }
 
   @ApiTags('Work Orders')
@@ -1692,7 +1703,11 @@ export class KpiMaintenanceController {
   })
   @Get('work-orders/:id/issue-materials')
   listIssueMaterials(@Param('id') id: string, @Req() req: any) {
-    return this.service.listIssueMaterials(id, getSucursalScopeId(req));
+    return this.service.listIssueMaterials(
+      id,
+      getSucursalScopeId(req),
+      getRequestActor(req),
+    );
   }
 
   @ApiTags('Work Orders')
@@ -1727,7 +1742,11 @@ export class KpiMaintenanceController {
   })
   @Get('work-orders/:id/scrap-materials')
   listScrapMaterials(@Param('id') id: string, @Req() req: any) {
-    return this.service.listScrapMaterials(id, getSucursalScopeId(req));
+    return this.service.listScrapMaterials(
+      id,
+      getSucursalScopeId(req),
+      getRequestActor(req),
+    );
   }
 
   @ApiTags('Work Orders')

@@ -1907,6 +1907,61 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private resolveOperatorActorUserId(
+    actor?: RequestActorContext | null,
+    throwWhenMissing = true,
+  ) {
+    if (!this.isOperatorActor(actor)) {
+      return null;
+    }
+    const actorUserId = this.firstNonEmptyString(actor?.userId);
+    if (actorUserId) {
+      return actorUserId;
+    }
+    if (throwWhenMissing) {
+      throw new ForbiddenException(
+        'No se pudo identificar al operador autenticado para validar sus ordenes de trabajo asignadas.',
+      );
+    }
+    return null;
+  }
+
+  private async assertOperatorAssignedToWorkOrder(
+    workOrderId: string,
+    actor?: RequestActorContext | null,
+  ) {
+    const actorUserId = this.resolveOperatorActorUserId(actor);
+    if (!actorUserId) {
+      return;
+    }
+
+    const assignment = await this.woTareaRepo
+      .createQueryBuilder('tarea')
+      .select('1')
+      .where('tarea.work_order_id = :workOrderId', { workOrderId })
+      .andWhere('tarea.is_deleted = false')
+      .andWhere(
+        `
+          EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(tarea.responsables, '[]'::jsonb)) AS responsable
+            WHERE COALESCE(responsable->>'user_id', responsable->>'id', '') = :actorUserId
+          )
+        `,
+        { actorUserId },
+      )
+      .limit(1)
+      .getRawOne();
+
+    if (assignment) {
+      return;
+    }
+
+    throw new ForbiddenException(
+      'El perfil operador solo puede acceder a ordenes de trabajo donde este asignado como responsable.',
+    );
+  }
+
   private resolveWorkOrderEmergencyState(
     isEmergency: unknown,
     emergencyReason: unknown,
@@ -16735,6 +16790,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       qb.andWhere('wo.maintenance_kind = :kind', {
         kind: this.resolveWorkOrderMaintenanceKind(q.maintenance_kind),
       });
+    const operatorActorUserId = this.resolveOperatorActorUserId(actor, false);
+    if (this.isOperatorActor(actor)) {
+      if (!operatorActorUserId) {
+        return this.wrap([], 'Work orders listadas');
+      }
+      qb.andWhere(
+        `
+          EXISTS (
+            SELECT 1
+            FROM kpi_maintenance.tb_work_order_tarea tarea
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tarea.responsables, '[]'::jsonb)) AS responsable
+            WHERE tarea.work_order_id = wo.id
+              AND tarea.is_deleted = false
+              AND COALESCE(responsable->>'user_id', responsable->>'id', '') = :operatorActorUserId
+          )
+        `,
+        { operatorActorUserId },
+      );
+    }
     if (fechaDesde) {
       qb.andWhere(
         `COALESCE(
@@ -16780,6 +16854,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     await this.assertWorkOrderVisibleForSucursal(row, sucursalId);
+    await this.assertOperatorAssignedToWorkOrder(id, actor);
     return this.wrap(
       await this.enrichWorkOrder(row, actor),
       'Work order obtenida',
@@ -17323,6 +17398,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           is_deleted: false,
         } as FindOptionsWhere<WorkOrderEntity>)
       : null;
+    if (workOrderId) {
+      await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    }
     const previousStatus = this.normalizeWorkflowStatus(
       workOrder?.status_workflow ?? 'PLANNED',
     );
@@ -18120,6 +18198,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    await this.assertOperatorAssignedToWorkOrder(id, actor);
     const previousPayload =
       ((wo.valor_json as Record<string, unknown> | null | undefined) ?? null);
     const equipment = wo.equipment_id
@@ -18295,6 +18374,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async deleteWorkOrder(id: string, actor?: RequestActorContext | null) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    await this.assertOperatorAssignedToWorkOrder(id, actor);
     await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'anular');
     wo.is_deleted = true;
     wo.updated_by =
@@ -18313,11 +18393,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Work order eliminada');
   }
 
-  async listWorkOrderTareas(workOrderId: string) {
+  async listWorkOrderTareas(
+    workOrderId: string,
+    actor?: RequestActorContext | null,
+  ) {
     await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     return this.wrap(
       await this.enrichWorkOrderTareas(
         await this.woTareaRepo.find({
@@ -18337,6 +18421,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: workOrderId,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const resolvedPlanId =
       this.firstNonEmptyString(dto.plan_id, workOrder.plan_id) ?? null;
     if (!resolvedPlanId) {
@@ -18497,6 +18582,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: tarea.work_order_id,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(workOrder.id, actor);
     let historyLabel = '';
 
     if (tarea.es_adicional) {
@@ -18607,6 +18693,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(tarea.work_order_id, actor);
     tarea.is_deleted = true;
     await this.woTareaRepo.save(tarea);
     const definition =
@@ -18639,6 +18726,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: workOrderId,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     let buffer: Buffer;
     try {
       buffer = Buffer.from(dto.contenido_base64, 'base64');
@@ -18689,11 +18777,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async listWorkOrderAdjuntos(
     workOrderId: string,
     query: WorkOrderAdjuntoQueryDto,
+    actor?: RequestActorContext | null,
   ) {
     await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const where: FindOptionsWhere<WorkOrderAdjuntoEntity> = {
       work_order_id: workOrderId,
       is_deleted: false,
@@ -18709,7 +18799,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async resolveWorkOrderAdjuntoFile(workOrderId: string, adjuntoId: string) {
+  async resolveWorkOrderAdjuntoFile(
+    workOrderId: string,
+    adjuntoId: string,
+    actor?: RequestActorContext | null,
+  ) {
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
       id: adjuntoId,
       work_order_id: workOrderId,
@@ -18728,13 +18823,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async getWorkOrderAdjunto(workOrderId: string, adjuntoId: string) {
+  async getWorkOrderAdjunto(
+    workOrderId: string,
+    adjuntoId: string,
+    actor?: RequestActorContext | null,
+  ) {
     const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
       id: adjuntoId,
       work_order_id: workOrderId,
       is_deleted: false,
     });
-    const file = await this.resolveWorkOrderAdjuntoFile(workOrderId, adjuntoId);
+    const file = await this.resolveWorkOrderAdjuntoFile(
+      workOrderId,
+      adjuntoId,
+      actor,
+    );
     return this.wrap(
       {
         id: adjunto.id,
@@ -18756,6 +18859,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const workOrder = await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
       id: adjuntoId,
       work_order_id: workOrderId,
@@ -18787,12 +18891,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async listConsumos(workOrderId: string, sucursalId?: string | null) {
+  async listConsumos(
+    workOrderId: string,
+    sucursalId?: string | null,
+    actor?: RequestActorContext | null,
+  ) {
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
     await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.consumoRepo.find({
       where: { work_order_id: workOrderId, is_deleted: false },
@@ -18979,8 +19088,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async listWorkOrderHistory(workOrderId: string) {
+  async listWorkOrderHistory(
+    workOrderId: string,
+    actor?: RequestActorContext | null,
+  ) {
     await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const rows = await this.woHistoryRepo.find({
       where: { work_order_id: workOrderId },
       order: { changed_at: 'DESC' },
@@ -18997,6 +19110,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: workOrderId,
       is_deleted: false,
     });
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     if (!dto.bodega_id) {
       throw new BadRequestException('La bodega es obligatoria para registrar el consumo.');
     }
@@ -19049,12 +19163,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async listIssueMaterials(workOrderId: string, sucursalId?: string | null) {
+  async listIssueMaterials(
+    workOrderId: string,
+    sucursalId?: string | null,
+    actor?: RequestActorContext | null,
+  ) {
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
     await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const scope = await this.buildSucursalScopeContext(sucursalId);
     const entregas = await this.dataSource.getRepository(EntregaMaterialEntity).find({
       where: { work_order_id: workOrderId, is_deleted: false },
@@ -19112,6 +19231,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: workOrderId,
         is_deleted: false,
       });
+      await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
       this.assertWorkOrderAllowsMaterialIssue(workOrder);
       const em = await qr.manager.save(
         EntregaMaterialEntity,
@@ -19230,12 +19350,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async listScrapMaterials(workOrderId: string, sucursalId?: string | null) {
+  async listScrapMaterials(
+    workOrderId: string,
+    sucursalId?: string | null,
+    actor?: RequestActorContext | null,
+  ) {
     const workOrder = await this.findOneOrFail(this.woRepo, {
       id: workOrderId,
       is_deleted: false,
     });
     await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const scope = await this.buildSucursalScopeContext(sucursalId);
     const scrapRepo = this.dataSource.getRepository(WorkOrderDesechoEntity);
     const scrapDetRepo = this.dataSource.getRepository(WorkOrderDesechoDetEntity);
@@ -19331,6 +19456,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         is_deleted: false,
       });
       await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+      await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
 
       if (
         this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS'
