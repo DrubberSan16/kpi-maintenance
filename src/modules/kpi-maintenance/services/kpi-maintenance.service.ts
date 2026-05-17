@@ -115,6 +115,7 @@ import {
   ReprogramProgramacionMensualDetalleDto,
   ScrapMaterialsDto,
   CreateWorkOrderDto,
+  DailyOperationsReportQueryDto,
   DateRangeDto,
   EquipoCriticidadEnum,
   EquipoQueryDto,
@@ -1418,6 +1419,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       WHERE is_deleted = false
         AND COALESCE(es_aceite, false) = false
         AND UPPER(COALESCE(nombre, '')) LIKE '%ACEITE%'
+      `);
+  }
+
+  private async ensureInventoryStockSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_fisico numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS es_usado boolean NOT NULL DEFAULT false
     `);
   }
 
@@ -1867,6 +1879,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       from: fromDate.toISOString().slice(0, 10),
       to: toDate.toISOString().slice(0, 10),
       label: `${this.formatOilUsageDateLabel(fromDate)} - ${this.formatOilUsageDateLabel(toDate)}`,
+    };
+  }
+
+  private buildDailyOperationsDateRange(
+    query?: DailyOperationsReportQueryDto,
+  ) {
+    const targetDate =
+      this.safeDateOnlyString(query?.fecha) ?? this.currentGuayaquilDateString();
+    const fromDate =
+      this.parseOilUsageDate(targetDate) ?? new Date(`${targetDate}T00:00:00.000`);
+    const toDate =
+      this.parseOilUsageDate(targetDate, { endOfDay: true }) ??
+      new Date(`${targetDate}T23:59:59.999`);
+
+    return {
+      fecha: targetDate,
+      fromDate,
+      toDate,
+      label: `Dia ${this.formatOilUsageDateLabel(fromDate)}`,
     };
   }
 
@@ -2389,6 +2420,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     await this.ensureInventoryOilSchema();
+    await this.ensureInventoryStockSchema();
     await this.ensureWorkOrderEmergencySchema();
     await this.ensureEquipmentServiceSchema();
     this.scheduleAlertRecalculation();
@@ -15191,6 +15223,356 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async getDailyOperationsReport(
+    query: DailyOperationsReportQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const dateRange = this.buildDailyOperationsDateRange(query);
+    const [scope, rawWarehouses, movementRows] = await Promise.all([
+      this.buildSucursalScopeContext(sucursalId),
+      this.bodegaRepo.find({
+        where: { is_deleted: false, es_chatarra: false } as any,
+        order: { nombre: 'ASC', codigo: 'ASC' } as any,
+      }),
+      this.dataSource.query(
+        `
+          SELECT
+            kardex.id AS kardex_id,
+            kardex.fecha AS fecha,
+            kardex.producto_id AS producto_id,
+            kardex.bodega_id AS bodega_id,
+            kardex.tipo_movimiento AS tipo_movimiento,
+            kardex.entrada_cantidad AS entrada_cantidad,
+            kardex.salida_cantidad AS salida_cantidad,
+            kardex.observacion AS kardex_observacion,
+            kardex.created_at AS created_at,
+            producto.codigo AS producto_codigo,
+            producto.nombre AS producto_nombre,
+            bodega.codigo AS bodega_codigo,
+            bodega.nombre AS bodega_nombre,
+            movimiento.id AS movimiento_id,
+            movimiento.numero_documento AS numero_documento,
+            movimiento.tipo_documento AS tipo_documento,
+            movimiento.referencia AS referencia,
+            movimiento.observacion AS movimiento_observacion,
+            movimiento.work_order_id AS work_order_id,
+            transfer_det.orden_compra_det_id AS orden_compra_det_id
+          FROM kpi_inventory.tb_kardex kardex
+          LEFT JOIN kpi_inventory.tb_producto producto
+            ON producto.id = kardex.producto_id
+           AND producto.is_deleted = false
+          LEFT JOIN kpi_inventory.tb_bodega bodega
+            ON bodega.id = kardex.bodega_id
+           AND bodega.is_deleted = false
+          LEFT JOIN kpi_inventory.tb_movimiento_inventario movimiento
+            ON movimiento.id = kardex.movimiento_id
+           AND movimiento.is_deleted = false
+          LEFT JOIN kpi_inventory.tb_transferencia_bodega_det transfer_det
+            ON (
+              transfer_det.kardex_ingreso_id = kardex.id
+              OR transfer_det.kardex_salida_id = kardex.id
+            )
+           AND transfer_det.is_deleted = false
+          WHERE kardex.is_deleted = false
+            AND kardex.fecha BETWEEN $1 AND $2
+          ORDER BY kardex.fecha DESC, kardex.created_at DESC
+        `,
+        [dateRange.fromDate.toISOString(), dateRange.toDate.toISOString()],
+      ),
+    ]);
+
+    const visibleWarehouses = rawWarehouses.filter((row) =>
+      !scope ? true : scope.warehouseIds.has(String(row.id || '').trim()),
+    );
+    const visibleWarehouseIds = new Set(
+      visibleWarehouses.map((row) => String(row.id || '').trim()).filter(Boolean),
+    );
+    const warehouseLabelMap = new Map(
+      visibleWarehouses.map((row) => [
+        String(row.id || '').trim(),
+        this.buildBodegaLabel(row) ?? 'Sin bodega',
+      ]),
+    );
+
+    const normalizedMovementRows = (Array.isArray(movementRows) ? movementRows : [])
+      .filter((row: any) => {
+        const warehouseId = String(row?.bodega_id || '').trim();
+        return !scope || visibleWarehouseIds.has(warehouseId);
+      })
+      .map((row: any) => {
+        const entrada = this.toNumeric(row?.entrada_cantidad, 0);
+        const salida = this.toNumeric(row?.salida_cantidad, 0);
+        const warehouseId = String(row?.bodega_id || '').trim();
+        const workOrderId = String(row?.work_order_id || '').trim() || null;
+        const hasPurchaseOrigin = Boolean(
+          this.firstNonEmptyString(row?.orden_compra_det_id),
+        );
+        const sourceType =
+          workOrderId && salida > 0
+            ? 'SALIDA_OT'
+            : hasPurchaseOrigin && entrada > 0
+              ? 'INGRESO_COMPRA'
+              : 'KARDEX';
+
+        return {
+          kardex_id: String(row?.kardex_id || '').trim(),
+          fecha: row?.fecha ? new Date(row.fecha).toISOString() : null,
+          created_at: row?.created_at ? new Date(row.created_at).toISOString() : null,
+          producto_id: String(row?.producto_id || '').trim() || null,
+          producto_codigo: this.firstNonEmptyString(row?.producto_codigo) ?? null,
+          producto_nombre:
+            this.firstNonEmptyString(row?.producto_nombre) ?? 'Sin material',
+          bodega_id: warehouseId || null,
+          bodega_label:
+            warehouseLabelMap.get(warehouseId) ??
+            [row?.bodega_codigo, row?.bodega_nombre].filter(Boolean).join(' - ') ??
+            'Sin bodega',
+          entrada_cantidad: Number(entrada.toFixed(4)),
+          salida_cantidad: Number(salida.toFixed(4)),
+          tipo_movimiento:
+            this.firstNonEmptyString(row?.tipo_movimiento) ?? 'SIN_TIPO',
+          documento:
+            this.firstNonEmptyString(row?.numero_documento) ??
+            this.firstNonEmptyString(row?.movimiento_id) ??
+            `KDX-${String(row?.kardex_id || '').slice(0, 8)}`,
+          tipo_documento:
+            this.firstNonEmptyString(row?.tipo_documento) ?? 'KARDEX',
+          referencia: this.firstNonEmptyString(row?.referencia) ?? null,
+          observacion:
+            this.firstNonEmptyString(
+              row?.movimiento_observacion,
+              row?.kardex_observacion,
+            ) ?? null,
+          work_order_id: workOrderId,
+          source_type: sourceType,
+          source_label:
+            sourceType === 'SALIDA_OT'
+              ? 'Salida por OT'
+              : sourceType === 'INGRESO_COMPRA'
+                ? 'Ingreso por compra'
+                : 'Kardex / otros',
+        };
+      });
+
+    const createdCandidates = await this.woRepo
+      .createQueryBuilder('wo')
+      .where('wo.is_deleted = false')
+      .andWhere('wo.created_at BETWEEN :from AND :to', {
+        from: dateRange.fromDate.toISOString(),
+        to: dateRange.toDate.toISOString(),
+      })
+      .orderBy('wo.created_at', 'DESC')
+      .getMany();
+    const closedCandidates = await this.woRepo
+      .createQueryBuilder('wo')
+      .where('wo.is_deleted = false')
+      .andWhere('wo.closed_at IS NOT NULL')
+      .andWhere('wo.closed_at BETWEEN :from AND :to', {
+        from: dateRange.fromDate.toISOString(),
+        to: dateRange.toDate.toISOString(),
+      })
+      .orderBy('wo.closed_at', 'DESC')
+      .getMany();
+
+    const [visibleCreatedOrders, visibleClosedOrders] = await Promise.all([
+      this.filterWorkOrdersByScope(createdCandidates, scope),
+      this.filterWorkOrdersByScope(closedCandidates, scope),
+    ]);
+
+    const relatedWorkOrderIds = [
+      ...new Set(
+        [
+          ...normalizedMovementRows
+            .map((row) => String(row.work_order_id || '').trim())
+            .filter(Boolean),
+          ...visibleCreatedOrders.map((row) => String(row.id || '').trim()),
+          ...visibleClosedOrders.map((row) => String(row.id || '').trim()),
+        ].filter(Boolean),
+      ),
+    ];
+    const relatedWorkOrders = relatedWorkOrderIds.length
+      ? await this.woRepo.find({
+          where: { id: In(relatedWorkOrderIds), is_deleted: false },
+        })
+      : [];
+    const relatedEquipmentIds = [
+      ...new Set(
+        relatedWorkOrders
+          .map((row) => String(row.equipment_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const relatedEquipments = relatedEquipmentIds.length
+      ? await this.equipoRepo.find({
+          where: { id: In(relatedEquipmentIds), is_deleted: false },
+        })
+      : [];
+    const equipmentMap = new Map(
+      relatedEquipments.map((row) => [String(row.id || '').trim(), row]),
+    );
+    const workOrderMap = new Map(
+      relatedWorkOrders.map((row) => [String(row.id || '').trim(), row]),
+    );
+
+    const movementDetails = normalizedMovementRows.map((row) => {
+      const workOrder = row.work_order_id
+        ? workOrderMap.get(String(row.work_order_id || '').trim())
+        : null;
+      const equipment = workOrder?.equipment_id
+        ? equipmentMap.get(String(workOrder.equipment_id || '').trim())
+        : null;
+      return {
+        ...row,
+        work_order_code: workOrder?.code ?? null,
+        work_order_title: workOrder?.title ?? null,
+        maintenance_kind: workOrder?.maintenance_kind ?? null,
+        equipment_label:
+          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
+          'Sin equipo',
+      };
+    });
+
+    const totals = movementDetails.reduce(
+      (acc, row) => {
+        acc.movimientos += 1;
+        acc.total_entradas += this.toNumeric(row.entrada_cantidad, 0);
+        acc.total_salidas += this.toNumeric(row.salida_cantidad, 0);
+        if (this.toNumeric(row.entrada_cantidad, 0) > 0 && row.producto_id) {
+          acc.materiales_entrada.add(String(row.producto_id));
+        }
+        if (this.toNumeric(row.salida_cantidad, 0) > 0 && row.producto_id) {
+          acc.materiales_salida.add(String(row.producto_id));
+        }
+        if (row.source_type === 'INGRESO_COMPRA') {
+          acc.ingresos_compra += this.toNumeric(row.entrada_cantidad, 0);
+        }
+        if (row.source_type === 'SALIDA_OT') {
+          acc.salidas_ot += this.toNumeric(row.salida_cantidad, 0);
+        }
+        return acc;
+      },
+      {
+        movimientos: 0,
+        total_entradas: 0,
+        total_salidas: 0,
+        ingresos_compra: 0,
+        salidas_ot: 0,
+        materiales_entrada: new Set<string>(),
+        materiales_salida: new Set<string>(),
+      },
+    );
+
+    const sourceBreakdownMap = new Map<string, any>();
+    for (const row of movementDetails) {
+      const key = String(row.source_type || 'KARDEX');
+      const current = sourceBreakdownMap.get(key) ?? {
+        source_type: key,
+        source_label: row.source_label,
+        movimientos: 0,
+        entradas: 0,
+        salidas: 0,
+        materiales: new Set<string>(),
+      };
+      current.movimientos += 1;
+      current.entradas = Number(
+        (current.entradas + this.toNumeric(row.entrada_cantidad, 0)).toFixed(4),
+      );
+      current.salidas = Number(
+        (current.salidas + this.toNumeric(row.salida_cantidad, 0)).toFixed(4),
+      );
+      if (row.producto_id) current.materiales.add(String(row.producto_id));
+      sourceBreakdownMap.set(key, current);
+    }
+    const source_breakdown = [...sourceBreakdownMap.values()]
+      .map((row) => ({
+        source_type: row.source_type,
+        source_label: row.source_label,
+        movimientos: row.movimientos,
+        materiales_distintos: (row.materiales as Set<string>).size,
+        entradas: row.entradas,
+        salidas: row.salidas,
+      }))
+      .sort((a, b) => b.movimientos - a.movimientos);
+
+    const warehouseBreakdownMap = new Map<string, any>();
+    for (const row of movementDetails) {
+      const key = String(row.bodega_id || 'SIN_BODEGA');
+      const current = warehouseBreakdownMap.get(key) ?? {
+        bodega_id: row.bodega_id,
+        bodega_label: row.bodega_label || 'Sin bodega',
+        movimientos: 0,
+        entradas: 0,
+        salidas: 0,
+      };
+      current.movimientos += 1;
+      current.entradas = Number(
+        (current.entradas + this.toNumeric(row.entrada_cantidad, 0)).toFixed(4),
+      );
+      current.salidas = Number(
+        (current.salidas + this.toNumeric(row.salida_cantidad, 0)).toFixed(4),
+      );
+      warehouseBreakdownMap.set(key, current);
+    }
+    const warehouse_breakdown = [...warehouseBreakdownMap.values()].sort(
+      (a, b) => b.movimientos - a.movimientos,
+    );
+
+    const mapDailyWorkOrderRow = (
+      workOrder: WorkOrderEntity,
+      dateField: 'created_at' | 'closed_at',
+    ) => {
+      const equipment = workOrder.equipment_id
+        ? equipmentMap.get(String(workOrder.equipment_id || '').trim())
+        : null;
+      return {
+        work_order_id: workOrder.id,
+        code: workOrder.code,
+        title: workOrder.title,
+        status: this.normalizeWorkflowStatus(workOrder.status_workflow),
+        maintenance_kind: workOrder.maintenance_kind,
+        equipment_label:
+          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
+          'Sin equipo',
+        fecha_evento: workOrder[dateField]
+          ? new Date(workOrder[dateField] as Date).toISOString()
+          : null,
+      };
+    };
+
+    return this.wrap(
+      {
+        generated_at: new Date().toISOString(),
+        filters: {
+          fecha: dateRange.fecha,
+          from: dateRange.fromDate.toISOString().slice(0, 10),
+          to: dateRange.toDate.toISOString().slice(0, 10),
+          label: dateRange.label,
+        },
+        summary: {
+          movimientos_kardex: totals.movimientos,
+          materiales_ingresados_distintos: totals.materiales_entrada.size,
+          materiales_salidos_distintos: totals.materiales_salida.size,
+          total_entradas: Number(totals.total_entradas.toFixed(4)),
+          total_salidas: Number(totals.total_salidas.toFixed(4)),
+          ingresos_compra: Number(totals.ingresos_compra.toFixed(4)),
+          salidas_ot: Number(totals.salidas_ot.toFixed(4)),
+          ordenes_generadas: visibleCreatedOrders.length,
+          ordenes_cerradas: visibleClosedOrders.length,
+        },
+        source_breakdown,
+        warehouse_breakdown,
+        movements: movementDetails.slice(0, 120),
+        work_orders_created: visibleCreatedOrders.map((row) =>
+          mapDailyWorkOrderRow(row, 'created_at'),
+        ),
+        work_orders_closed: visibleClosedOrders.map((row) =>
+          mapDailyWorkOrderRow(row, 'closed_at'),
+        ),
+      },
+      'Reporte diario consolidado generado',
+    );
+  }
+
   async getSystemReports(
     query: SystemReportsQueryDto,
     sucursalId?: string | null,
@@ -17910,7 +18292,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const subtotal = item.cantidad * costo;
       total += subtotal;
 
-      stock.stock_actual = Number(stock.stock_actual) - item.cantidad;
+      const sourceStockActual = this.toNumeric(stock.stock_actual, 0);
+      stock.stock_actual = sourceStockActual - item.cantidad;
+      stock.stock_fisico =
+        this.toNumeric(stock.stock_fisico, sourceStockActual) - item.cantidad;
       await manager.save(stock);
 
       const remainingReserved =
@@ -20153,7 +20538,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const costo = Number(producto.ultimo_costo);
         const subtotal = item.cantidad * costo;
         total += subtotal;
-        stock.stock_actual = Number(stock.stock_actual) - item.cantidad;
+        const sourceStockActual = this.toNumeric(stock.stock_actual, 0);
+        stock.stock_actual = sourceStockActual - item.cantidad;
+        stock.stock_fisico =
+          this.toNumeric(stock.stock_fisico, sourceStockActual) - item.cantidad;
         await qr.manager.save(stock);
         const remainingReserved = this.toNumeric(reserva.cantidad, 0) - item.cantidad;
         reserva.cantidad = Math.max(remainingReserved, 0);
@@ -20518,6 +20906,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         totalQuantity += quantity;
 
         sourceStock.stock_actual = sourceStockValue - quantity;
+        sourceStock.stock_fisico =
+          this.toNumeric(sourceStock.stock_fisico, sourceStockValue) - quantity;
         sourceStock.updated_by = actorName;
         await qr.manager.save(StockBodegaEntity, sourceStock);
 
@@ -20530,8 +20920,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             userName: actorName,
           },
         );
-        destinationStock.stock_actual =
-          this.toNumeric(destinationStock.stock_actual, 0) + quantity;
+        const destinationStockActual = this.toNumeric(
+          destinationStock.stock_actual,
+          0,
+        );
+        destinationStock.stock_actual = destinationStockActual + quantity;
+        destinationStock.stock_fisico =
+          this.toNumeric(
+            destinationStock.stock_fisico,
+            destinationStockActual,
+          ) + quantity;
         destinationStock.costo_promedio_bodega = unitCost;
         destinationStock.updated_by = actorName;
         await qr.manager.save(StockBodegaEntity, destinationStock);
@@ -20894,6 +21292,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
         stock_actual: 0,
+        stock_fisico: 0,
         stock_min_bodega: 0,
         stock_max_bodega: 0,
         stock_min_global: 0,

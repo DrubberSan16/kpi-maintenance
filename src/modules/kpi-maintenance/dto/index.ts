@@ -2178,3 +2178,12 @@ export class SystemReportsQueryDto {
   @IsString()
   group_by?: string;
 }
+
+export class DailyOperationsReportQueryDto {
+  @ApiPropertyOptional({
+    description: 'Fecha puntual a consultar para el reporte diario (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  fecha?: string;
+}

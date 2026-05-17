@@ -33,6 +33,7 @@ import {
   CreateBitacoraDto,
   CreateConsumoDto,
   CreateCronogramaSemanalDto,
+  DailyOperationsReportQueryDto,
   CreateEquipoDto,
   CreateProgramacionMensualDetalleDto,
   CreateEventoDto,
@@ -1304,6 +1305,22 @@ export class KpiMaintenanceController {
   @Get('inteligencia/reportes-sistema')
   getSystemReports(@Query() query: SystemReportsQueryDto, @Req() req: any) {
     return this.service.getSystemReports(query, getSucursalScopeId(req));
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary:
+      'Obtener el reporte diario consolidado de inventario y órdenes de trabajo',
+  })
+  @Get('inteligencia/reporte-diario')
+  getDailyOperationsReport(
+    @Query() query: DailyOperationsReportQueryDto,
+    @Req() req: any,
+  ) {
+    return this.service.getDailyOperationsReport(
+      query,
+      getSucursalScopeId(req),
+    );
   }
 
   @ApiTags('Work Orders')

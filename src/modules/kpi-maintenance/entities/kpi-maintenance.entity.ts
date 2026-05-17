@@ -771,6 +771,8 @@ export class StockBodegaEntity {
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_actual: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_fisico: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_min_bodega: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_max_bodega: number;
@@ -780,6 +782,7 @@ export class StockBodegaEntity {
   stock_contenedores: number;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   costo_promedio_bodega: number;
+  @Column({ default: false }) es_usado: boolean;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' })
   created_at: Date;
