@@ -3356,6 +3356,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return raw || 'PLANNED';
   }
 
+  private isPendingDailyWorkOrderStatus(value: unknown) {
+    const normalized = this.normalizeWorkflowStatus(value);
+    return normalized === 'PLANNED' || normalized === 'IN_PROGRESS';
+  }
+
   private isWorkOrderReservationActive(status: unknown) {
     return this.normalizeWorkflowStatus(status) !== 'CLOSED';
   }
@@ -9397,6 +9402,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const dueSoon =
       (hoursRemaining != null && hoursRemaining > 0 && hoursRemaining <= Math.max(1, freqValue * 0.1)) ||
       (daysRemaining != null && daysRemaining > 0 && daysRemaining <= 3);
+    const currentPayload = (programacion.payload_json ?? {}) as Record<string, unknown>;
+    const isReprogrammed =
+      Boolean(currentPayload.reprogramado) ||
+      (Array.isArray(currentPayload.reprogramaciones_historial) &&
+        currentPayload.reprogramaciones_historial.length > 0) ||
+      this.firstNonEmptyString(
+        currentPayload.fecha_programada_nueva,
+        currentPayload.reprogramado_at,
+      ) != null;
+    const displayStatus =
+      dueByHours || dueByDate
+        ? 'VENCIDA'
+        : isReprogrammed
+          ? 'REPROGRAMADA'
+          : dueSoon
+            ? 'PROXIMA'
+            : 'PROGRAMADA';
 
     const enriched = {
       ...programacion,
@@ -9425,7 +9447,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horometro_actual: currentHours,
       horas_restantes: hoursRemaining,
       dias_restantes: daysRemaining,
-      estado_programacion: dueByHours || dueByDate ? 'VENCIDA' : dueSoon ? 'PROXIMA' : 'PROGRAMADA',
+      estado_programacion: displayStatus,
     };
 
     if (options?.persist !== false) {
@@ -13874,22 +13896,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const prepared = await this.prepareProgramacionMensualDetailInput(
       {
-        equipo_id: detail.equipo_id ?? undefined,
-        equipo_codigo: detail.equipo_codigo ?? undefined,
+        equipo_id: dto.equipo_id ?? detail.equipo_id ?? undefined,
+        equipo_codigo: dto.equipo_codigo ?? detail.equipo_codigo ?? undefined,
         fecha_programada: nextDate,
-        valor_crudo: detail.valor_crudo,
-        procedimiento_id: detail.procedimiento_id ?? undefined,
-        observacion: this.buildProgramacionMensualReprogramObservation(
-          detail.observacion,
-          {
-            previousDate,
-            nextDate,
-            reason,
-            actorLabel:
-              actorSnapshot.displayName ?? actorSnapshot.username ?? null,
-            registeredAt,
-          },
-        ),
+        valor_crudo: dto.valor_crudo ?? detail.valor_crudo,
+        procedimiento_id: dto.procedimiento_id ?? detail.procedimiento_id ?? undefined,
+        observacion:
+          dto.observacion ??
+          this.buildProgramacionMensualReprogramObservation(
+            detail.observacion,
+            {
+              previousDate,
+              nextDate,
+              reason,
+              actorLabel:
+                actorSnapshot.displayName ?? actorSnapshot.username ?? null,
+              registeredAt,
+            },
+          ),
         payload_json: {
           ...payloadOverrides,
           actor_user_id: actorSnapshot.userId ?? null,
@@ -15378,6 +15402,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.filterWorkOrdersByScope(createdCandidates, scope),
       this.filterWorkOrdersByScope(closedCandidates, scope),
     ]);
+    const visiblePendingOrders = visibleCreatedOrders.filter((row) =>
+      this.isPendingDailyWorkOrderStatus(row.status_workflow),
+    );
 
     const relatedWorkOrderIds = [
       ...new Set(
@@ -15385,7 +15412,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ...normalizedMovementRows
             .map((row) => String(row.work_order_id || '').trim())
             .filter(Boolean),
-          ...visibleCreatedOrders.map((row) => String(row.id || '').trim()),
+          ...visiblePendingOrders.map((row) => String(row.id || '').trim()),
           ...visibleClosedOrders.map((row) => String(row.id || '').trim()),
         ].filter(Boolean),
       ),
@@ -15556,13 +15583,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_salidas: Number(totals.total_salidas.toFixed(4)),
           ingresos_compra: Number(totals.ingresos_compra.toFixed(4)),
           salidas_ot: Number(totals.salidas_ot.toFixed(4)),
-          ordenes_generadas: visibleCreatedOrders.length,
+          ordenes_pendientes: visiblePendingOrders.length,
+          ordenes_generadas: visiblePendingOrders.length,
           ordenes_cerradas: visibleClosedOrders.length,
         },
         source_breakdown,
         warehouse_breakdown,
         movements: movementDetails.slice(0, 120),
-        work_orders_created: visibleCreatedOrders.map((row) =>
+        work_orders_pending: visiblePendingOrders.map((row) =>
+          mapDailyWorkOrderRow(row, 'created_at'),
+        ),
+        work_orders_created: visiblePendingOrders.map((row) =>
           mapDailyWorkOrderRow(row, 'created_at'),
         ),
         work_orders_closed: visibleClosedOrders.map((row) =>

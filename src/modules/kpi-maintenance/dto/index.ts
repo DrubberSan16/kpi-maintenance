@@ -680,6 +680,37 @@ export class ReprogramProgramacionMensualDetalleDto {
   @IsDateString()
   fecha_programada: string;
 
+  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+
+  @ApiPropertyOptional({ description: 'Código del equipo' })
+  @IsOptional()
+  @IsString()
+  equipo_codigo?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Valor crudo del calendario, por ejemplo 325, 650, 975, R20 o una cantidad de horas',
+  })
+  @IsOptional()
+  @IsString()
+  valor_crudo?: string;
+
+  @ApiPropertyOptional({
+    description: 'ID de la plantilla MPG a asociar explícitamente',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  procedimiento_id?: string;
+
+  @ApiPropertyOptional({ description: 'Observación general del bloque mensual' })
+  @IsOptional()
+  @IsString()
+  observacion?: string;
+
   @ApiProperty({
     description: 'Observación obligatoria que justifica la reprogramación',
   })
