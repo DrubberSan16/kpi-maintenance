@@ -777,6 +777,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     'PREDICTIVO',
     'CEBADO',
   ] as const;
+  private readonly PLAN_MAINTENANCE_TYPE_VALUES = [
+    'CORRECTIVO',
+    'PREVENTIVO',
+    'PREDICTIVO',
+    'CEBADO',
+  ] as const;
   private recalculationInterval: NodeJS.Timeout | null = null;
   private recalculationRunning = false;
   private inventoryImportSuppressed = false;
@@ -1433,6 +1439,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  private async ensurePlanMaintenanceSchema() {
+    await this.dataSource.query(`
+      UPDATE kpi_maintenance.tb_plan_mantenimiento
+      SET tipo = 'PREVENTIVO'
+      WHERE COALESCE(NULLIF(TRIM(tipo), ''), 'PREVENTIVO') NOT IN ('PREVENTIVO', 'CORRECTIVO', 'PREDICTIVO', 'CEBADO')
+    `);
+    await this.dataSource.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('kpi_maintenance.tb_plan_mantenimiento') IS NULL THEN
+          RETURN;
+        END IF;
+        IF EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'ck_tb_plan_tipo'
+            AND conrelid = 'kpi_maintenance.tb_plan_mantenimiento'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_plan_mantenimiento
+            DROP CONSTRAINT ck_tb_plan_tipo;
+        END IF;
+        ALTER TABLE kpi_maintenance.tb_plan_mantenimiento
+          ADD CONSTRAINT ck_tb_plan_tipo
+          CHECK (UPPER(COALESCE(TRIM(tipo), '')) IN ('PREVENTIVO', 'CORRECTIVO', 'PREDICTIVO', 'CEBADO'));
+      END $$;
+    `);
+  }
+
   private async ensureWorkOrderEmergencySchema() {
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_process.tb_work_order
@@ -1951,6 +1985,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private normalizePlanMaintenanceType(value: unknown) {
+    const normalized = this.normalizeMaintenanceKind(value);
+    if (
+      this.PLAN_MAINTENANCE_TYPE_VALUES.includes(
+        normalized as (typeof this.PLAN_MAINTENANCE_TYPE_VALUES)[number],
+      )
+    ) {
+      return normalized;
+    }
+    return '';
+  }
+
+  private resolvePlanMaintenanceType(...values: Array<unknown>) {
+    return (
+      values
+        .map((item) => this.normalizePlanMaintenanceType(item))
+        .find(Boolean) || 'PREVENTIVO'
+    );
+  }
+
+  private requirePlanMaintenanceType(value: unknown) {
+    const resolved = this.normalizePlanMaintenanceType(value);
+    if (resolved) return resolved;
+    throw new BadRequestException(
+      `El tipo de plan ${String(value || '').trim() || 'vacio'} no es valido. Valores permitidos: ${this.PLAN_MAINTENANCE_TYPE_VALUES.join(', ')}.`,
+    );
+  }
+
   private requiresOilProductsForMaintenanceKind(value: unknown) {
     return this.normalizeMaintenanceKind(value) === 'CEBADO';
   }
@@ -2421,6 +2483,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     await this.ensureInventoryOilSchema();
     await this.ensureInventoryStockSchema();
+    await this.ensurePlanMaintenanceSchema();
     await this.ensureWorkOrderEmergencySchema();
     await this.ensureEquipmentServiceSchema();
     this.scheduleAlertRecalculation();
@@ -5210,13 +5273,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
 
     if (!plan) {
+      const resolvedPlanType = this.resolvePlanMaintenanceType(
+        procedimiento.clase_mantenimiento,
+        'PREVENTIVO',
+      );
       plan = this.planRepo.create({
         codigo: planCode,
         nombre: procedimiento.nombre,
-        tipo:
-          procedimiento.clase_mantenimiento ??
-          procedimiento.tipo_proceso ??
-          'PREVENTIVO',
+        tipo: resolvedPlanType,
         descripcion: this.buildProcedimientoPlanDescription(procedimiento),
         frecuencia_tipo: 'HORAS',
         frecuencia_valor: procedimiento.frecuencia_horas ?? 0,
@@ -5227,12 +5291,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ),
       });
     } else {
+      const resolvedPlanType = this.resolvePlanMaintenanceType(
+        procedimiento.clase_mantenimiento,
+        plan.tipo,
+        'PREVENTIVO',
+      );
       Object.assign(plan, {
         nombre: procedimiento.nombre,
-        tipo:
-          procedimiento.clase_mantenimiento ??
-          procedimiento.tipo_proceso ??
-          plan.tipo,
+        tipo: resolvedPlanType,
         descripcion: this.buildProcedimientoPlanDescription(procedimiento),
         frecuencia_tipo: 'HORAS',
         frecuencia_valor: procedimiento.frecuencia_horas ?? 0,
@@ -10292,6 +10358,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createPlan(dto: CreatePlanDto) {
+    const resolvedTipo =
+      dto.tipo !== undefined
+        ? this.requirePlanMaintenanceType(dto.tipo)
+        : 'PREVENTIVO';
     let resolution = await this.resolveRequestedCatalogCode(
       this.planRepo,
       dto.codigo,
@@ -10305,6 +10375,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         saved = await this.planRepo.save(
           this.planRepo.create({
             ...dto,
+            tipo: resolvedTipo,
             codigo: resolution.resolvedCode,
           }),
         );
@@ -10357,8 +10428,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
+    const resolvedTipo =
+      dto.tipo !== undefined
+        ? this.requirePlanMaintenanceType(dto.tipo)
+        : this.resolvePlanMaintenanceType(p.tipo, 'PREVENTIVO');
     Object.assign(p, {
       ...dto,
+      tipo: resolvedTipo,
       codigo:
         dto.codigo !== undefined
           ? String(dto.codigo ?? '').trim() || p.codigo
