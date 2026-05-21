@@ -9226,6 +9226,103 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private async resolveActiveProgramacionById(
+    programacionId: string | null | undefined,
+  ) {
+    const normalizedId = String(programacionId || '').trim();
+    if (!normalizedId) return null;
+    return this.programacionRepo.findOne({
+      where: { id: normalizedId, is_deleted: false, activo: true },
+    });
+  }
+
+  private async resolveProgramacionFromAlert(
+    alertaId: string | null | undefined,
+  ) {
+    const normalizedAlertId = String(alertaId || '').trim();
+    if (!normalizedAlertId) return null;
+    const alerta = await this.alertaRepo.findOne({
+      where: { id: normalizedAlertId, is_deleted: false },
+    });
+    if (!alerta) return null;
+    const payload = (alerta.payload_json ?? {}) as Record<string, unknown>;
+    return this.resolveActiveProgramacionById(
+      this.firstNonEmptyString(
+        payload.programacion_id,
+        payload.linked_programacion_id,
+      ),
+    );
+  }
+
+  private async resolveProgramacionReferenceForWorkOrder(options: {
+    workOrderId?: string | null;
+    alertaId?: string | null;
+    valorJson?: Record<string, unknown> | null;
+    fallbackValorJson?: Record<string, unknown> | null;
+  }) {
+    const workOrderId = String(options.workOrderId || '').trim();
+    if (workOrderId) {
+      const linkedProgramacion =
+        await this.resolveLinkedProgramacionForWorkOrder(workOrderId);
+      if (linkedProgramacion) return linkedProgramacion;
+    }
+
+    const explicitProgramacionId = this.firstNonEmptyString(
+      options.valorJson?.programacion_id,
+      options.valorJson?.linked_programacion_id,
+      options.fallbackValorJson?.programacion_id,
+      options.fallbackValorJson?.linked_programacion_id,
+    );
+    const explicitProgramacion =
+      await this.resolveActiveProgramacionById(explicitProgramacionId);
+    if (explicitProgramacion) return explicitProgramacion;
+
+    const explicitAlertId = this.firstNonEmptyString(
+      options.alertaId,
+      options.valorJson?.alerta_id,
+      options.fallbackValorJson?.alerta_id,
+    );
+    const explicitAlertProgramacion =
+      await this.resolveProgramacionFromAlert(explicitAlertId);
+    if (explicitAlertProgramacion) return explicitAlertProgramacion;
+
+    if (workOrderId) {
+      const linkedAlert = await this.findPrimaryLinkedAlertForWorkOrder(
+        workOrderId,
+      );
+      if (linkedAlert) {
+        const linkedAlertProgramacion = await this.resolveProgramacionFromAlert(
+          linkedAlert.id,
+        );
+        if (linkedAlertProgramacion) return linkedAlertProgramacion;
+      }
+    }
+
+    return null;
+  }
+
+  private async assertWorkOrderCanMoveToInProgress(options: {
+    maintenanceKind: string | null | undefined;
+    workOrderId?: string | null;
+    alertaId?: string | null;
+    valorJson?: Record<string, unknown> | null;
+    fallbackValorJson?: Record<string, unknown> | null;
+  }) {
+    if (this.normalizeMaintenanceKind(options.maintenanceKind) === 'CEBADO') {
+      return null;
+    }
+
+    const linkedProgramacion =
+      await this.resolveProgramacionReferenceForWorkOrder(options);
+    if (linkedProgramacion) {
+      return linkedProgramacion;
+    }
+
+    throw new BadRequestException(
+      'La orden de trabajo debe estar vinculada a una programacion antes de pasar a En proceso.',
+    );
+  }
+
   private async canActorCloseOrVoidWorkOrder(
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
@@ -9531,6 +9628,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
   ) {
+    const workOrderPayload =
+      ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
+        null);
     const [
       equipo,
       plan,
@@ -9564,9 +9664,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.resolveLinkedProgramacionForWorkOrder(workOrder.id),
       this.findPrimaryLinkedAlertForWorkOrder(workOrder.id),
     ]);
+    const effectiveLinkedProgramacion =
+      linkedProgramacion ??
+      (await this.resolveProgramacionReferenceForWorkOrder({
+        workOrderId: workOrder.id,
+        alertaId: linkedAlert?.id ?? null,
+        fallbackValorJson: workOrderPayload,
+      }));
     const procedimientoIdFromPayload = String(
-      (workOrder.valor_json as Record<string, unknown> | null | undefined)
-        ?.procedimiento_id ?? '',
+      workOrderPayload?.procedimiento_id ?? '',
     ).trim();
     const procedimiento =
       (procedimientoIdFromPayload
@@ -9575,14 +9681,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           })
         : null) ?? (await this.resolveProcedimientoFromPlan(plan));
 
-    const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
+    const plannerHints = this.collectProgramacionPlannerHints(
+      effectiveLinkedProgramacion,
+    );
     const canCloseOrVoid = await this.canActorCloseOrVoidWorkOrder(
       workOrder,
       actor,
-      linkedProgramacion,
+      effectiveLinkedProgramacion,
     );
     const auditPayload: Record<string, unknown> = this.buildWorkOrderHorometerPayload(
-      (workOrder.valor_json ?? {}) as Record<string, unknown>,
+      (workOrderPayload ?? {}) as Record<string, unknown>,
       equipo,
       procedimiento,
     );
@@ -9617,8 +9725,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         parentWorkOrder?.id ?? workOrder.parent_work_order_id ?? null,
       parent_work_order_code: parentWorkOrder?.code ?? null,
       parent_work_order_title: parentWorkOrder?.title ?? null,
-      linked_programacion_id: linkedProgramacion?.id ?? null,
-      linked_programacion_codigo: linkedProgramacion?.codigo ?? null,
+      linked_programacion_id: effectiveLinkedProgramacion?.id ?? null,
+      linked_programacion_codigo: effectiveLinkedProgramacion?.codigo ?? null,
+      linked_programacion_fecha:
+        effectiveLinkedProgramacion?.proxima_fecha ?? null,
       alerta_id: linkedAlert?.id ?? null,
       alerta_tipo: linkedAlert?.tipo_alerta ?? null,
       alerta_estado: linkedAlert?.estado ?? null,
@@ -18773,6 +18883,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
     }
+    if (nextWorkflowStatus === 'IN_PROGRESS' && previousStatus !== 'IN_PROGRESS') {
+      await this.assertWorkOrderCanMoveToInProgress({
+        maintenanceKind: resolvedMaintenanceKind,
+        workOrderId: workOrder?.id ?? null,
+        alertaId: this.firstNonEmptyString(header.alerta_id) ?? null,
+        valorJson:
+          ((header.valor_json as Record<string, unknown> | null | undefined) ??
+            null),
+        fallbackValorJson: previousHeaderPayload,
+      });
+    }
 
     let resolution: CodeResolution = isNew
       ? await this.resolveRequestedWorkOrderCode(header.code)
@@ -19355,6 +19476,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.emergency_reason,
     );
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
+    if (normalizedStatus === 'IN_PROGRESS') {
+      await this.assertWorkOrderCanMoveToInProgress({
+        maintenanceKind: resolvedMaintenanceKind,
+        alertaId: this.firstNonEmptyString(dto.alerta_id) ?? null,
+        valorJson:
+          ((dto.valor_json as Record<string, unknown> | null | undefined) ??
+            null),
+      });
+    }
     let resolution = await this.resolveRequestedWorkOrderCode(dto.code);
     let created: WorkOrderEntity | null = null;
 
@@ -19635,6 +19765,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ??
       null;
     this.assertOperatorWorkOrderKind(actor, wo.maintenance_kind);
+    if (nextWorkflowStatus === 'IN_PROGRESS' && previousStatus !== 'IN_PROGRESS') {
+      await this.assertWorkOrderCanMoveToInProgress({
+        maintenanceKind: wo.maintenance_kind,
+        workOrderId: wo.id,
+        valorJson:
+          ((dto.valor_json as Record<string, unknown> | null | undefined) ??
+            null),
+        fallbackValorJson: previousPayload,
+      });
+    }
     wo.status_workflow = nextWorkflowStatus;
     if (nextWorkflowStatus === 'CLOSED') {
       this.applyWorkOrderAuditStamp(wo, actor, 'APPROVED', {
