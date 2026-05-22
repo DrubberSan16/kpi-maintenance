@@ -212,7 +212,8 @@ export class PlanMantenimientoEntity {
   @Column({ default: 'PREVENTIVO' }) tipo: string;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
   @Column({ default: 'HORAS' }) frecuencia_tipo: string;
-  @Column({ default: 0 }) frecuencia_valor: number;
+  @Column('numeric', { precision: 18, scale: 4, default: 0 })
+  frecuencia_valor: number;
   @Column({ default: false }) requiere_parada: boolean;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
@@ -361,7 +362,8 @@ export class ProcedimientoPlantillaEntity {
   @Column({ type: 'text', nullable: true }) documento_referencia?: string | null;
   @Column({ type: 'text', nullable: true }) version?: string | null;
   @Column({ type: 'text', nullable: true }) clase_mantenimiento?: string | null;
-  @Column({ type: 'integer', nullable: true }) frecuencia_horas?: number | null;
+  @Column('numeric', { precision: 18, scale: 4, nullable: true })
+  frecuencia_horas?: number | null;
   @Column({ type: 'text', nullable: true }) objetivo?: string | null;
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) precauciones: string[];
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) herramientas: string[];
