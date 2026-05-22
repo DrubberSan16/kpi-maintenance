@@ -1467,6 +1467,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  private async ensureProgramacionScheduleSchema() {
+    await this.dataSource.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('kpi_maintenance.tb_programacion_plan') IS NULL THEN
+          RETURN;
+        END IF;
+        IF EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'uq_tb_programacion_equipo_plan'
+            AND conrelid = 'kpi_maintenance.tb_programacion_plan'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_programacion_plan
+            DROP CONSTRAINT uq_tb_programacion_equipo_plan;
+        END IF;
+      END $$;
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_programacion_equipo_plan_fecha
+      ON kpi_maintenance.tb_programacion_plan (equipo_id, plan_id, proxima_fecha)
+      WHERE is_deleted = false
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_programacion_work_order_fecha
+      ON kpi_maintenance.tb_programacion_plan (work_order_id, proxima_fecha)
+      WHERE is_deleted = false AND activo = true
+    `);
+  }
+
   private async ensureWorkOrderEmergencySchema() {
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_process.tb_work_order
@@ -2484,6 +2514,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.ensureInventoryOilSchema();
     await this.ensureInventoryStockSchema();
     await this.ensurePlanMaintenanceSchema();
+    await this.ensureProgramacionScheduleSchema();
     await this.ensureWorkOrderEmergencySchema();
     await this.ensureEquipmentServiceSchema();
     this.scheduleAlertRecalculation();
