@@ -13796,8 +13796,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .slice(0, 16);
     const line = [
       `[Reprogramacion ${stamp}]`,
-      `${summary.previousDate} -> ${summary.nextDate}`,
-      actorLabel ? `por ${actorLabel}` : '',
+      `Orden reprogramada (${summary.previousDate}) -> (${summary.nextDate})`,
+      actorLabel ? `por parte del usuario ${actorLabel}` : '',
       `Motivo: ${summary.reason}`,
     ]
       .filter(Boolean)
@@ -18190,6 +18190,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return blocker;
   }
 
+  private async assertWorkOrderNotBlockedByActiveAnnex(
+    workOrder: WorkOrderEntity,
+    manager?: EntityManager,
+    action = 'continuar con esta operacion',
+  ) {
+    const blockerId = this.firstNonEmptyString(workOrder.blocked_by_work_order_id);
+    if (!blockerId) return null;
+    const workOrderRepo =
+      manager?.getRepository(WorkOrderEntity) ?? this.woRepo;
+    const blocker = await workOrderRepo.findOne({
+      where: { id: blockerId, is_deleted: false },
+    });
+    if (!blocker) return null;
+    if (this.normalizeWorkflowStatus(blocker.status_workflow) === 'CLOSED') {
+      return blocker;
+    }
+    throw new ConflictException(
+      `La OT ${workOrder.code || workOrder.id} esta bloqueada por parte de la ${
+        blocker.code || blocker.id
+      }. No se puede ${action} hasta que la OT anexada quede finalizada.`,
+    );
+  }
+
   private async releaseBlockedWorkOrdersFor(blocker: WorkOrderEntity) {
     const blockedRows = await this.woRepo.find({
       where: {
@@ -18223,7 +18246,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.appendWorkOrderHistory(
         saved.id,
         this.normalizeWorkflowStatus(saved.status_workflow),
-        `Orden desbloqueada tras culminar OT anexada ${blocker.code}`,
+        `OT liberada por parte de la ${blocker.code}`,
         { fromStatus: 'BLOCKED' },
       );
       await this.publishInAppNotification({
@@ -19135,7 +19158,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : null;
     if (workOrderId) {
       await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+      await this.assertWorkOrderNotBlockedByActiveAnnex(
+        workOrder!,
+        manager,
+        'guardar o cambiar el estado de la orden',
+      );
     }
+    const previousBlockedByWorkOrderId =
+      this.firstNonEmptyString(workOrder?.blocked_by_work_order_id) ?? null;
     const previousStatus = this.normalizeWorkflowStatus(
       workOrder?.status_workflow ?? 'PLANNED',
     );
@@ -19411,6 +19441,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrder: saved,
       isNew,
       previousStatus,
+      previousBlockedByWorkOrderId,
       resolution,
       alertaId: explicitAlertId ?? automaticAlert?.alert.id ?? null,
       alertWasAutoCreated: Boolean(automaticAlert?.created),
@@ -19447,6 +19478,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             workOrder: WorkOrderEntity;
             isNew: boolean;
             previousStatus: string;
+            previousBlockedByWorkOrderId: string | null;
             resolution: CodeResolution;
             alertaId: string | null;
             alertWasAutoCreated: boolean;
@@ -19652,6 +19684,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           changedBy: this.resolveActorHistoryUserId(actor),
         },
       ));
+    }
+
+    if (
+      this.firstNonEmptyString(saved.blocked_by_work_order_id) &&
+      this.firstNonEmptyString(saved.blocked_by_work_order_id) !==
+        transactionResult.previousBlockedByWorkOrderId
+    ) {
+      const blocker = await this.woRepo.findOne({
+        where: {
+          id: saved.blocked_by_work_order_id!,
+          is_deleted: false,
+        },
+      });
+      if (blocker) {
+        await safePostCommit('el historial de bloqueo por OT anexada', () =>
+          this.appendWorkOrderHistory(
+            saved.id,
+            normalizedSavedStatus,
+            `Orden bloqueada por parte de la ${blocker.code}`,
+            {
+              fromStatus: transactionResult.previousStatus,
+              changedBy: this.resolveActorHistoryUserId(actor),
+            },
+          ),
+        );
+      }
     }
 
     for (const note of transactionResult.horometerHistoryNotes ?? []) {
@@ -19935,6 +19993,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'Orden de trabajo creada',
       { changedBy: this.resolveActorHistoryUserId(actor) },
     );
+    if (created.blocked_by_work_order_id) {
+      const blocker = await this.woRepo.findOne({
+        where: { id: created.blocked_by_work_order_id, is_deleted: false },
+      });
+      if (blocker) {
+        await this.appendWorkOrderHistory(
+          created.id,
+          this.normalizeWorkflowStatus(created.status_workflow),
+          `Orden bloqueada por parte de la ${blocker.code}`,
+          { changedBy: this.resolveActorHistoryUserId(actor) },
+        );
+      }
+    }
     for (const note of createdHorometerHistoryNotes) {
       await this.appendWorkOrderHistory(
         created.id,
@@ -20020,11 +20091,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
     await this.assertOperatorAssignedToWorkOrder(id, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      wo,
+      undefined,
+      'guardar o cambiar el estado de la orden',
+    );
     const dtoOwnershipHints = this.resolveWorkOrderOwnershipHints(
       (dto.valor_json ?? null) as Record<string, unknown> | null,
     );
     const previousPayload =
       ((wo.valor_json as Record<string, unknown> | null | undefined) ?? null);
+    const previousBlockedByWorkOrderId =
+      this.firstNonEmptyString(wo.blocked_by_work_order_id) ?? null;
     const equipment = wo.equipment_id
       ? await this.findEquipoOrFail(wo.equipment_id)
       : null;
@@ -20169,6 +20247,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     } else {
       await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus, changedBy: this.resolveActorHistoryUserId(actor) });
     }
+    if (
+      this.firstNonEmptyString(saved.blocked_by_work_order_id) &&
+      this.firstNonEmptyString(saved.blocked_by_work_order_id) !==
+        previousBlockedByWorkOrderId
+    ) {
+      const blocker = await this.woRepo.findOne({
+        where: { id: saved.blocked_by_work_order_id!, is_deleted: false },
+      });
+      if (blocker) {
+        await this.appendWorkOrderHistory(
+          saved.id,
+          this.normalizeWorkflowStatus(saved.status_workflow),
+          `Orden bloqueada por parte de la ${blocker.code}`,
+          {
+            fromStatus: previousStatus,
+            changedBy: this.resolveActorHistoryUserId(actor),
+          },
+        );
+      }
+    }
     for (const note of updatedHorometerHistoryNotes) {
       await this.appendWorkOrderHistory(
         saved.id,
@@ -20223,6 +20321,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async deleteWorkOrder(id: string, actor?: RequestActorContext | null) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
     await this.assertOperatorAssignedToWorkOrder(id, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      wo,
+      undefined,
+      'anular la orden',
+    );
     await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'anular');
     wo.is_deleted = true;
     wo.updated_by =
@@ -20270,6 +20373,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'registrar tareas',
+    );
     const resolvedPlanId =
       this.firstNonEmptyString(dto.plan_id, workOrder.plan_id) ?? null;
     if (!resolvedPlanId) {
@@ -20436,6 +20544,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     await this.assertOperatorAssignedToWorkOrder(workOrder.id, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'actualizar tareas',
+    );
     const enforceRequiredCapture =
       this.normalizeWorkflowStatus(workOrder.status_workflow) === 'CLOSED';
     let historyLabel = '';
@@ -20552,6 +20665,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     await this.assertOperatorAssignedToWorkOrder(tarea.work_order_id, actor);
+    const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'eliminar tareas',
+    );
     tarea.is_deleted = true;
     await this.woTareaRepo.save(tarea);
     const definition =
@@ -20566,7 +20685,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             },
           })
         : null;
-    const workOrder = await this.findOneOrFail(this.woRepo, { id: tarea.work_order_id, is_deleted: false });
     this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
     workOrder.updated_by =
       this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
@@ -20585,6 +20703,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'adjuntar archivos',
+    );
     let buffer: Buffer;
     try {
       buffer = Buffer.from(dto.contenido_base64, 'base64');
@@ -20718,6 +20841,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const workOrder = await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'eliminar adjuntos',
+    );
     const adjunto = await this.findOneOrFail(this.woAdjuntoRepo, {
       id: adjuntoId,
       work_order_id: workOrderId,
@@ -20969,6 +21097,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'registrar consumos',
+    );
     if (!dto.bodega_id) {
       throw new BadRequestException('La bodega es obligatoria para registrar el consumo.');
     }
@@ -21090,6 +21223,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         is_deleted: false,
       });
       await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+      await this.assertWorkOrderNotBlockedByActiveAnnex(
+        workOrder,
+        undefined,
+        'registrar salidas de materiales',
+      );
       this.assertWorkOrderAllowsMaterialIssue(workOrder);
       const documentCode = await this.generateMaintenanceInventoryDocumentCode(
         qr.manager,
@@ -21360,6 +21498,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
       await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
       await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+      await this.assertWorkOrderNotBlockedByActiveAnnex(
+        workOrder,
+        undefined,
+        'registrar materiales de desecho',
+      );
 
       if (
         this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS'
