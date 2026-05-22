@@ -18792,6 +18792,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return workOrderTaskRepo.save(tarea);
   }
 
+  private assertRequiredWorkOrderOutcomePayload(
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    const source =
+      payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : {};
+    const requiredFields = [
+      { key: 'causa', label: 'Causa' },
+      { key: 'accion', label: 'Acción' },
+      { key: 'prevencion', label: 'Prevención' },
+    ] as const;
+
+    for (const field of requiredFields) {
+      if (!String(source[field.key] ?? '').trim()) {
+        throw new BadRequestException(
+          `El campo ${field.label} es obligatorio en la orden de trabajo.`,
+        );
+      }
+    }
+  }
+
   private async saveWorkOrderHeaderWithManager(
     manager: EntityManager,
     workOrderId: string | null,
@@ -18932,6 +18954,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment,
         resolvedProcedure,
       );
+      this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
 
       Object.assign(entity, {
         code: isNew ? resolution.resolvedCode : entity.code,
@@ -19489,6 +19512,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     let created: WorkOrderEntity | null = null;
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const nextHeaderPayload = {
+        ...(dto.valor_json ?? {}),
+        ...(dto.procedimiento_id
+          ? { procedimiento_id: dto.procedimiento_id }
+          : {}),
+      };
+      this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
       const entity = this.woRepo.create({
         code: resolution.resolvedCode,
         type: dto.type,
@@ -19497,12 +19527,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipo_componente_nombre: componentContext.componentName,
         equipo_componente_nombre_oficial: componentContext.componentOfficialName,
         plan_id: resolvedPlanId,
-        valor_json: {
-          ...(dto.valor_json ?? {}),
-          ...(dto.procedimiento_id
-            ? { procedimiento_id: dto.procedimiento_id }
-            : {}),
-        },
+        valor_json: nextHeaderPayload,
         title: dto.title,
         description: dto.description ?? null,
         status_workflow: normalizedStatus,
@@ -19719,6 +19744,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.is_emergency,
       wo.emergency_reason,
     );
+    const nextHeaderPayload =
+      dto.valor_json || dto.procedimiento_id
+        ? {
+            ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
+            ...(dto.valor_json ?? {}),
+            ...(dto.procedimiento_id
+              ? { procedimiento_id: dto.procedimiento_id }
+              : {}),
+          }
+        : ((wo.valor_json as Record<string, unknown> | null) ?? {});
+    this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
     Object.assign(wo, {
       ...dto,
       plan_id: resolvedPlanId,
@@ -19731,16 +19767,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.blocked_reason !== undefined
           ? String(dto.blocked_reason || '').trim() || null
           : wo.blocked_reason,
-      valor_json:
-        dto.valor_json || dto.procedimiento_id
-          ? {
-              ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
-              ...(dto.valor_json ?? {}),
-              ...(dto.procedimiento_id
-                ? { procedimiento_id: dto.procedimiento_id }
-                : {}),
-            }
-          : wo.valor_json,
+      valor_json: nextHeaderPayload,
       updated_by:
         this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ??
         wo.updated_by ??
