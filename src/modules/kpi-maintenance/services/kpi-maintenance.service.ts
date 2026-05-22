@@ -9360,6 +9360,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private async ensureProgramacionWorkOrderDateAvailability(options: {
+    workOrderId?: string | null;
+    proximaFecha?: string | Date | null;
+    excludeProgramacionId?: string | null;
+  }) {
+    const workOrderId = String(options.workOrderId || '').trim();
+    const proximaFecha = this.safeDateOnlyString(options.proximaFecha);
+    const excludeProgramacionId = String(
+      options.excludeProgramacionId || '',
+    ).trim();
+    if (!workOrderId || !proximaFecha) return;
+
+    const matches = await this.programacionRepo.find({
+      where: {
+        work_order_id: workOrderId,
+        proxima_fecha: proximaFecha,
+        is_deleted: false,
+        activo: true,
+      },
+    });
+    const conflict = matches.find(
+      (item) => String(item.id || '').trim() !== excludeProgramacionId,
+    );
+    if (conflict) {
+      throw new BadRequestException(
+        'La orden de trabajo ya está programada para ese día.',
+      );
+    }
+  }
+
   private async resolveActiveProgramacionById(
     programacionId: string | null | undefined,
   ) {
@@ -10762,46 +10792,39 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
-    const existing = await this.programacionRepo.findOne({
-      where: {
-        equipo_id: resolvedEquipmentId,
-        plan_id: resolvedPlanId,
-      },
+    const nextDate = this.safeDateOnlyString(dto.proxima_fecha);
+    await this.ensureProgramacionWorkOrderDateAvailability({
+      workOrderId: linkedWorkOrder.id,
+      proximaFecha: nextDate,
     });
-    const isUpdate = Boolean(existing);
-    const entity =
-      existing ??
-      this.programacionRepo.create({
-        equipo_id: resolvedEquipmentId,
-        plan_id: resolvedPlanId,
-      });
+    const entity = this.programacionRepo.create({
+      equipo_id: resolvedEquipmentId,
+      plan_id: resolvedPlanId,
+    });
     Object.assign(entity, {
-      codigo: dto.codigo?.trim() || existing?.codigo || null,
+      codigo: dto.codigo?.trim() || null,
       equipo_id: resolvedEquipmentId,
       plan_id: resolvedPlanId,
       work_order_id: linkedWorkOrder.id,
       modo_programacion: String(
-        dto.modo_programacion || existing?.modo_programacion || 'DINAMICA',
+        dto.modo_programacion || 'DINAMICA',
       ).toUpperCase(),
       origen_programacion: String(
-        dto.origen_programacion || existing?.origen_programacion || 'MANUAL',
+        dto.origen_programacion || 'MANUAL',
       ).toUpperCase(),
       ultima_ejecucion_fecha:
-        dto.ultima_ejecucion_fecha ?? existing?.ultima_ejecucion_fecha ?? null,
+        dto.ultima_ejecucion_fecha ?? null,
       ultima_ejecucion_horas:
-        dto.ultima_ejecucion_horas ?? existing?.ultima_ejecucion_horas ?? null,
-      proxima_fecha: dto.proxima_fecha ?? existing?.proxima_fecha ?? null,
-      proxima_horas: dto.proxima_horas ?? existing?.proxima_horas ?? null,
-      documento_origen: dto.documento_origen ?? existing?.documento_origen ?? null,
+        dto.ultima_ejecucion_horas ?? null,
+      proxima_fecha: nextDate ?? null,
+      proxima_horas: dto.proxima_horas ?? null,
+      documento_origen: dto.documento_origen ?? null,
       payload_json: this.mergeProgramacionWorkOrderPayload(
-        {
-          ...((existing?.payload_json ?? {}) as Record<string, unknown>),
-          ...((dto.payload_json ?? {}) as Record<string, unknown>),
-        },
+        { ...((dto.payload_json ?? {}) as Record<string, unknown>) },
         linkedWorkOrder,
       ),
-      activo: dto.activo ?? existing?.activo ?? true,
-      status: existing?.status ?? 'ACTIVE',
+      activo: dto.activo ?? true,
+      status: 'ACTIVE',
       is_deleted: false,
     });
     const saved = await this.programacionRepo.save(entity);
@@ -10906,6 +10929,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'Debes seleccionar una plantilla MPG o un plan operativo.',
       );
     }
+    const nextDate = this.safeDateOnlyString(
+      dto.proxima_fecha ?? p.proxima_fecha ?? null,
+    );
+    await this.ensureProgramacionWorkOrderDateAvailability({
+      workOrderId: linkedWorkOrder.id,
+      proximaFecha: nextDate,
+      excludeProgramacionId: p.id,
+    });
     Object.assign(p, {
       codigo: dto.codigo ?? p.codigo ?? null,
       equipo_id: resolvedEquipmentId,
@@ -10922,7 +10953,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         : p.origen_programacion ?? 'MANUAL',
       ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? p.ultima_ejecucion_fecha ?? null,
       ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? p.ultima_ejecucion_horas ?? null,
-      proxima_fecha: dto.proxima_fecha ?? p.proxima_fecha ?? null,
+      proxima_fecha: nextDate ?? null,
       proxima_horas: dto.proxima_horas ?? p.proxima_horas ?? null,
       documento_origen: dto.documento_origen ?? p.documento_origen ?? null,
       payload_json:
@@ -13373,12 +13404,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     proxima_horas?: number | null;
     payload_json?: Record<string, unknown>;
   }) {
+    const workOrderId = this.firstNonEmptyString(payload.payload_json?.work_order_id);
     const existing = await this.programacionRepo.findOne({
       where: {
         equipo_id: payload.equipo_id,
         plan_id: payload.plan_id,
         proxima_fecha: payload.fecha_programada,
         modo_programacion: 'CALENDARIO',
+        ...(workOrderId ? { work_order_id: workOrderId } : {}),
         is_deleted: false,
       },
     });
@@ -13405,6 +13438,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         codigo: null,
         equipo_id: payload.equipo_id,
         plan_id: payload.plan_id,
+        work_order_id: workOrderId ?? null,
         modo_programacion: 'CALENDARIO',
         origen_programacion: 'MENSUAL_IMPORT',
         ultima_ejecucion_fecha: null,
@@ -14044,6 +14078,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     const prepared = await this.prepareProgramacionMensualDetailInput(dto);
+    await this.ensureProgramacionWorkOrderDateAvailability({
+      workOrderId: this.firstNonEmptyString(prepared.nextPayload.work_order_id),
+      proximaFecha: prepared.fechaProgramada,
+    });
     let programacionId: string | null = null;
     if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id) {
       const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
@@ -14108,6 +14146,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     const prepared = await this.prepareProgramacionMensualDetailInput(dto, detail);
+    await this.ensureProgramacionWorkOrderDateAvailability({
+      workOrderId: this.firstNonEmptyString(prepared.nextPayload.work_order_id),
+      proximaFecha: prepared.fechaProgramada,
+      excludeProgramacionId: detail.programacion_id ?? null,
+    });
     let programacionId = detail.programacion_id ?? null;
     if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id) {
       const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
@@ -14263,6 +14306,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       detail,
       { allowScheduleDateChange: true },
     );
+    await this.ensureProgramacionWorkOrderDateAvailability({
+      workOrderId: this.firstNonEmptyString(prepared.nextPayload.work_order_id),
+      proximaFecha: prepared.fechaProgramada,
+      excludeProgramacionId: detail.programacion_id ?? null,
+    });
 
     let programacionId = detail.programacion_id ?? null;
     if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id) {
