@@ -9708,8 +9708,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         currentPayload.fecha_programada_nueva,
         currentPayload.reprogramado_at,
       ) != null;
+    const reprogrammedWithFutureDate =
+      isReprogrammed && daysRemaining != null && daysRemaining > 0;
     const displayStatus =
-      dueByHours || dueByDate
+      reprogrammedWithFutureDate
+        ? 'REPROGRAMADA'
+        : dueByHours || dueByDate
         ? 'VENCIDA'
         : isReprogrammed
           ? 'REPROGRAMADA'
