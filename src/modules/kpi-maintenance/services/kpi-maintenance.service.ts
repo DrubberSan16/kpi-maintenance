@@ -4181,6 +4181,138 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async reportTechnicalIncident(payload: Record<string, unknown> | null | undefined) {
+    const normalizedPayload =
+      payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : {};
+    void this.processTechnicalIncidentReport(normalizedPayload);
+    return this.wrap(
+      {
+        accepted: true,
+        ticket:
+          this.firstNonEmptyString(
+            normalizedPayload.ticket,
+            normalizedPayload.supportTicket,
+          ) ?? null,
+      },
+      'Incidente tecnico recibido',
+    );
+  }
+
+  private async processTechnicalIncidentReport(payload: Record<string, unknown>) {
+    const ticket =
+      this.firstNonEmptyString(payload.ticket, payload.supportTicket) ??
+      `PENDIENTE-${Date.now()}`;
+    const moduleName =
+      this.firstNonEmptyString(payload.module, payload.moduleMicroservice) ??
+      'DESCONOCIDO';
+    const method = this.firstNonEmptyString(payload.method) ?? 'GET';
+    const requestUrl =
+      this.firstNonEmptyString(payload.request_url, payload.requestUrl) ??
+      'sin-url';
+    const statusCode = this.toNumeric(payload.status_code, 500);
+    const createdBy =
+      this.firstNonEmptyString(
+        payload.user_name,
+        payload.user_email,
+        payload.user_display_name,
+        'SISTEMA',
+      ) ?? 'SISTEMA';
+    const description = [
+      `[TICKET:${ticket}] Incidente tecnico reportado desde cliente`,
+      `Modulo=${moduleName}`,
+      `HTTP=${method}`,
+      `URL=${requestUrl}`,
+      `Status=${statusCode}`,
+      `Usuario=${createdBy}`,
+      `Ruta=${this.firstNonEmptyString(payload.frontend_route) ?? 'N/A'}`,
+      `Mensaje=${this.firstNonEmptyString(payload.response_message) ?? 'Internal Server Error'}`,
+    ].join(' | ');
+
+    await this.writeSecurityLog({
+      description,
+      status: 'ERROR',
+      typeLog: 'TECHNICAL_INCIDENT',
+      createdBy,
+    });
+
+    await this.sendTechnicalIncidentEmail({
+      ticket,
+      moduleName,
+      method,
+      requestUrl,
+      statusCode,
+      createdBy,
+      payload,
+    });
+  }
+
+  private async sendTechnicalIncidentEmail(input: {
+    ticket: string;
+    moduleName: string;
+    method: string;
+    requestUrl: string;
+    statusCode: number;
+    createdBy: string;
+    payload: Record<string, unknown>;
+  }) {
+    if (!this.alertAdministratorEmail) return;
+    const transporter = await this.getAlertMailTransporter();
+    if (!transporter) return;
+
+    const subject = `[${input.moduleName}] Error tecnico ${input.ticket}`;
+    const text = [
+      'Se notifico automaticamente un error tecnico al equipo de soporte.',
+      '',
+      `Ticket: ${input.ticket}`,
+      `Modulo: ${input.moduleName}`,
+      `HTTP: ${input.method}`,
+      `URL: ${input.requestUrl}`,
+      `Status: ${input.statusCode}`,
+      `Usuario: ${input.createdBy}`,
+      `Ruta frontend: ${this.firstNonEmptyString(input.payload.frontend_route) ?? 'N/A'}`,
+      `Correo usuario: ${this.firstNonEmptyString(input.payload.user_email) ?? 'N/A'}`,
+      '',
+      `Mensaje: ${this.firstNonEmptyString(input.payload.response_message) ?? 'Internal Server Error'}`,
+    ].join('\n');
+    const html = `
+      <div style="font-family:Arial,sans-serif;line-height:1.5">
+        <h2 style="margin-bottom:12px">Incidente tecnico reportado</h2>
+        <p><strong>Ticket:</strong> ${input.ticket}</p>
+        <p><strong>Modulo:</strong> ${input.moduleName}</p>
+        <p><strong>HTTP:</strong> ${input.method}</p>
+        <p><strong>URL:</strong> ${input.requestUrl}</p>
+        <p><strong>Status:</strong> ${input.statusCode}</p>
+        <p><strong>Usuario:</strong> ${input.createdBy}</p>
+        <p><strong>Ruta frontend:</strong> ${
+          this.firstNonEmptyString(input.payload.frontend_route) ?? 'N/A'
+        }</p>
+        <p><strong>Correo usuario:</strong> ${
+          this.firstNonEmptyString(input.payload.user_email) ?? 'N/A'
+        }</p>
+        <p><strong>Mensaje:</strong> ${
+          this.firstNonEmptyString(input.payload.response_message) ??
+          'Internal Server Error'
+        }</p>
+      </div>
+    `;
+
+    try {
+      await transporter.sendMail({
+        from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+        to: this.alertAdministratorEmail,
+        subject,
+        text,
+        html,
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo enviar correo de incidente tecnico ${input.ticket}: ${error?.message ?? 'desconocido'}`,
+      );
+    }
+  }
+
   private async getJson(url: string) {
     const response = await fetch(url, { method: 'GET' });
     if (!response.ok) {

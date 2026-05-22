@@ -264,6 +264,13 @@ const bodyExamples = {
 export class KpiMaintenanceController {
   constructor(private readonly service: KpiMaintenanceService) {}
 
+  @ApiTags('Support')
+  @ApiOperation({ summary: 'Registrar incidente tecnico reportado desde cliente' })
+  @Post('support/incidents')
+  reportTechnicalIncident(@Body() payload: Record<string, unknown>) {
+    return this.service.reportTechnicalIncident(payload);
+  }
+
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Listar equipos con filtros opcionales' })
   @Get('equipos')
