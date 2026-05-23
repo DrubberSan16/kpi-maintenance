@@ -9748,15 +9748,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const currentHours = this.toNumeric(equipo.horometro_actual);
     const nextHours = patch.proxima_horas ?? programacion.proxima_horas ?? null;
     const nextDate = patch.proxima_fecha ?? programacion.proxima_fecha ?? null;
-    const hoursRemaining = nextHours == null ? null : Number((this.toNumeric(nextHours) - currentHours).toFixed(2));
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const daysRemaining =
-      nextDate == null
+    const hoursRemaining =
+      nextHours == null
         ? null
-        : Math.ceil((new Date(nextDate).getTime() - today.getTime()) / 86400000);
+        : Number((this.toNumeric(nextHours) - currentHours).toFixed(2));
+    const todayString = this.currentGuayaquilDateString();
+    const daysRemaining =
+      nextDate == null ? null : this.diffDateOnlyStrings(nextDate, todayString);
+    const scheduledForToday =
+      nextDate != null && String(nextDate).slice(0, 10) === todayString;
     const dueByHours = hoursRemaining != null && hoursRemaining <= 0;
-    const dueByDate = daysRemaining != null && daysRemaining <= 0;
+    const dueByDate = daysRemaining != null && daysRemaining < 0;
     const dueSoon =
       (hoursRemaining != null && hoursRemaining > 0 && hoursRemaining <= Math.max(1, freqValue * 0.1)) ||
       (daysRemaining != null && daysRemaining > 0 && daysRemaining <= 3);
@@ -9774,6 +9776,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const displayStatus =
       reprogrammedWithFutureDate
         ? 'REPROGRAMADA'
+        : scheduledForToday
+          ? 'A_REALIZAR'
         : dueByHours || dueByDate
         ? 'VENCIDA'
         : isReprogrammed
