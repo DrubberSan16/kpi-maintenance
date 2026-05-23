@@ -1296,7 +1296,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!scope || !rows.length) return rows;
 
     const visibleIds = new Set<string>();
-    const pendingIds: string[] = [];
+    const pendingRows: WorkOrderEntity[] = [];
 
     for (const row of rows) {
       const workOrderId = String(row.id || '').trim();
@@ -1308,11 +1308,62 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         visibleIds.add(workOrderId);
         continue;
       }
-      pendingIds.push(workOrderId);
+      pendingRows.push(row);
     }
 
-    if (pendingIds.length && scope.warehouseIds.size) {
+    if (pendingRows.length && scope.warehouseIds.size) {
+      const pendingIds = pendingRows
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean);
       const warehouseIds = [...scope.warehouseIds];
+      const directProcedimientoIds = pendingRows
+        .map((row) =>
+          this.firstNonEmptyString(
+            (row.valor_json as Record<string, unknown> | null | undefined)
+              ?.procedimiento_id,
+          ),
+        )
+        .filter(Boolean) as string[];
+      const pendingPlanIds = pendingRows
+        .map((row) => String(row.plan_id || '').trim())
+        .filter(Boolean);
+      const plans = pendingPlanIds.length
+        ? await this.planRepo.find({
+            where: { id: In([...new Set(pendingPlanIds)]), is_deleted: false },
+          })
+        : [];
+      const planMap = new Map(plans.map((row) => [String(row.id || '').trim(), row]));
+      const derivedProcedimientoIds = plans
+        .map((plan) => this.extractProcedimientoIdFromPlan(plan))
+        .filter(Boolean) as string[];
+      const procedureIds = [...new Set([...directProcedimientoIds, ...derivedProcedimientoIds])];
+      const procedures = procedureIds.length
+        ? await this.procedimientoRepo.find({
+            where: { id: In(procedureIds), is_deleted: false },
+          })
+        : [];
+      const procedureMap = new Map(
+        procedures.map((row) => [String(row.id || '').trim(), row]),
+      );
+
+      for (const row of pendingRows) {
+        const workOrderId = String(row.id || '').trim();
+        if (!workOrderId || visibleIds.has(workOrderId)) continue;
+        const payload = (row.valor_json ?? {}) as Record<string, unknown>;
+        const procedimientoId =
+          this.firstNonEmptyString(payload.procedimiento_id) ??
+          this.extractProcedimientoIdFromPlan(
+            planMap.get(String(row.plan_id || '').trim()),
+          );
+        const procedure = procedimientoId
+          ? procedureMap.get(String(procedimientoId || '').trim())
+          : null;
+        const procedureWarehouseId = String(procedure?.bodega_id || '').trim();
+        if (procedureWarehouseId && scope.warehouseIds.has(procedureWarehouseId)) {
+          visibleIds.add(workOrderId);
+        }
+      }
+
       const [consumos, reservas, entregas] = await Promise.all([
         this.consumoRepo.find({
           where: {
@@ -9883,6 +9934,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             where: { id: procedimientoIdFromPayload, is_deleted: false },
           })
         : null) ?? (await this.resolveProcedimientoFromPlan(plan));
+    const bodega =
+      procedimiento?.bodega_id
+        ? await this.bodegaRepo.findOne({
+            where: { id: procedimiento.bodega_id, is_deleted: false },
+          })
+        : null;
 
     const plannerHints = this.collectProgramacionPlannerHints(
       effectiveLinkedProgramacion,
@@ -9912,6 +9969,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       procedimiento_id: procedimiento?.id ?? null,
       procedimiento_codigo: procedimiento?.codigo ?? null,
       procedimiento_nombre: procedimiento?.nombre ?? null,
+      bodega_id: procedimiento?.bodega_id ?? null,
+      bodega_label:
+        this.buildBodegaLabel(bodega) ?? procedimiento?.bodega_id ?? null,
       equipo_componente_id: componente?.id ?? workOrder.equipo_componente_id ?? null,
       equipo_componente_nombre:
         componente?.nombre ?? workOrder.equipo_componente_nombre ?? null,
