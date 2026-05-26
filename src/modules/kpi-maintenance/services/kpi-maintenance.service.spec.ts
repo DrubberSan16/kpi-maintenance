@@ -465,6 +465,43 @@ describe('KpiMaintenanceService work orders', () => {
       .mockResolvedValue(undefined);
   });
 
+  it('rechaza cambios en una OT bloqueada por una anexada activa', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-blocker',
+      code: 'OT-A00002',
+      status_workflow: 'IN_PROGRESS',
+      is_deleted: false,
+    });
+
+    await expect(
+      (service as any).assertWorkOrderNotBlockedByActiveAnnex(
+        {
+          id: 'wo-1',
+          code: 'OT-A00001',
+          status_workflow: 'BLOCKED',
+          blocked_by_work_order_id: 'wo-blocker',
+        },
+        undefined,
+        'cambiar el estado de la orden',
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('rechaza una OT en estado bloqueado sin OT anexada', async () => {
+    await expect(
+      (service as any).assertWorkOrderNotBlockedByActiveAnnex(
+        {
+          id: 'wo-1',
+          code: 'OT-A00001',
+          status_workflow: 'BLOCKED',
+          blocked_by_work_order_id: null,
+        },
+        undefined,
+        'guardar la orden',
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
   it('crea la OT sincronizando plantilla y guardando la cabecera correctamente', async () => {
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',

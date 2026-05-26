@@ -3510,6 +3510,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.normalizeWorkflowStatus(status) !== 'CLOSED';
   }
 
+  private assertBlockedWorkflowHasBlockingOrder(
+    nextStatus: unknown,
+    blockedByWorkOrderId: unknown,
+  ) {
+    if (
+      this.normalizeWorkflowStatus(nextStatus) === 'BLOCKED' &&
+      !this.firstNonEmptyString(blockedByWorkOrderId)
+    ) {
+      throw new BadRequestException(
+        'Para bloquear una OT debes seleccionar la OT anexada o bloqueante.',
+      );
+    }
+  }
+
   private assertWorkOrderAllowsMaterialIssue(workOrder: WorkOrderEntity) {
     if (this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS') {
       throw new BadRequestException(
@@ -18342,14 +18356,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     manager?: EntityManager,
     action = 'continuar con esta operacion',
   ) {
+    const isBlockedStatus =
+      this.normalizeWorkflowStatus(workOrder.status_workflow) === 'BLOCKED';
     const blockerId = this.firstNonEmptyString(workOrder.blocked_by_work_order_id);
-    if (!blockerId) return null;
+    if (!blockerId) {
+      if (isBlockedStatus) {
+        throw new ConflictException(
+          `La OT ${workOrder.code || workOrder.id} esta bloqueada. No se puede ${action} hasta que sea liberada automaticamente por la OT anexada.`,
+        );
+      }
+      return null;
+    }
     const workOrderRepo =
       manager?.getRepository(WorkOrderEntity) ?? this.woRepo;
     const blocker = await workOrderRepo.findOne({
       where: { id: blockerId, is_deleted: false },
     });
-    if (!blocker) return null;
+    if (!blocker) {
+      if (isBlockedStatus) {
+        throw new ConflictException(
+          `La OT ${workOrder.code || workOrder.id} esta bloqueada. No se puede ${action} hasta que sea liberada automaticamente por la OT anexada.`,
+        );
+      }
+      return null;
+    }
     if (this.normalizeWorkflowStatus(blocker.status_workflow) === 'CLOSED') {
       return blocker;
     }
@@ -19366,6 +19396,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const nextWorkflowStatus = this.normalizeWorkflowStatus(
       header.status_workflow ?? workOrder?.status_workflow ?? 'PLANNED',
     );
+    const nextBlockedByWorkOrderId =
+      header.blocked_by_work_order_id !== undefined
+        ? header.blocked_by_work_order_id
+        : workOrder?.blocked_by_work_order_id;
+    this.assertBlockedWorkflowHasBlockingOrder(
+      nextWorkflowStatus,
+      nextBlockedByWorkOrderId,
+    );
     const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
       header.maintenance_kind,
       workOrder?.maintenance_kind,
@@ -19510,9 +19548,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       entity.status_workflow = nextWorkflowStatus;
       await this.applyBlockingRelationship(
         entity,
-        header.blocked_by_work_order_id !== undefined
-          ? header.blocked_by_work_order_id
-          : entity.blocked_by_work_order_id,
+        nextBlockedByWorkOrderId,
         header.blocked_reason !== undefined
           ? header.blocked_reason
           : entity.blocked_reason,
@@ -20010,6 +20046,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
     const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
+    this.assertBlockedWorkflowHasBlockingOrder(
+      normalizedStatus,
+      dto.blocked_by_work_order_id,
+    );
     const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
       dto.maintenance_kind,
       'CORRECTIVO',
@@ -20277,6 +20317,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const nextWorkflowStatus = this.normalizeWorkflowStatus(
       dto.status_workflow ?? wo.status_workflow,
     );
+    const nextBlockedByWorkOrderId =
+      dto.blocked_by_work_order_id !== undefined
+        ? dto.blocked_by_work_order_id
+        : wo.blocked_by_work_order_id;
+    this.assertBlockedWorkflowHasBlockingOrder(
+      nextWorkflowStatus,
+      nextBlockedByWorkOrderId,
+    );
     if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'cerrar');
       await this.assertWorkOrderTaskCapturesReadyForClosure(
@@ -20358,9 +20406,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     await this.applyBlockingRelationship(
       wo,
-      dto.blocked_by_work_order_id !== undefined
-        ? dto.blocked_by_work_order_id
-        : wo.blocked_by_work_order_id,
+      nextBlockedByWorkOrderId,
       dto.blocked_reason !== undefined ? dto.blocked_reason : wo.blocked_reason,
     );
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
