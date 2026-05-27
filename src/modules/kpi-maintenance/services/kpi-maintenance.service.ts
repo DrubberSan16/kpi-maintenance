@@ -1929,6 +1929,96 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return [...new Set(notes.filter(Boolean))];
   }
 
+  private async syncReprogrammingHorometer(options: {
+    workOrderId?: unknown;
+    equipmentId?: unknown;
+    horometroActual?: unknown;
+    actor?: RequestActorContext | null;
+  }) {
+    const horometroActual = this.firstNullableNumeric(options.horometroActual);
+    if (horometroActual == null) return [] as string[];
+    if (horometroActual < 0) {
+      throw new BadRequestException('El horometro actual no puede ser negativo.');
+    }
+
+    const workOrderId = this.firstNonEmptyString(options.workOrderId);
+    const equipmentId = this.firstNonEmptyString(options.equipmentId);
+    const actorSnapshot = this.resolveAuditActorSnapshot(options.actor);
+    const normalizedHorometer = Number(horometroActual.toFixed(2));
+    const nowIso = new Date().toISOString();
+
+    if (workOrderId) {
+      const workOrder = await this.findOneOrFail(this.woRepo, {
+        id: workOrderId,
+        is_deleted: false,
+      });
+      const previousPayload =
+        ((workOrder.valor_json ?? {}) as Record<string, unknown>) ?? {};
+      const previousHours = this.firstNullableNumeric(
+        previousPayload.horas_a_realizar,
+        previousPayload.horas_plantilla,
+      );
+      const nextPayload = {
+        ...previousPayload,
+        horometro_actual: normalizedHorometer,
+        horometro_equipo_referencia: normalizedHorometer,
+        horometro_actual_reprogramacion: normalizedHorometer,
+        horometro_actual_reprogramado_at: nowIso,
+        reprogramado_horometro_at: nowIso,
+        reprogramado_horometro_por: actorSnapshot.username ?? null,
+        reprogramado_horometro_por_user_id: actorSnapshot.userId ?? null,
+      } as Record<string, unknown>;
+      if (previousHours != null) {
+        nextPayload.horometro_proyectado = Number(
+          (normalizedHorometer + previousHours).toFixed(2),
+        );
+      }
+
+      workOrder.valor_json = nextPayload;
+      workOrder.updated_by =
+        actorSnapshot.username ?? workOrder.updated_by ?? null;
+      const savedWorkOrder = await this.woRepo.save(workOrder);
+      const notes = await this.syncEquipmentHorometerFromWorkOrder(
+        savedWorkOrder,
+        previousPayload,
+        options.actor,
+      );
+      const uniqueNotes = [...new Set(notes.filter(Boolean))];
+      for (const note of uniqueNotes) {
+        await this.appendWorkOrderHistory(
+          savedWorkOrder.id,
+          this.normalizeWorkflowStatus(savedWorkOrder.status_workflow),
+          note,
+          {
+            fromStatus: savedWorkOrder.status_workflow,
+            changedBy: this.resolveActorHistoryUserId(options.actor),
+          },
+        );
+      }
+      return uniqueNotes;
+    }
+
+    if (!equipmentId) return [] as string[];
+    const equipment = await this.findOneOrFail(this.equipoRepo, {
+      id: equipmentId,
+      is_deleted: false,
+    } as FindOptionsWhere<EquipoEntity>);
+    const currentHorometer =
+      equipment.horometro_actual != null
+        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
+        : null;
+    if (!this.haveDifferentNumericValue(currentHorometer, normalizedHorometer)) {
+      return [] as string[];
+    }
+    equipment.horometro_actual = normalizedHorometer;
+    equipment.fecha_ultima_lectura = new Date();
+    equipment.updated_by = actorSnapshot.username ?? equipment.updated_by ?? null;
+    await this.equipoRepo.save(equipment);
+    return [
+      `Equipo sincronizado con horometro actual: ${this.formatHorometerHistoryValue(normalizedHorometer)}`,
+    ];
+  }
+
   private resolveWorkOrderReferenceDate(workOrder?: WorkOrderEntity | null) {
     if (!workOrder) return null;
     return (
@@ -11007,11 +11097,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'Programación obtenida',
     );
   }
-  async updateProgramacion(id: string, dto: UpdateProgramacionDto) {
+  async updateProgramacion(
+    id: string,
+    dto: UpdateProgramacionDto,
+    actor?: RequestActorContext | null,
+  ) {
     const p = await this.findOneOrFail(this.programacionRepo, {
       id,
       is_deleted: false,
     });
+    const dtoPayload = (dto.payload_json ?? {}) as Record<string, unknown>;
+    const reprogramHorometer = this.firstNullableNumeric(
+      dto.horometro_actual,
+      dtoPayload.horometro_actual,
+    );
+    if (reprogramHorometer != null && reprogramHorometer < 0) {
+      throw new BadRequestException('El horometro actual no puede ser negativo.');
+    }
     const linkedWorkOrder = await this.resolveProgramacionWorkOrder(
       dto.work_order_id !== undefined ? dto.work_order_id : p.work_order_id,
     );
@@ -11075,6 +11177,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       activo: dto.activo ?? p.activo,
     });
     const saved = await this.programacionRepo.save(p);
+    if (reprogramHorometer != null) {
+      await this.syncReprogrammingHorometer({
+        workOrderId: linkedWorkOrder.id,
+        equipmentId: saved.equipo_id,
+        horometroActual: reprogramHorometer,
+        actor,
+      });
+    }
     const enriched = await this.recalculateProgramacionFields(saved);
     await this.publishInAppNotification({
       title: 'Programación actualizada',
@@ -14131,6 +14241,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             descriptor.tipo_mantenimiento,
         ).toUpperCase(),
     } as Record<string, unknown>;
+    const dtoHorometer = this.firstNullableNumeric(
+      (dto as { horometro_actual?: unknown }).horometro_actual,
+    );
+    if (dtoHorometer != null) {
+      nextPayload.horometro_actual = Number(dtoHorometer.toFixed(2));
+    }
     const workOrderId = this.firstNonEmptyString(nextPayload.work_order_id);
     if (workOrderId) {
       const workOrder = await this.findOneOrFail(this.woRepo, {
@@ -14330,6 +14446,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const previousDate = this.toDateOnlyString(detail.fecha_programada);
     const nextDate = this.toDateOnlyString(dto.fecha_programada);
     const reason = String(dto.observacion_reprogramacion || '').trim();
+    const payloadOverrides = (dto.payload_json ?? {}) as Record<string, unknown>;
+    const reprogramHorometer = this.firstNullableNumeric(
+      dto.horometro_actual,
+      payloadOverrides.horometro_actual,
+    );
     if (!nextDate) {
       throw new BadRequestException(
         'Debes indicar la nueva fecha de reprogramación.',
@@ -14351,13 +14472,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const payloadOverrides = (dto.payload_json ?? {}) as Record<string, unknown>;
+    if (reprogramHorometer == null) {
+      throw new BadRequestException(
+        'Debes registrar el horometro actual del equipo para reprogramar la orden.',
+      );
+    }
+    if (reprogramHorometer < 0) {
+      throw new BadRequestException('El horometro actual no puede ser negativo.');
+    }
+
     const actorSnapshot = this.resolveAuditActorSnapshot(actor, payloadOverrides);
     const registeredAt = new Date().toISOString();
     const historyEntry = {
       previous_date: previousDate,
       next_date: nextDate,
       observacion: reason,
+      horometro_actual: reprogramHorometer,
       registered_at: registeredAt,
       actor_user_id: actorSnapshot.userId ?? null,
       actor_username: actorSnapshot.username ?? null,
@@ -14399,6 +14529,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           actor_role: actorSnapshot.roleName ?? null,
           updated_by: actorSnapshot.username ?? null,
           updated_by_email: actorSnapshot.email ?? null,
+          horometro_actual: reprogramHorometer,
+          horometro_actual_reprogramacion: reprogramHorometer,
           reprogramado: true,
           reprogramado_at: registeredAt,
           reprogramado_por_user_id: actorSnapshot.userId ?? null,
@@ -14471,6 +14603,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       payload_json: prepared.nextPayload,
     });
     await this.programacionMensualDetRepo.save(detail);
+    await this.syncReprogrammingHorometer({
+      workOrderId: this.firstNonEmptyString(prepared.nextPayload.work_order_id),
+      equipmentId: prepared.equipo.id,
+      horometroActual: reprogramHorometer,
+      actor,
+    });
     await this.createProgramacionMensualReprogramAlert({
       header,
       detail,

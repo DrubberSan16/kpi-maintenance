@@ -771,8 +771,9 @@ export class KpiMaintenanceController {
   updateProgramacion(
     @Param('id') id: string,
     @Body() dto: UpdateProgramacionDto,
+    @Req() req: any,
   ) {
-    return this.service.updateProgramacion(id, dto);
+    return this.service.updateProgramacion(id, dto, getRequestActor(req));
   }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Eliminar programación por ID' })

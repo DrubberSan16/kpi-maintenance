@@ -577,7 +577,15 @@ export class CreateProgramacionDto {
   @IsOptional()
   @IsObject()
   payload_json?: Record<string, unknown>;
-  @ApiPropertyOptional({ description: 'Indica si la programación está activa' })
+  @ApiPropertyOptional({
+    description: 'Horometro actual registrado durante una reprogramacion vinculada a OT',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_actual?: number;
+  @ApiPropertyOptional({ description: 'Indica si la programacion esta activa' })
   @IsOptional()
   activo?: boolean;
 }
@@ -673,6 +681,14 @@ export class UpdateProgramacionMensualDetalleDto {
   @IsOptional()
   @IsObject()
   payload_json?: Record<string, unknown>;
+  @ApiPropertyOptional({
+    description: 'Horometro actual del equipo para sincronizarlo con la OT vinculada',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_actual?: number;
 }
 
 export class ReprogramProgramacionMensualDetalleDto {
@@ -724,6 +740,15 @@ export class ReprogramProgramacionMensualDetalleDto {
   @IsOptional()
   @IsObject()
   payload_json?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description: 'Horometro actual del equipo al reprogramar la orden',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horometro_actual?: number;
 }
 
 export class UpdateProgramacionMensualConfigDto {
