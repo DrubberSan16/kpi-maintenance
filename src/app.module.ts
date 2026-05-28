@@ -28,6 +28,9 @@ import { KpiMaintenanceModule } from './modules/kpi-maintenance/kpi-maintenance.
           ssl: sslEnabled ? { rejectUnauthorized: false } : false,
           extra: {
             options: `-c timezone=${appTimeZone}`,
+            max: 5,
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 5000,
           },
         };
       },
