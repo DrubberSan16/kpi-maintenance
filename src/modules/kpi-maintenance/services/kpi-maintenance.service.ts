@@ -9917,6 +9917,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const dueSoon =
       (hoursRemaining != null && hoursRemaining > 0 && hoursRemaining <= Math.max(1, freqValue * 0.1)) ||
       (daysRemaining != null && daysRemaining > 0 && daysRemaining <= 3);
+    const linkedWorkOrderStatus = linkedWorkOrder
+      ? this.normalizeWorkflowStatus(linkedWorkOrder.status_workflow)
+      : null;
+    const linkedWorkOrderCompletedDate =
+      linkedWorkOrderStatus === 'CLOSED'
+        ? this.safeDateOnlyString(linkedWorkOrder?.closed_at ?? linkedWorkOrder?.updated_at)
+        : null;
+    const scheduledDate = this.safeDateOnlyString(nextDate);
+    const completedScheduleStatus =
+      linkedWorkOrderCompletedDate && scheduledDate
+        ? linkedWorkOrderCompletedDate <= scheduledDate
+          ? 'A_LA_FECHA_REALIZADA'
+          : 'VENCIDA_REALIZADA'
+        : linkedWorkOrderCompletedDate
+          ? 'REALIZADA'
+          : null;
     const currentPayload = (programacion.payload_json ?? {}) as Record<string, unknown>;
     const isReprogrammed =
       Boolean(currentPayload.reprogramado) ||
@@ -9929,7 +9945,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const reprogrammedWithFutureDate =
       isReprogrammed && daysRemaining != null && daysRemaining > 0;
     const displayStatus =
-      reprogrammedWithFutureDate
+      completedScheduleStatus ??
+      (reprogrammedWithFutureDate
         ? 'REPROGRAMADA'
         : scheduledForToday
           ? 'A_REALIZAR'
@@ -9939,7 +9956,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? 'REPROGRAMADA'
           : dueSoon
             ? 'PROXIMA'
-            : 'PROGRAMADA';
+            : 'PROGRAMADA');
 
     const enriched = {
       ...programacion,
@@ -9957,9 +9974,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       work_order_id: linkedWorkOrder?.id ?? programacion.work_order_id ?? null,
       work_order_code: linkedWorkOrder?.code ?? null,
       work_order_title: linkedWorkOrder?.title ?? null,
-      work_order_status: linkedWorkOrder
-        ? this.normalizeWorkflowStatus(linkedWorkOrder.status_workflow)
-        : null,
+      work_order_status: linkedWorkOrderStatus,
+      work_order_completed_at: linkedWorkOrderCompletedDate,
       procedimiento_id: procedimiento?.id ?? null,
       procedimiento_codigo: procedimiento?.codigo ?? null,
       procedimiento_nombre: procedimiento?.nombre ?? null,
@@ -13919,6 +13935,62 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private async enrichMonthlyDetailsWithProgramacionState<
+    T extends {
+      programacion_id?: string | null;
+      payload_json?: Record<string, unknown>;
+    },
+  >(details: T[]) {
+    const programacionIds = [
+      ...new Set(
+        details
+          .map((item) => this.firstNonEmptyString(item.programacion_id))
+          .filter(Boolean) as string[],
+      ),
+    ];
+    if (!programacionIds.length) return details;
+
+    const programaciones = await this.programacionRepo.find({
+      where: { id: In(programacionIds), is_deleted: false },
+    });
+    const enrichedProgramaciones = await Promise.all(
+      programaciones.map((item) =>
+        this.recalculateProgramacionFields(item, { persist: false }),
+      ),
+    );
+    const programacionById = new Map(
+      enrichedProgramaciones.map((item: any) => [String(item.id), item]),
+    );
+
+    return details.map((detail) => {
+      const programacion = programacionById.get(String(detail.programacion_id || ''));
+      if (!programacion) return detail;
+      const payload = (detail.payload_json ?? {}) as Record<string, unknown>;
+      return {
+        ...detail,
+        estado_programacion: programacion.estado_programacion ?? null,
+        work_order_id: programacion.work_order_id ?? payload.work_order_id ?? null,
+        work_order_code:
+          programacion.work_order_code ?? payload.work_order_code ?? null,
+        work_order_title:
+          programacion.work_order_title ?? payload.work_order_title ?? null,
+        work_order_status: programacion.work_order_status ?? null,
+        work_order_completed_at: programacion.work_order_completed_at ?? null,
+        payload_json: {
+          ...payload,
+          estado_programacion: programacion.estado_programacion ?? null,
+          work_order_id: programacion.work_order_id ?? payload.work_order_id ?? null,
+          work_order_code:
+            programacion.work_order_code ?? payload.work_order_code ?? null,
+          work_order_title:
+            programacion.work_order_title ?? payload.work_order_title ?? null,
+          work_order_status: programacion.work_order_status ?? null,
+          work_order_completed_at: programacion.work_order_completed_at ?? null,
+        },
+      };
+    });
+  }
+
   private async buildProgramacionMensualPayload(
     row: ProgramacionMensualEntity,
     query?: ProgramacionMensualQueryDto,
@@ -13927,13 +13999,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       where: { programacion_mensual_id: row.id, is_deleted: false },
       order: { fecha_programada: 'ASC', orden: 'ASC', created_at: 'ASC' },
     });
+    const enrichedDetails =
+      await this.enrichMonthlyDetailsWithProgramacionState(details);
     const { start, end } = this.resolveProgramacionMensualRange(row, details, query);
     const weeklyAggregates = await this.buildProgramacionMensualWeeklyAggregates(
       row.id,
       start,
       end,
     );
-    const combinedDetails = [...details, ...weeklyAggregates];
+    const combinedDetails = [...enrichedDetails, ...weeklyAggregates];
     const periodsMap = new Map<
       string,
       { period: string; total: number; sincronizados: number; label: string }
@@ -13959,10 +14033,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const filteredDetails = query?.periodo
-      ? details.filter((item) =>
+      ? enrichedDetails.filter((item) =>
           String(item.fecha_programada || '').startsWith(query.periodo || ''),
         )
-      : details;
+      : enrichedDetails;
     const filteredCombinedDetails = query?.periodo
       ? combinedDetails.filter((item) =>
           String(item.fecha_programada || '').startsWith(query.periodo || ''),
