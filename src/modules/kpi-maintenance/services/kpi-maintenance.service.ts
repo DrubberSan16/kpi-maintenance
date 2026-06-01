@@ -1488,6 +1488,47 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
       ADD COLUMN IF NOT EXISTS es_usado boolean NOT NULL DEFAULT false
     `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_nuevo numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_usado numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_stock_bodega
+      SET stock_nuevo = COALESCE(stock_actual, 0)
+      WHERE COALESCE(stock_nuevo, 0) = 0
+        AND COALESCE(stock_usado, 0) = 0
+        AND COALESCE(stock_actual, 0) <> 0
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_stock_bodega
+      SET stock_usado = 0
+      WHERE COALESCE(es_usado, false) = false
+        AND COALESCE(stock_usado, 0) <> 0
+    `);
+    await this.dataSource.query(`
+      UPDATE kpi_inventory.tb_stock_bodega
+      SET stock_actual = COALESCE(stock_nuevo, 0) + COALESCE(stock_usado, 0)
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_entrega_material_det
+      ADD COLUMN IF NOT EXISTS condicion_material varchar(12) NOT NULL DEFAULT 'NUEVO'
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_movimiento_inventario_det
+      ADD COLUMN IF NOT EXISTS condicion_material varchar(12) NOT NULL DEFAULT 'NUEVO'
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_kardex
+      ADD COLUMN IF NOT EXISTS condicion_material varchar(12) NOT NULL DEFAULT 'NUEVO'
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_reserva_stock
+      ADD COLUMN IF NOT EXISTS condicion_material varchar(12) NOT NULL DEFAULT 'NUEVO'
+    `);
   }
 
   private async ensurePlanMaintenanceSchema() {
@@ -2428,6 +2469,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       bodega_codigo: bodega?.codigo ?? null,
       bodega_nombre: bodega?.nombre ?? null,
       bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id,
+      condicion_material: this.normalizeMaterialCondition(
+        row.condicion_material,
+      ),
     };
   }
 
@@ -3697,9 +3741,107 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private normalizeMaterialCondition(value: unknown, fallback: 'NUEVO' | 'USADO' = 'NUEVO') {
+    const raw = String(value ?? '')
+      .trim()
+      .toUpperCase();
+    if (!raw) return fallback;
+    if (['USADO', 'USADA', 'USED'].includes(raw)) return 'USADO';
+    if (['NUEVO', 'NUEVA', 'NEW'].includes(raw)) return 'NUEVO';
+    throw new BadRequestException(
+      'La condicion del material debe ser NUEVO o USADO.',
+    );
+  }
+
+  private resolveIssueMaterialCondition(
+    stock: StockBodegaEntity,
+    requestedCondition: unknown,
+  ) {
+    if (!Boolean(stock.es_usado)) return 'NUEVO';
+    const raw = String(requestedCondition ?? '').trim();
+    if (!raw) {
+      throw new BadRequestException(
+        'Debes indicar si la salida del material es NUEVO o USADO.',
+      );
+    }
+    return this.normalizeMaterialCondition(raw);
+  }
+
+  private getStockNuevoAmount(stock: StockBodegaEntity) {
+    const actual = this.toNumeric(stock.stock_actual, 0);
+    const usado = this.toNumeric(stock.stock_usado, 0);
+    const nuevo = this.toNumeric(stock.stock_nuevo, actual - usado);
+    if (nuevo > 0 || usado > 0 || actual === 0) return Math.max(nuevo, 0);
+    return Math.max(actual, 0);
+  }
+
+  private getStockUsadoAmount(stock: StockBodegaEntity) {
+    return Math.max(this.toNumeric(stock.stock_usado, 0), 0);
+  }
+
+  private setStockBreakdown(
+    stock: StockBodegaEntity,
+    stockNuevo: number,
+    stockUsado: number,
+  ) {
+    const normalizedNuevo = Math.max(this.toNumeric(stockNuevo, 0), 0);
+    const normalizedUsado = Math.max(this.toNumeric(stockUsado, 0), 0);
+    const total = normalizedNuevo + normalizedUsado;
+    stock.stock_nuevo = normalizedNuevo;
+    stock.stock_usado = normalizedUsado;
+    stock.stock_actual = total;
+    return total;
+  }
+
+  private applyIssuedStockByCondition(
+    stock: StockBodegaEntity,
+    quantity: number,
+    condition: 'NUEVO' | 'USADO',
+    productLabel: string,
+  ) {
+    const normalizedQuantity = this.toNumeric(quantity, 0);
+    const currentNuevo = this.getStockNuevoAmount(stock);
+    const currentUsado = this.getStockUsadoAmount(stock);
+
+    if (condition === 'USADO') {
+      if (!Boolean(stock.es_usado)) {
+        throw new BadRequestException(
+          `El material ${productLabel} no esta configurado para manejar stock usado.`,
+        );
+      }
+      if (currentUsado < normalizedQuantity) {
+        throw new ConflictException(
+          `Stock usado insuficiente para ${productLabel}. Disponible ${currentUsado.toFixed(
+            2,
+          )}, requerido ${normalizedQuantity.toFixed(2)}.`,
+        );
+      }
+      return this.setStockBreakdown(
+        stock,
+        currentNuevo,
+        currentUsado - normalizedQuantity,
+      );
+    }
+
+    if (currentNuevo < normalizedQuantity) {
+      throw new ConflictException(
+        `Stock nuevo insuficiente para ${productLabel}. Disponible ${currentNuevo.toFixed(
+          2,
+        )}, requerido ${normalizedQuantity.toFixed(2)}.`,
+      );
+    }
+
+    return this.setStockBreakdown(
+      stock,
+      currentNuevo - normalizedQuantity,
+      currentUsado,
+    );
+  }
+
   private async releaseOpenReservationsForWorkOrder(
     workOrderId: string,
     manager?: EntityManager,
+    changedBy?: string | null,
   ) {
     const reservaRepo =
       manager?.getRepository(ReservaStockEntity) ?? this.reservaRepo;
@@ -3712,11 +3854,70 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (!reservas.length) return 0;
 
+    const normalizedChangedBy =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        String(changedBy || '').trim(),
+      )
+        ? String(changedBy || '').trim()
+        : null;
+    const productIds = [...new Set(reservas.map((row) => row.producto_id))];
+    const warehouseIds = [...new Set(reservas.map((row) => row.bodega_id))];
+    const productRepo =
+      manager?.getRepository(ProductoEntity) ?? this.productoRepo;
+    const warehouseRepo =
+      manager?.getRepository(BodegaEntity) ?? this.bodegaRepo;
+    const historyRepo =
+      manager?.getRepository(WorkOrderStatusHistoryEntity) ?? this.woHistoryRepo;
+    const [productos, bodegas] = await Promise.all([
+      productIds.length
+        ? productRepo.find({ where: { id: In(productIds) } as any })
+        : Promise.resolve([] as ProductoEntity[]),
+      warehouseIds.length
+        ? warehouseRepo.find({ where: { id: In(warehouseIds) } as any })
+        : Promise.resolve([] as BodegaEntity[]),
+    ]);
+    const productMap = new Map(productos.map((row) => [row.id, row]));
+    const warehouseMap = new Map(bodegas.map((row) => [row.id, row]));
+    const historyRows: WorkOrderStatusHistoryEntity[] = [];
+
     for (const reserva of reservas) {
+      const releasedQuantity = this.toNumeric(reserva.cantidad, 0);
+      const producto = productMap.get(reserva.producto_id);
+      const bodega = warehouseMap.get(reserva.bodega_id);
+      const productLabel =
+        this.buildProductoLabel(producto) ?? reserva.producto_id;
+      const warehouseLabel =
+        this.buildBodegaLabel(bodega) ?? reserva.bodega_id;
+      const totals = await this.calculatePlannedAndIssuedMaterialTotals(
+        workOrderId,
+        reserva.producto_id,
+        reserva.bodega_id,
+        manager,
+      );
+      const requestedQuantity =
+        totals.plannedQty > 0 ? totals.plannedQty : releasedQuantity;
       reserva.cantidad = 0;
       reserva.estado = 'LIBERADO';
+      historyRows.push(
+        historyRepo.create({
+          work_order_id: workOrderId,
+          from_status: 'CLOSED',
+          to_status: 'CLOSED',
+          changed_by: normalizedChangedBy,
+          note: `Reserva liberada al finalizar OT: se solicito ${requestedQuantity.toFixed(
+            2,
+          )} de ${productLabel} en ${warehouseLabel}, se uso ${totals.issuedQty.toFixed(
+            2,
+          )}, no se uso ${releasedQuantity.toFixed(
+            2,
+          )} y esa reserva quedo liberada.`,
+        }),
+      );
     }
     await reservaRepo.save(reservas);
+    if (historyRows.length) {
+      await historyRepo.save(historyRows);
+    }
     return reservas.length;
   }
 
@@ -19069,13 +19270,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         throw new ConflictException('Reserva insuficiente');
       }
 
-      const stock = await manager.findOne(StockBodegaEntity, {
-        where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
-      });
-      if (!stock || Number(stock.stock_actual) < item.cantidad) {
-        throw new ConflictException('Stock insuficiente');
-      }
-
       const producto = await manager.findOne(ProductoEntity, {
         where: { id: item.producto_id },
       });
@@ -19083,13 +19277,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         throw new NotFoundException('Producto no encontrado');
       }
       this.assertOilProductAllowedForWorkOrder(workOrder, producto);
+      const productLabel = this.buildProductoLabel(producto) ?? producto.id;
+
+      const stock = await manager.findOne(StockBodegaEntity, {
+        where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
+      });
+      if (!stock || Number(stock.stock_actual) < item.cantidad) {
+        throw new ConflictException('Stock insuficiente');
+      }
+      const condition = this.resolveIssueMaterialCondition(
+        stock,
+        item.condicion_material,
+      );
 
       const costo = Number(producto.ultimo_costo);
       const subtotal = item.cantidad * costo;
       total += subtotal;
 
       const sourceStockActual = this.toNumeric(stock.stock_actual, 0);
-      stock.stock_actual = sourceStockActual - item.cantidad;
+      const stockActualNuevo = this.applyIssuedStockByCondition(
+        stock,
+        item.cantidad,
+        condition,
+        productLabel,
+      );
       stock.stock_fisico =
         this.toNumeric(stock.stock_fisico, sourceStockActual) - item.cantidad;
       await manager.save(stock);
@@ -19107,6 +19318,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           bodega_id: item.bodega_id,
           cantidad: item.cantidad,
           costo_unitario: costo,
+          condicion_material: condition,
         }),
       );
 
@@ -19117,6 +19329,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           cantidad: item.cantidad,
           costo_unitario: costo,
           subtotal_costo: subtotal,
+          condicion_material: condition,
         }),
       );
 
@@ -19132,9 +19345,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           salida_cantidad: item.cantidad,
           costo_unitario: costo,
           costo_total: subtotal,
-          saldo_cantidad: stock.stock_actual,
+          saldo_cantidad: stockActualNuevo,
+          condicion_material: condition,
           saldo_costo_promedio: costo,
-          saldo_valorizado: Number(stock.stock_actual) * costo,
+          saldo_valorizado: stockActualNuevo * costo,
           observacion: movementObservation,
           created_by: movementUser,
           updated_by: movementUser,
@@ -19969,6 +20183,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           await this.releaseOpenReservationsForWorkOrder(
             headerResult.workOrder.id,
             manager,
+            this.resolveActorHistoryUserId(actor),
           );
         }
 
@@ -20643,7 +20858,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     if (this.normalizeWorkflowStatus(saved.status_workflow) === 'CLOSED') {
-      await this.releaseOpenReservationsForWorkOrder(saved.id);
+      await this.releaseOpenReservationsForWorkOrder(
+        saved.id,
+        undefined,
+        this.resolveActorHistoryUserId(actor),
+      );
       await this.releaseBlockedWorkOrdersFor(saved);
       await this.syncProgramacionExecutionFromLinkedWorkOrder(saved);
     }
@@ -20739,7 +20958,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       action: 'ANULADA',
     });
     await this.woRepo.save(wo);
-    await this.releaseOpenReservationsForWorkOrder(wo.id);
+    await this.releaseOpenReservationsForWorkOrder(
+      wo.id,
+      undefined,
+      this.resolveActorHistoryUserId(actor),
+    );
     await this.detachProgramacionesFromWorkOrder(wo.id);
     await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
     await this.writeSecurityLog({
@@ -21309,6 +21532,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       scopedRows.map((row) => row.producto_id),
       scopedRows.map((row) => row.bodega_id || '').filter(Boolean),
     );
+    const stockWhere = scopedRows
+      .map((row) => ({
+        producto_id: row.producto_id,
+        bodega_id: String(row.bodega_id || '').trim(),
+        is_deleted: false,
+      }))
+      .filter((row) => row.producto_id && row.bodega_id);
+    const stockRows = stockWhere.length
+      ? await this.stockRepo.find({ where: stockWhere as any })
+      : [];
+    const stockMap = new Map(
+      stockRows.map((row) => [
+        `${row.producto_id}|${row.bodega_id}`,
+        row,
+      ]),
+    );
     const groupedTotals = new Map<
       string,
       { plannedQty: number; issuedQty: number; pendingQty: number }
@@ -21332,11 +21571,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       scopedRows.map((row) => {
         const key = `${row.producto_id}|${row.bodega_id || ''}`;
         const totals = groupedTotals.get(key);
+        const stock = stockMap.get(key);
         return {
           ...this.mapConsumoWithCatalogs(row, productMap, warehouseMap),
           cantidad_reservada: totals?.plannedQty ?? this.toNumeric(row.cantidad, 0),
           cantidad_emitida: totals?.issuedQty ?? 0,
           cantidad_pendiente: totals?.pendingQty ?? this.toNumeric(row.cantidad, 0),
+          maneja_stock_usado: Boolean(stock?.es_usado),
+          stock_actual: this.toNumeric(stock?.stock_actual, 0),
+          stock_nuevo: this.getStockNuevoAmount(stock ?? ({} as StockBodegaEntity)),
+          stock_usado: this.getStockUsadoAmount(stock ?? ({} as StockBodegaEntity)),
         };
       }),
       'Consumos listados',
@@ -21513,7 +21757,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const { producto, bodega } = await this.validateProductoEnBodega(dto.producto_id, dto.bodega_id);
     this.assertOilProductAllowedForWorkOrder(workOrder, producto);
-    await this.assertReservableStockAvailable(
+    const reservableStock = await this.assertReservableStockAvailable(
       dto.producto_id,
       dto.bodega_id,
       dto.cantidad,
@@ -21554,6 +21798,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         cantidad_reservada: dto.cantidad,
         cantidad_emitida: 0,
         cantidad_pendiente: dto.cantidad,
+        maneja_stock_usado: Boolean(reservableStock.stock?.es_usado),
+        stock_actual: this.toNumeric(reservableStock.stock?.stock_actual, 0),
+        stock_nuevo: this.getStockNuevoAmount(reservableStock.stock),
+        stock_usado: this.getStockUsadoAmount(reservableStock.stock),
       },
       'Consumo registrado',
     );
@@ -21708,21 +21956,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }
         if (!reserva || this.toNumeric(reserva.cantidad, 0) < item.cantidad)
           throw new ConflictException('Reserva insuficiente');
-        const stock = await qr.manager.findOne(StockBodegaEntity, {
-          where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
-        });
-        if (!stock || Number(stock.stock_actual) < item.cantidad)
-          throw new ConflictException('Stock insuficiente');
         const producto = await qr.manager.findOne(ProductoEntity, {
           where: { id: item.producto_id },
         });
         if (!producto) throw new NotFoundException('Producto no encontrado');
         this.assertOilProductAllowedForWorkOrder(workOrder, producto);
+        const productLabel = this.buildProductoLabel(producto) ?? producto.id;
+        const stock = await qr.manager.findOne(StockBodegaEntity, {
+          where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
+        });
+        if (!stock || Number(stock.stock_actual) < item.cantidad)
+          throw new ConflictException('Stock insuficiente');
+        const condition = this.resolveIssueMaterialCondition(
+          stock,
+          item.condicion_material,
+        );
         const costo = Number(producto.ultimo_costo);
         const subtotal = item.cantidad * costo;
         total += subtotal;
         const sourceStockActual = this.toNumeric(stock.stock_actual, 0);
-        stock.stock_actual = sourceStockActual - item.cantidad;
+        const stockActualNuevo = this.applyIssuedStockByCondition(
+          stock,
+          item.cantidad,
+          condition,
+          productLabel,
+        );
         stock.stock_fisico =
           this.toNumeric(stock.stock_fisico, sourceStockActual) - item.cantidad;
         await qr.manager.save(stock);
@@ -21738,6 +21996,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             bodega_id: item.bodega_id,
             cantidad: item.cantidad,
             costo_unitario: costo,
+            condicion_material: condition,
           }),
         );
         const movDet = await qr.manager.save(
@@ -21748,6 +22007,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             cantidad: item.cantidad,
             costo_unitario: costo,
             subtotal_costo: subtotal,
+            condicion_material: condition,
           }),
         );
         await qr.manager.save(
@@ -21763,9 +22023,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             salida_cantidad: item.cantidad,
             costo_unitario: costo,
             costo_total: subtotal,
-            saldo_cantidad: stock.stock_actual,
+            saldo_cantidad: stockActualNuevo,
+            condicion_material: condition,
             saldo_costo_promedio: costo,
-            saldo_valorizado: Number(stock.stock_actual) * costo,
+            saldo_valorizado: stockActualNuevo * costo,
             observacion: movementObservation,
             created_by: movementUser,
             updated_by: movementUser,

@@ -1241,6 +1241,15 @@ export class IssueMaterialItemDto {
   @IsNumber()
   @Min(0.0001)
   cantidad: number;
+
+  @ApiPropertyOptional({
+    description: 'Condicion del material a descontar: NUEVO o USADO',
+    enum: ['NUEVO', 'USADO'],
+    default: 'NUEVO',
+  })
+  @IsOptional()
+  @IsString()
+  condicion_material?: string;
 }
 
 export class IssueMaterialsDto {

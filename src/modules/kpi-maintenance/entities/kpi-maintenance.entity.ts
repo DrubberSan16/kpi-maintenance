@@ -773,6 +773,10 @@ export class StockBodegaEntity {
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_actual: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_nuevo: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_usado: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_fisico: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_min_bodega: number;
@@ -805,6 +809,8 @@ export class ReservaStockEntity {
   @Column({ type: 'uuid' }) producto_id: string;
   @Column({ type: 'uuid' }) bodega_id: string;
   @Column('numeric', { precision: 18, scale: 4 }) cantidad: number;
+  @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
+  condicion_material: string;
   @Column({ default: 'RESERVADO' }) estado: string;
   @Column({ default: false }) is_deleted: boolean;
 }
@@ -829,6 +835,8 @@ export class EntregaMaterialDetEntity {
   @Column('numeric', { precision: 18, scale: 4 }) cantidad: number;
   @Column('numeric', { precision: 18, scale: 4, default: 0 })
   costo_unitario: number;
+  @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
+  condicion_material: string;
 }
 
 @Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_desecho' })
@@ -993,6 +1001,8 @@ export class MovimientoInventarioDetEntity {
   @Column({ type: 'uuid', nullable: true }) unidad_medida_id?: string | null;
   @Column('numeric', { precision: 14, scale: 4 }) costo_unitario: number;
   @Column('numeric', { precision: 18, scale: 4 }) subtotal_costo: number;
+  @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
+  condicion_material: string;
   @Column({ type: 'varchar', length: 80, nullable: true }) lote?: string | null;
   @Column({ type: 'varchar', length: 120, nullable: true }) serie?: string | null;
   @Column({ type: 'date', nullable: true }) fecha_vencimiento?: string | null;
@@ -1030,6 +1040,8 @@ export class KardexEntity {
   costo_total: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   saldo_cantidad: number;
+  @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
+  condicion_material: string;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   saldo_costo_promedio: number;
   @Column('numeric', { precision: 18, scale: 4, default: 0 })
