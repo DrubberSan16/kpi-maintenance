@@ -234,6 +234,9 @@ type LubricantMetricThreshold = {
   warning?: LubricantThresholdRule | null;
   alert?: LubricantThresholdRule | null;
   baseline?: number | null;
+  linea_base_label?: string | null;
+  inherited?: boolean;
+  inherited_from?: string | null;
 };
 
 type AlertCandidate = {
@@ -6550,6 +6553,51 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private formatLubricantThresholdNumber(value: number) {
+    return Number(value.toFixed(4)).toString();
+  }
+
+  private formatLubricantThresholdRuleLabel(
+    rule?: LubricantThresholdRule | null,
+  ) {
+    if (!rule) return null;
+    const raw = String(rule.raw ?? '').replace(/\s+/g, ' ').trim();
+    if (raw) return raw;
+    if (rule.text) return rule.text;
+    if (rule.expression === 'BASELINE_PERCENT_MINUS_OFFSET') {
+      const percent =
+        rule.value != null && Number.isFinite(rule.value)
+          ? this.formatLubricantThresholdNumber(rule.value * 100)
+          : '50';
+      const offset =
+        rule.offset != null && Number.isFinite(rule.offset)
+          ? this.formatLubricantThresholdNumber(rule.offset)
+          : '1';
+      return `[${percent}% TBN -${offset}]`;
+    }
+    if (rule.value != null && Number.isFinite(rule.value)) {
+      return `${rule.operator ?? '>='} ${this.formatLubricantThresholdNumber(
+        rule.value,
+      )}`;
+    }
+    return null;
+  }
+
+  private resolveLubricantThresholdLineBaseLabel(
+    threshold?: LubricantMetricThreshold | null,
+  ) {
+    if (!threshold) return null;
+    const explicit = String(threshold.linea_base_label ?? '').trim();
+    if (explicit) return explicit;
+    return (
+      this.formatLubricantThresholdRuleLabel(threshold.warning) ??
+      this.formatLubricantThresholdRuleLabel(threshold.alert) ??
+      (threshold.baseline != null && Number.isFinite(threshold.baseline)
+        ? this.formatLubricantThresholdNumber(threshold.baseline)
+        : null)
+    );
+  }
+
   private normalizeStoredLubricantThresholdRule(
     value: unknown,
   ): LubricantThresholdRule | null {
@@ -6613,21 +6661,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const alert = this.normalizeStoredLubricantThresholdRule(
       source.alert ?? source.anormal ?? source.rango_anormal,
     );
+    const lineaBaseLabel =
+      String(source.linea_base_label ?? source.baseline_label ?? '').trim() ||
+      null;
+    const inherited = this.coerceBoolean(source.inherited, false);
+    const inheritedFrom =
+      String(source.inherited_from ?? '').trim() || null;
 
     if (
       baseline == null &&
       !warning &&
-      !alert
+      !alert &&
+      !lineaBaseLabel
     ) {
       return null;
     }
 
-    return {
+    const threshold = {
       baseline:
         baseline != null && Number.isFinite(baseline) ? baseline : null,
       warning,
       alert,
+      linea_base_label: lineaBaseLabel,
+      inherited,
+      inherited_from: inheritedFrom,
     };
+    threshold.linea_base_label =
+      threshold.linea_base_label ??
+      this.resolveLubricantThresholdLineBaseLabel(threshold);
+    return threshold;
   }
 
   private normalizeLubricantThresholdMap(value: unknown) {
@@ -6652,7 +6714,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       map.set(key, threshold);
     }
 
-    return map;
+    return this.applyLubricantThresholdFallbacks(map);
   }
 
   private serializeLubricantThresholdMap(
@@ -6664,9 +6726,65 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         baseline: threshold.baseline ?? null,
         warning: threshold.warning ?? null,
         alert: threshold.alert ?? null,
+        linea_base_label:
+          this.resolveLubricantThresholdLineBaseLabel(threshold),
+        inherited: threshold.inherited ?? false,
+        inherited_from: threshold.inherited_from ?? null,
       };
     }
     return output;
+  }
+
+  private getLubricantRangeGroupKey(row: number) {
+    const groupStarts = [20, 30, 37, 44, 53, 61];
+    return String(
+      [...groupStarts].reverse().find((start) => row > start + 1) ?? row,
+    );
+  }
+
+  private applyLubricantThresholdFallbacks(
+    map: Map<string, LubricantMetricThreshold>,
+  ) {
+    const fallbackByGroup = new Map<
+      string,
+      { key: string; threshold: LubricantMetricThreshold }
+    >();
+
+    for (const item of LUBRICANT_IMPORT_PARAMETER_ROWS) {
+      const definition = this.getLubricantMetricDefinition(item.label);
+      const key = definition?.key || this.normalizeSearchToken(item.label);
+      if (!key) continue;
+      const threshold = map.get(key);
+      if (!threshold) continue;
+      const groupKey = this.getLubricantRangeGroupKey(item.row);
+      if (!fallbackByGroup.has(groupKey)) {
+        fallbackByGroup.set(groupKey, {
+          key,
+          threshold: {
+            ...threshold,
+            linea_base_label:
+              this.resolveLubricantThresholdLineBaseLabel(threshold),
+          },
+        });
+      }
+    }
+
+    for (const item of LUBRICANT_IMPORT_PARAMETER_ROWS) {
+      const definition = this.getLubricantMetricDefinition(item.label);
+      const key = definition?.key || this.normalizeSearchToken(item.label);
+      if (!key || map.has(key)) continue;
+      const fallback = fallbackByGroup.get(this.getLubricantRangeGroupKey(item.row));
+      if (!fallback) continue;
+      map.set(key, {
+        ...fallback.threshold,
+        inherited: true,
+        inherited_from: fallback.key,
+        linea_base_label:
+          this.resolveLubricantThresholdLineBaseLabel(fallback.threshold),
+      });
+    }
+
+    return map;
   }
 
   private compareLubricantThresholdValue(
@@ -7288,6 +7406,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : Number(detalle.resultado_numerico);
       const trend =
         detalle.tendencia == null ? null : Number(detalle.tendencia);
+      const thresholdLabel =
+        this.resolveLubricantThresholdLineBaseLabel(threshold);
       const deltaPercent =
         baseline != null &&
         Number.isFinite(baseline) &&
@@ -7309,6 +7429,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         rango_precaucion: threshold?.warning ?? null,
         rango_anormal: threshold?.alert ?? null,
         rangos_generales: threshold,
+        linea_base_label: thresholdLabel,
+        linea_base_display:
+          thresholdLabel ??
+          (baseline != null && Number.isFinite(baseline) ? baseline : null),
         linea_base_resuelta:
           baseline != null && Number.isFinite(baseline) ? baseline : null,
         delta_valor:
@@ -7383,7 +7507,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       lubricante_codigo: identity.lubricante_codigo,
       lubricante_label: identity.lubricante_label || identity.lubricante,
       sample_info: sampleInfo,
-      rangos_generales: payload.rangos_generales ?? {},
+      rangos_generales: this.serializeLubricantThresholdMap(thresholdMap),
       estado_diagnostico: resolvedCondition,
       evaluacion_ultima_muestra: this.buildLubricantEvaluationLabel(
         resolvedCondition,
@@ -7490,6 +7614,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return String(value ?? '').trim();
   }
 
+  private getWorkbookCellDisplayText(
+    sheet: XLSX.WorkSheet | undefined,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    if (!sheet) return '';
+    const cell = sheet[
+      XLSX.utils.encode_cell({ r: rowNumber - 1, c: columnNumber - 1 })
+    ];
+    const value = cell?.w ?? cell?.v ?? null;
+    return String(
+      typeof value === 'string' ? this.repairPotentialMojibake(value) : value ?? '',
+    ).trim();
+  }
+
   private getWorkbookCellNumber(
     sheet: XLSX.WorkSheet | undefined,
     rowNumber: number,
@@ -7576,12 +7715,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!key) continue;
 
       const warning = this.parseLubricantThresholdRule(
-        this.getWorkbookCellValue(sheet, targetRow, block.warningColumn),
-        this.getWorkbookCellValue(sheet, targetRow, block.warningColumn + 1),
+        this.getWorkbookCellDisplayText(sheet, targetRow, block.warningColumn),
+        this.getWorkbookCellDisplayText(sheet, targetRow, block.warningColumn + 1),
       );
       const alert = this.parseLubricantThresholdRule(
-        this.getWorkbookCellValue(sheet, targetRow, block.alertColumn),
-        this.getWorkbookCellValue(sheet, targetRow, block.alertColumn + 1),
+        this.getWorkbookCellDisplayText(sheet, targetRow, block.alertColumn),
+        this.getWorkbookCellDisplayText(sheet, targetRow, block.alertColumn + 1),
       );
       const baselineColumns = [
         block.alertColumn + 2,
@@ -7594,15 +7733,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           .find((value) => value != null && Number.isFinite(Number(value))) ??
         null;
 
-      if (!warning && !alert && baseline == null) continue;
-      thresholds.set(key, {
+      const threshold: LubricantMetricThreshold = {
         warning,
         alert,
         baseline,
-      });
+        linea_base_label: null,
+      };
+      threshold.linea_base_label =
+        this.resolveLubricantThresholdLineBaseLabel(threshold);
+
+      if (!warning && !alert && baseline == null && !threshold.linea_base_label) {
+        continue;
+      }
+      thresholds.set(key, threshold);
     }
 
-    return thresholds;
+    return this.applyLubricantThresholdFallbacks(thresholds);
   }
 
   private normalizeImportedCompartment(value: unknown) {
@@ -13044,6 +13190,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           compartimento: detail.compartimento ?? analysis.compartimento_principal,
           valor: Number(currentValue.toFixed(4)),
           linea_base: detail.linea_base_resuelta ?? detail.linea_base ?? null,
+          linea_base_label: detail.linea_base_label ?? null,
+          linea_base_display:
+            detail.linea_base_display ??
+            detail.linea_base_label ??
+            detail.linea_base_resuelta ??
+            detail.linea_base ??
+            null,
           tendencia: detail.delta_valor ?? detail.tendencia ?? null,
           rango_precaucion: detail.rango_precaucion ?? null,
           rango_anormal: detail.rango_anormal ?? null,
