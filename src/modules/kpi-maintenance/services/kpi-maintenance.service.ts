@@ -2180,6 +2180,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return raw;
   }
 
+  private buildWorkOrderMaintenanceKindLabel(value: unknown) {
+    const normalized = this.normalizeMaintenanceKind(value);
+    if (normalized === 'CORRECTIVO') return 'Correctivo';
+    if (normalized === 'PREVENTIVO') return 'Preventivo';
+    if (normalized === 'PREDICTIVO') return 'Predictivo';
+    if (normalized === 'CEBADO') return 'Cebado';
+    return normalized || 'Sin definir';
+  }
+
   private resolveWorkOrderMaintenanceKind(...values: Array<unknown>) {
     const resolved =
       values
@@ -17882,6 +17891,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     query: AnalisisAceiteKpiQueryDto,
     sucursalId?: string | null,
   ) {
+    const onlyCebado = query?.solo_cebado === true;
     const [scope, oilCatalog] = await Promise.all([
       this.buildSucursalScopeContext(sucursalId),
       this.buildOilProductCatalog(),
@@ -17902,7 +17912,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!selectedProductId) {
       return this.wrap(
         {
-          filters: range,
+          filters: { ...range, solo_cebado: onlyCebado },
           catalog: oilCatalog,
           selected_product_id: null,
           selected_product: null,
@@ -17923,7 +17933,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           work_orders: [],
           by_equipment: [],
         },
-        'KPI de análisis de aceite generado',
+        'Reporte consumo de aceite generado',
       );
     }
 
@@ -17951,13 +17961,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       rawWorkOrders,
       scope,
     );
+    const filteredWorkOrders = onlyCebado
+      ? visibleWorkOrders.filter(
+          (row) =>
+            this.normalizeMaintenanceKind(row.maintenance_kind) === 'CEBADO',
+        )
+      : visibleWorkOrders;
     const workOrderMap = new Map(
-      visibleWorkOrders.map((row) => [row.id, row]),
+      filteredWorkOrders.map((row) => [row.id, row]),
     );
 
     const equipmentIds = [
       ...new Set(
-        visibleWorkOrders
+        filteredWorkOrders
           .map((row) => String(row.equipment_id || '').trim())
           .filter(Boolean),
       ),
@@ -18046,6 +18062,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           work_order_id: row.work_order_id,
           work_order_code: row.workOrder.code,
           work_order_title: row.workOrder.title,
+          maintenance_kind:
+            this.normalizeMaintenanceKind(row.workOrder.maintenance_kind) ||
+            row.workOrder.maintenance_kind ||
+            null,
+          maintenance_kind_label: this.buildWorkOrderMaintenanceKindLabel(
+            row.workOrder.maintenance_kind,
+          ),
           work_order_status: this.normalizeWorkflowStatus(
             row.workOrder.status_workflow,
           ),
@@ -18267,7 +18290,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return this.wrap(
       {
-        filters: range,
+        filters: { ...range, solo_cebado: onlyCebado },
         catalog: oilCatalog,
         selected_product_id: selectedProductId,
         selected_product: selectedProduct,
@@ -18290,7 +18313,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_orders: workOrderRows,
         by_equipment: byEquipment,
       },
-      'KPI de análisis de aceite generado',
+      'Reporte consumo de aceite generado',
     );
   }
 

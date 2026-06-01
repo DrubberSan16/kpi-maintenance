@@ -1017,7 +1017,7 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({
     summary:
-      'KPI de consumo de aceite por rango, orden de trabajo y equipo',
+      'Reporte de consumo de aceite por rango, orden de trabajo y equipo',
   })
   @Get('inteligencia/analisis-aceite/kpi')
   getAnalisisAceiteKpi(

@@ -1821,6 +1821,21 @@ export class AnalisisAceiteKpiQueryDto {
   @IsOptional()
   @IsDateString()
   to?: string;
+
+  @ApiPropertyOptional({
+    description: 'Filtrar solo ordenes de trabajo de tipo CEBADO',
+    type: Boolean,
+  })
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === true ||
+    String(value ?? '')
+      .trim()
+      .toLowerCase() === 'true' ||
+    String(value ?? '').trim() === '1',
+  )
+  @IsBoolean()
+  solo_cebado?: boolean;
 }
 
 export class CronogramaSemanalDetalleDto {
