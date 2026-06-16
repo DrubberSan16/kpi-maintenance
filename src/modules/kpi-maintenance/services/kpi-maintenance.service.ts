@@ -30,6 +30,7 @@ import {
   Brackets,
   DataSource,
   EntityManager,
+  EntityTarget,
   FindOptionsWhere,
   In,
   IsNull,
@@ -3679,7 +3680,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.normalizeWorkflowStatus(nextStatus) === 'BLOCKED' &&
       !this.firstNonEmptyString(blockedByWorkOrderId)
     ) {
-      throw new BadRequestException(
+      throw new ForbiddenException(
         'Para bloquear una OT debes seleccionar la OT anexada o bloqueante.',
       );
     }
@@ -3687,7 +3688,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private assertWorkOrderAllowsMaterialIssue(workOrder: WorkOrderEntity) {
     if (this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS') {
-      throw new BadRequestException(
+      throw new ForbiddenException(
         'Solo se puede registrar salida real de materiales cuando la orden de trabajo está en proceso.',
       );
     }
@@ -5947,6 +5948,260 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!rows.length) return;
     for (const row of rows) row.is_deleted = true;
     await repo.save(rows);
+  }
+
+  private isSuperAdministratorRoleName(roleName?: string): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+    ].includes(normalized);
+  }
+
+  private assertCanPurge(roleName?: string) {
+    if (this.isSuperAdministratorRoleName(roleName)) return;
+    throw new ForbiddenException(
+      'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+    );
+  }
+
+  private async hardDeleteRows<T extends ObjectLiteral>(
+    manager: EntityManager,
+    key: string,
+    entity: EntityTarget<T>,
+    where?: string,
+    params?: ObjectLiteral,
+  ) {
+    const qb = manager.createQueryBuilder().delete().from(entity);
+    if (where) {
+      qb.where(where, params ?? {});
+    }
+    const result = await qb.execute();
+    return {
+      key,
+      affected: Number(result.affected || 0),
+    };
+  }
+
+  async purgeModule(moduleKey: string, roleName?: string, contextId?: string) {
+    this.assertCanPurge(roleName);
+    const key = String(moduleKey || '').trim();
+    const ctx = String(contextId || '').trim();
+
+    const details = await this.dataSource.transaction(async (manager) => {
+      const totals: Record<string, number> = {};
+      const del = async <T extends ObjectLiteral>(
+        detailKey: string,
+        entity: EntityTarget<T>,
+        where?: string,
+        params?: ObjectLiteral,
+      ) => {
+        const result = await this.hardDeleteRows(
+          manager,
+          detailKey,
+          entity,
+          where,
+          params,
+        );
+        totals[result.key] = (totals[result.key] || 0) + result.affected;
+        return result.affected;
+      };
+
+      switch (key) {
+        case 'equipos':
+          await del('equipos', EquipoEntity);
+          break;
+        case 'tipo-equipo':
+          await del('tipos_equipo', EquipoTipoEntity);
+          break;
+        case 'locaciones':
+          await del('locaciones', LocationEntity);
+          break;
+        case 'componentes':
+          await del('componentes', EquipoComponenteEntity);
+          break;
+        case 'bitacora':
+          await del(
+            'bitacora',
+            BitacoraDiariaEntity,
+            ctx ? 'equipo_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'estados-equipo':
+          await del(
+            'estados_equipo',
+            EstadoEquipoEntity,
+            ctx ? 'equipo_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'eventos-equipo':
+          await del(
+            'eventos_equipo',
+            EventoEquipoEntity,
+            ctx ? 'equipo_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'planes':
+          await del('tareas_plan', PlanTareaEntity);
+          await del('planes', PlanMantenimientoEntity);
+          break;
+        case 'plan-tareas':
+          await del(
+            'tareas_plan',
+            PlanTareaEntity,
+            ctx ? 'plan_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'programaciones':
+          await del('programacion_mensual_detalle', ProgramacionMensualDetalleEntity);
+          await del('programacion_mensual', ProgramacionMensualEntity);
+          await del('cronograma_semanal_detalle', CronogramaSemanalDetalleEntity);
+          await del('cronograma_semanal', CronogramaSemanalEntity);
+          await del('programaciones', ProgramacionPlanEntity);
+          break;
+        case 'programaciones-mensuales':
+          await del('programacion_mensual_detalle', ProgramacionMensualDetalleEntity);
+          await del('programacion_mensual', ProgramacionMensualEntity);
+          break;
+        case 'alertas':
+          await del('alertas', AlertaMantenimientoEntity);
+          break;
+        case 'fallas':
+          await del('fallas', FallaCatalogoEntity);
+          break;
+        case 'lecturas':
+          await del('lecturas', LecturaEquipoEntity);
+          break;
+        case 'lubricaciones':
+          await del('lubricaciones', LubricacionPuntoEntity);
+          break;
+        case 'inteligencia-procedimientos':
+          await del('actividades_procedimiento', ProcedimientoActividadEntity);
+          await del('plantillas_procedimiento', ProcedimientoPlantillaEntity);
+          break;
+        case 'inteligencia-analisis-lubricante':
+          await del('analisis_lubricante_detalle', AnalisisLubricanteDetalleEntity);
+          await del('eventos_analisis_lubricante', EventoProcesoEntity, 'referencia_tabla = :tabla', {
+            tabla: 'tb_analisis_lubricante',
+          });
+          await del(
+            'alertas_analisis_lubricante',
+            AlertaMantenimientoEntity,
+            "origen = :origen OR referencia_tipo = :tipo OR referencia LIKE :referencia",
+            {
+              origen: 'ANALISIS_LUBRICANTE',
+              tipo: 'ANALISIS_LUBRICANTE',
+              referencia: 'ANALISIS:%',
+            },
+          );
+          await del('analisis_lubricante', AnalisisLubricanteEntity);
+          break;
+        case 'inteligencia-cronogramas-semanales':
+          await del('cronograma_semanal_detalle', CronogramaSemanalDetalleEntity);
+          await del('cronograma_semanal', CronogramaSemanalEntity);
+          break;
+        case 'inteligencia-control-componentes':
+          await del('control_componentes', ControlComponenteEntity);
+          break;
+        case 'inteligencia-reportes-diarios':
+          await del('reporte_diario_unidades', ReporteOperacionDiariaUnidadEntity);
+          await del('reporte_diario_combustible', ReporteCombustibleEntity);
+          await del('reporte_diario_control_componentes', ControlComponenteEntity);
+          await del('reportes_diarios', ReporteOperacionDiariaEntity);
+          break;
+        case 'work-orders':
+          await del('work_order_desecho_detalle', WorkOrderDesechoDetEntity);
+          await del('work_order_desecho', WorkOrderDesechoEntity);
+          await del('entrega_material_detalle', EntregaMaterialDetEntity);
+          await del('entrega_material', EntregaMaterialEntity);
+          await del('reservas_stock', ReservaStockEntity);
+          await del('consumos', ConsumoRepuestoEntity);
+          await del('adjuntos', WorkOrderAdjuntoEntity);
+          await del('tareas_ot', WorkOrderTareaEntity);
+          await del('historial_estados_ot', WorkOrderStatusHistoryEntity);
+          await del('alertas_ot', AlertaMantenimientoEntity, 'work_order_id IS NOT NULL');
+          await del('eventos_equipo_ot', EventoEquipoEntity, 'work_order_id IS NOT NULL');
+          await del('work_orders', WorkOrderEntity);
+          break;
+        case 'work-order-tareas':
+          await del(
+            'tareas_ot',
+            WorkOrderTareaEntity,
+            ctx ? 'work_order_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'work-order-adjuntos':
+          await del(
+            'adjuntos',
+            WorkOrderAdjuntoEntity,
+            ctx ? 'work_order_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'work-order-consumos':
+          await del(
+            'consumos',
+            ConsumoRepuestoEntity,
+            ctx ? 'work_order_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'work-order-issue-materials':
+          await del(
+            'entrega_material_detalle',
+            EntregaMaterialDetEntity,
+            ctx
+              ? 'entrega_id IN (SELECT id FROM kpi_inventory.tb_entrega_material WHERE work_order_id = :contextId)'
+              : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          await del(
+            'entrega_material',
+            EntregaMaterialEntity,
+            ctx ? 'work_order_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        case 'work-order-scrap-materials':
+          await del(
+            'work_order_desecho_detalle',
+            WorkOrderDesechoDetEntity,
+            ctx
+              ? 'work_order_desecho_id IN (SELECT id FROM kpi_maintenance.tb_work_order_desecho WHERE work_order_id = :contextId)'
+              : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          await del(
+            'work_order_desecho',
+            WorkOrderDesechoEntity,
+            ctx ? 'work_order_id = :contextId' : undefined,
+            ctx ? { contextId: ctx } : undefined,
+          );
+          break;
+        default:
+          throw new BadRequestException(`Modulo ${key || '(vacio)'} no soporta eliminacion masiva.`);
+      }
+
+      return totals;
+    });
+
+    const affected = Object.values(details).reduce((sum, value) => sum + Number(value || 0), 0);
+    return {
+      message: `Eliminacion real masiva ejecutada correctamente (${affected} registros).`,
+      affected,
+      details,
+    };
   }
 
   private async registerProcessEvent(payload: {
@@ -13656,10 +13911,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const requestedRole = String(dto.requested_role ?? '').trim().toUpperCase();
-    if (!requestedRole || !requestedRole.includes('ADMIN')) {
-      throw new BadRequestException(
-        'Solo administradores pueden ejecutar el borrado total de análisis de lubricante.',
+    const requestedRole = String(dto.requested_role ?? '').trim();
+    if (!this.isSuperAdministratorRoleName(requestedRole)) {
+      throw new ForbiddenException(
+        'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
       );
     }
 

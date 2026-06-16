@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -320,6 +321,12 @@ export class KpiMaintenanceController {
     return this.service.updateEquipo(id, dto);
   }
   @ApiTags('Equipos')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los equipos' })
+  @Delete('equipos/purge-all')
+  purgeEquipos(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('equipos', roleName);
+  }
+  @ApiTags('Equipos')
   @ApiOperation({ summary: 'Eliminar un equipo por ID' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
   @Delete('equipos/:id')
@@ -367,6 +374,13 @@ export class KpiMaintenanceController {
   @Patch('tipo-equipo/:id')
   updateTipoEquipo(@Param('id') id: string, @Body() dto: UpdateEquipoTipoDto) {
     return this.service.updateEquipoTipo(id, dto);
+  }
+
+  @ApiTags('Tipo Equipo')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los tipos de equipo' })
+  @Delete('tipo-equipo/purge-all')
+  purgeTipoEquipo(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('tipo-equipo', roleName);
   }
 
   @ApiTags('Tipo Equipo')
@@ -434,6 +448,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Locaciones')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las locaciones' })
+  @Delete('locaciones/purge-all')
+  purgeLocations(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('locaciones', roleName);
+  }
+
+  @ApiTags('Locaciones')
   @ApiOperation({ summary: 'Eliminar locación por ID' })
   @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
   @Delete('locaciones/:id')
@@ -459,6 +480,23 @@ export class KpiMaintenanceController {
   @Post('equipos/:id/bitacora')
   createBitacora(@Param('id') id: string, @Body() dto: CreateBitacoraDto) {
     return this.service.createBitacora(id, dto);
+  }
+
+  @ApiTags('Bitacora')
+  @ApiOperation({ summary: 'Eliminar fisicamente la bitacora del equipo' })
+  @Delete('equipos/:id/bitacora/purge-all')
+  purgeBitacoraByEquipo(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('bitacora', roleName, id);
+  }
+
+  @ApiTags('Bitacora')
+  @ApiOperation({ summary: 'Eliminar fisicamente toda la bitacora' })
+  @Delete('bitacora/purge-all')
+  purgeBitacora(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('bitacora', roleName);
   }
   @ApiTags('Bitácora')
   @ApiOperation({ summary: 'Actualizar registro de bitácora por ID' })
@@ -500,6 +538,23 @@ export class KpiMaintenanceController {
     return this.service.listEstados(id, range);
   }
 
+  @ApiTags('Estados')
+  @ApiOperation({ summary: 'Eliminar fisicamente el historial de estados del equipo' })
+  @Delete('equipos/:id/estado/purge-all')
+  purgeEstadosByEquipo(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('estados-equipo', roleName, id);
+  }
+
+  @ApiTags('Estados')
+  @ApiOperation({ summary: 'Eliminar fisicamente todo el historial de estados' })
+  @Delete('estados-equipo/purge-all')
+  purgeEstados(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('estados-equipo', roleName);
+  }
+
   @ApiTags('Eventos')
   @ApiOperation({ summary: 'Crear evento para un equipo' })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
@@ -526,6 +581,23 @@ export class KpiMaintenanceController {
     @Query() query: DateRangeDto & { tipo_evento?: string },
   ) {
     return this.service.listEventos(id, query);
+  }
+
+  @ApiTags('Eventos')
+  @ApiOperation({ summary: 'Eliminar fisicamente los eventos del equipo' })
+  @Delete('equipos/:id/eventos/purge-all')
+  purgeEventosByEquipo(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('eventos-equipo', roleName, id);
+  }
+
+  @ApiTags('Eventos')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los eventos de equipos' })
+  @Delete('eventos-equipo/purge-all')
+  purgeEventos(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('eventos-equipo', roleName);
   }
 
   @ApiTags('Planes')
@@ -571,6 +643,12 @@ export class KpiMaintenanceController {
     return this.service.updatePlan(id, dto);
   }
   @ApiTags('Planes')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los planes' })
+  @Delete('planes/purge-all')
+  purgePlanes(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('planes', roleName);
+  }
+  @ApiTags('Planes')
   @ApiOperation({ summary: 'Eliminar plan por ID' })
   @ApiParam({ name: 'id', description: 'ID del plan', required: true })
   @Delete('planes/:id')
@@ -598,6 +676,15 @@ export class KpiMaintenanceController {
     return this.service.listPlanTareas(id);
   }
   @ApiTags('Plan - Tareas')
+  @ApiOperation({ summary: 'Eliminar fisicamente las tareas de un plan' })
+  @Delete('planes/:id/tareas/purge-all')
+  purgePlanTareasByPlan(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('plan-tareas', roleName, id);
+  }
+  @ApiTags('Plan - Tareas')
   @ApiOperation({ summary: 'Actualizar tarea de plan por ID' })
   @ApiParam({ name: 'id', description: 'ID de la tarea', required: true })
   @ApiBody({
@@ -608,6 +695,12 @@ export class KpiMaintenanceController {
   @Patch('planes/tareas/:id')
   updatePlanTarea(@Param('id') id: string, @Body() dto: UpdatePlanTareaDto) {
     return this.service.updatePlanTarea(id, dto);
+  }
+  @ApiTags('Plan - Tareas')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las tareas de plan' })
+  @Delete('planes/tareas/purge-all')
+  purgePlanTareas(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('plan-tareas', roleName);
   }
   @ApiTags('Plan - Tareas')
   @ApiOperation({ summary: 'Eliminar tarea de plan por ID' })
@@ -744,6 +837,20 @@ export class KpiMaintenanceController {
       sucursal_id: sucursalId,
     }, getSucursalScopeId(req));
   }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las programaciones' })
+  @Delete('programaciones/purge-all')
+  purgeProgramaciones(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('programaciones', roleName);
+  }
+
+  @ApiTags('Programaciones')
+  @ApiOperation({ summary: 'Eliminar fisicamente los calendarios mensuales importados' })
+  @Delete('programaciones/mensuales/purge-all')
+  purgeProgramacionesMensuales(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('programaciones-mensuales', roleName);
+  }
   @ApiTags('Programaciones')
   @ApiOperation({ summary: 'Obtener programación por ID' })
   @ApiParam({
@@ -807,6 +914,13 @@ export class KpiMaintenanceController {
     return this.service.recalculateAlertasNow(source);
   }
 
+  @ApiTags('Alertas')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las alertas' })
+  @Delete('alertas/purge-all')
+  purgeAlertas(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('alertas', roleName);
+  }
+
   @ApiTags('Componentes')
   @ApiOperation({ summary: 'Listar componentes de equipo' })
   @Get('componentes')
@@ -848,6 +962,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Componentes')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los componentes' })
+  @Delete('componentes/purge-all')
+  purgeComponentes(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('componentes', roleName);
+  }
+
+  @ApiTags('Componentes')
   @ApiOperation({ summary: 'Eliminar componente por ID' })
   @Delete('componentes/:id')
   deleteComponente(@Param('id') id: string) {
@@ -880,6 +1001,13 @@ export class KpiMaintenanceController {
   @Patch('fallas/:id')
   updateFalla(@Param('id') id: string, @Body() dto: UpdateFallaCatalogoDto) {
     return this.service.updateFallaCatalogo(id, dto);
+  }
+
+  @ApiTags('Fallas')
+  @ApiOperation({ summary: 'Eliminar fisicamente todo el catalogo de fallas' })
+  @Delete('fallas/purge-all')
+  purgeFallas(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('fallas', roleName);
   }
 
   @ApiTags('Fallas')
@@ -918,6 +1046,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Lecturas')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las lecturas' })
+  @Delete('lecturas/purge-all')
+  purgeLecturas(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('lecturas', roleName);
+  }
+
+  @ApiTags('Lecturas')
   @ApiOperation({ summary: 'Eliminar lectura de equipo' })
   @Delete('lecturas/:id')
   deleteLectura(@Param('id') id: string) {
@@ -953,6 +1088,13 @@ export class KpiMaintenanceController {
     @Body() dto: UpdateLubricacionPuntoDto,
   ) {
     return this.service.updateLubricacion(id, dto);
+  }
+
+  @ApiTags('Lubricacion')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los puntos de lubricacion' })
+  @Delete('lubricaciones/purge-all')
+  purgeLubricaciones(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('lubricaciones', roleName);
   }
 
   @ApiTags('Lubricación')
@@ -998,6 +1140,13 @@ export class KpiMaintenanceController {
     @Body() dto: UpdateProcedimientoPlantillaDto,
   ) {
     return this.service.updateProcedimientoPlantilla(id, dto);
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las plantillas de procedimientos' })
+  @Delete('inteligencia/procedimientos/purge-all')
+  purgeProcedimientos(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('inteligencia-procedimientos', roleName);
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1160,6 +1309,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los analisis de lubricante' })
+  @Delete('inteligencia/analisis-lubricante/purge-all')
+  purgeAnalisisLubricanteAll(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('inteligencia-analisis-lubricante', roleName);
+  }
+
+  @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Actualizar análisis de lubricante por ID' })
   @Patch('inteligencia/analisis-lubricante/:id')
   updateAnalisisLubricante(
@@ -1239,6 +1395,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los cronogramas semanales' })
+  @Delete('inteligencia/cronogramas-semanales/purge-all')
+  purgeCronogramasSemanales(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('inteligencia-cronogramas-semanales', roleName);
+  }
+
+  @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Eliminar cronograma semanal por ID' })
   @Delete('inteligencia/cronogramas-semanales/:id')
   deleteCronogramaSemanal(@Param('id') id: string) {
@@ -1278,6 +1441,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Inteligencia Operativa')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los reportes diarios' })
+  @Delete('inteligencia/reportes-diarios/purge-all')
+  purgeReportesDiarios(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('inteligencia-reportes-diarios', roleName);
+  }
+
+  @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Eliminar reporte de operación diaria por ID' })
   @Delete('inteligencia/reportes-diarios/:id')
   deleteReporteOperacionDiaria(@Param('id') id: string) {
@@ -1296,6 +1466,15 @@ export class KpiMaintenanceController {
   @Get('inteligencia/control-componentes')
   listControlComponentesCriticos() {
     return this.service.listControlComponentesCriticos();
+  }
+
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary: 'Eliminar fisicamente todos los controles de componentes criticos',
+  })
+  @Delete('inteligencia/control-componentes/purge-all')
+  purgeControlComponentesCriticos(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('inteligencia-control-componentes', roleName);
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1458,6 +1637,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las ordenes de trabajo' })
+  @Delete('work-orders/purge-all')
+  purgeWorkOrders(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('work-orders', roleName);
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Eliminar orden de trabajo por ID' })
   @ApiParam({
     name: 'id',
@@ -1505,6 +1691,16 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders - Tareas')
+  @ApiOperation({ summary: 'Eliminar fisicamente las tareas de una OT' })
+  @Delete('work-orders/:id/tareas/purge-all')
+  purgeWorkOrderTareasByWorkOrder(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('work-order-tareas', roleName, id);
+  }
+
+  @ApiTags('Work Orders - Tareas')
   @ApiOperation({ summary: 'Actualizar tarea ejecutada de OT por ID' })
   @ApiParam({ name: 'id', description: 'ID de la tarea de OT', required: true })
   @ApiBody({ type: UpdateWorkOrderTareaDto, required: true })
@@ -1515,6 +1711,13 @@ export class KpiMaintenanceController {
     @Req() req: any,
   ) {
     return this.service.updateWorkOrderTarea(id, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders - Tareas')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las tareas de OT' })
+  @Delete('work-orders/tareas/purge-all')
+  purgeWorkOrderTareas(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('work-order-tareas', roleName);
   }
 
   @ApiTags('Work Orders - Tareas')
@@ -1660,6 +1863,23 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Eliminar fisicamente los adjuntos de una OT' })
+  @Delete('work-orders/:id/adjuntos/purge-all')
+  purgeWorkOrderAdjuntosByWorkOrder(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('work-order-adjuntos', roleName, id);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los adjuntos de OT' })
+  @Delete('work-orders/adjuntos/purge-all')
+  purgeWorkOrderAdjuntos(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('work-order-adjuntos', roleName);
+  }
+
+  @ApiTags('Work Orders - Adjuntos')
   @ApiOperation({ summary: 'Eliminar adjunto de una OT por ID' })
   @ApiParam({
     name: 'id',
@@ -1713,6 +1933,23 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente los consumos de una OT' })
+  @Delete('work-orders/:id/consumos/purge-all')
+  purgeConsumosByWorkOrder(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('work-order-consumos', roleName, id);
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los consumos de OT' })
+  @Delete('work-orders/consumos/purge-all')
+  purgeConsumos(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('work-order-consumos', roleName);
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar historial de una orden de trabajo' })
   @ApiParam({
     name: 'id',
@@ -1761,6 +1998,23 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente las salidas de materiales de una OT' })
+  @Delete('work-orders/:id/issue-materials/purge-all')
+  purgeIssueMaterialsByWorkOrder(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('work-order-issue-materials', roleName, id);
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente todas las salidas de materiales de OT' })
+  @Delete('work-orders/issue-materials/purge-all')
+  purgeIssueMaterials(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('work-order-issue-materials', roleName);
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Emitir materiales en una orden de trabajo' })
   @ApiParam({
     name: 'id',
@@ -1797,6 +2051,23 @@ export class KpiMaintenanceController {
       getSucursalScopeId(req),
       getRequestActor(req),
     );
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente los materiales desechados de una OT' })
+  @Delete('work-orders/:id/scrap-materials/purge-all')
+  purgeScrapMaterialsByWorkOrder(
+    @Param('id') id: string,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeModule('work-order-scrap-materials', roleName, id);
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Eliminar fisicamente todos los materiales desechados de OT' })
+  @Delete('work-orders/scrap-materials/purge-all')
+  purgeScrapMaterials(@Headers('x-role-name') roleName?: string) {
+    return this.service.purgeModule('work-order-scrap-materials', roleName);
   }
 
   @ApiTags('Work Orders')
