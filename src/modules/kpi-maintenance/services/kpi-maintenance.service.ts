@@ -6227,6 +6227,39 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         await del('bitacora', BitacoraDiariaEntity);
         await del('componentes', EquipoComponenteEntity);
       };
+      const clearPlanReferences = async () => {
+        const planJsonKeys = ['plan_id', 'plan_codigo', 'plan_nombre'];
+        await nullify('kpi_process', 'tb_work_order', 'plan_id');
+        await nullify('kpi_process', 'tb_checklist_template', 'plan_id');
+        await nullify('kpi_maintenance', 'tb_programacion_mensual_det', 'programacion_id');
+        await nullify('kpi_maintenance', 'tb_programacion_mensual_det', 'plan_id');
+        await nullify('kpi_maintenance', 'tb_work_order_tarea', 'tarea_id');
+        await stripJson('kpi_process', 'tb_work_order', 'valor_json', planJsonKeys);
+        await stripJson(
+          'kpi_maintenance',
+          'tb_programacion_plan',
+          'payload_json',
+          planJsonKeys,
+        );
+        await stripJson(
+          'kpi_maintenance',
+          'tb_programacion_mensual_det',
+          'payload_json',
+          planJsonKeys,
+        );
+        await stripJson(
+          'kpi_maintenance',
+          'tb_work_order_tarea',
+          'task_meta',
+          planJsonKeys,
+        );
+        await stripJson(
+          'kpi_maintenance',
+          'tb_work_order_tarea',
+          'valor_json',
+          planJsonKeys,
+        );
+      };
 
       switch (key) {
         case 'equipos':
@@ -6272,10 +6305,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
           break;
         case 'planes':
+          await clearPlanReferences();
+          await del('tareas_ot_plan', WorkOrderTareaEntity, 'plan_id IS NOT NULL');
+          await del(
+            'alertas_plan',
+            AlertaMantenimientoEntity,
+            "referencia LIKE :referencia OR referencia_tipo = :tipo",
+            { referencia: 'PLAN:%', tipo: 'PLAN' },
+          );
+          await del('programaciones', ProgramacionPlanEntity);
           await del('tareas_plan', PlanTareaEntity);
           await del('planes', PlanMantenimientoEntity);
           break;
         case 'plan-tareas':
+          await nullify('kpi_maintenance', 'tb_work_order_tarea', 'tarea_id');
           await del(
             'tareas_plan',
             PlanTareaEntity,
