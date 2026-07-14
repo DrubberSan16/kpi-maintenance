@@ -6013,6 +6013,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return Array.isArray(rows) && rows.length > 0;
   }
 
+  private async tableExists(
+    manager: EntityManager,
+    schema: string,
+    table: string,
+  ) {
+    const rows = await manager.query(
+      `
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = $1
+          AND table_name = $2
+        LIMIT 1
+      `,
+      [schema, table],
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
   private async nullifyColumnIfExists(
     manager: EntityManager,
     schema: string,
@@ -6032,6 +6050,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         UPDATE ${qualifiedTable}
         SET ${quotedColumn} = NULL
         WHERE ${quotedColumn} IS NOT NULL
+        RETURNING 1
+      `,
+    );
+    return Array.isArray(rows) ? rows.length : 0;
+  }
+
+  private async hardDeleteTableIfExists(
+    manager: EntityManager,
+    schema: string,
+    table: string,
+  ) {
+    if (!(await this.tableExists(manager, schema, table))) return 0;
+    const qualifiedTable = `${this.quoteSqlIdentifier(
+      schema,
+    )}.${this.quoteSqlIdentifier(table)}`;
+    const rows = await manager.query(
+      `
+        DELETE FROM ${qualifiedTable}
         RETURNING 1
       `,
     );
@@ -6125,18 +6161,90 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           keys,
         );
       };
+      const delTable = async (
+        detailKey: string,
+        schema: string,
+        table: string,
+      ) => {
+        const affected = await this.hardDeleteTableIfExists(
+          manager,
+          schema,
+          table,
+        );
+        totals[detailKey] = (totals[detailKey] || 0) + affected;
+        return affected;
+      };
+      const clearComponentReferences = async () => {
+        await nullify('kpi_process', 'tb_work_order', 'equipo_componente_id');
+        await nullify('kpi_maintenance', 'tb_lubricacion_punto', 'componente_id');
+      };
+      const clearEquipmentReferences = async () => {
+        const equipmentJsonKeys = [
+          'equipment_id',
+          'equipo_id',
+          'equipo_codigo',
+          'equipo_nombre',
+        ];
+        await clearComponentReferences();
+        await nullify('kpi_process', 'tb_work_order', 'equipment_id');
+        await nullify('kpi_process', 'tb_digital_twin', 'equipment_id');
+        await nullify('kpi_maintenance', 'tb_analisis_lubricante', 'equipo_id');
+        await nullify(
+          'kpi_maintenance',
+          'tb_programacion_mensual_det',
+          'programacion_id',
+        );
+        await nullify('kpi_maintenance', 'tb_programacion_mensual_det', 'equipo_id');
+        await nullify('kpi_maintenance', 'tb_reporte_operacion_diaria_unidad', 'equipo_id');
+        await nullify('kpi_maintenance', 'tb_control_componente', 'equipo_id');
+        await nullify('kpi_maintenance', 'tb_evento_proceso', 'equipo_id');
+        await stripJson(
+          'kpi_process',
+          'tb_work_order',
+          'valor_json',
+          equipmentJsonKeys,
+        );
+        await stripJson(
+          'kpi_maintenance',
+          'tb_programacion_mensual_det',
+          'payload_json',
+          equipmentJsonKeys,
+        );
+      };
+      const purgeEquipmentDependents = async () => {
+        await clearEquipmentReferences();
+        await delTable(
+          'ordenes_servicio_equipos',
+          'kpi_inventory',
+          'tb_orden_servicio_equipo',
+        );
+        await del('programaciones', ProgramacionPlanEntity);
+        await del('alertas', AlertaMantenimientoEntity);
+        await del('lubricaciones', LubricacionPuntoEntity);
+        await del('lecturas', LecturaEquipoEntity);
+        await del('eventos_equipo', EventoEquipoEntity);
+        await del('estados_equipo', EstadoEquipoEntity);
+        await del('bitacora', BitacoraDiariaEntity);
+        await del('componentes', EquipoComponenteEntity);
+      };
 
       switch (key) {
         case 'equipos':
+          await purgeEquipmentDependents();
           await del('equipos', EquipoEntity);
           break;
         case 'tipo-equipo':
+          await purgeEquipmentDependents();
+          await del('equipos', EquipoEntity);
+          await nullify('kpi_maintenance', 'tb_falla_catalogo', 'equipo_tipo_id');
           await del('tipos_equipo', EquipoTipoEntity);
           break;
         case 'locaciones':
+          await nullify('kpi_maintenance', 'tb_equipo', 'location_id');
           await del('locaciones', LocationEntity);
           break;
         case 'componentes':
+          await clearComponentReferences();
           await del('componentes', EquipoComponenteEntity);
           break;
         case 'bitacora':
