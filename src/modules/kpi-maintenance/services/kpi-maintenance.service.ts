@@ -5989,6 +5989,93 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private quoteSqlIdentifier(value: string) {
+    return `"${String(value).replace(/"/g, '""')}"`;
+  }
+
+  private async tableColumnExists(
+    manager: EntityManager,
+    schema: string,
+    table: string,
+    column: string,
+  ) {
+    const rows = await manager.query(
+      `
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND table_name = $2
+          AND column_name = $3
+        LIMIT 1
+      `,
+      [schema, table, column],
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
+  private async nullifyColumnIfExists(
+    manager: EntityManager,
+    schema: string,
+    table: string,
+    column: string,
+  ) {
+    if (!(await this.tableColumnExists(manager, schema, table, column))) {
+      return 0;
+    }
+
+    const qualifiedTable = `${this.quoteSqlIdentifier(
+      schema,
+    )}.${this.quoteSqlIdentifier(table)}`;
+    const quotedColumn = this.quoteSqlIdentifier(column);
+    const rows = await manager.query(
+      `
+        UPDATE ${qualifiedTable}
+        SET ${quotedColumn} = NULL
+        WHERE ${quotedColumn} IS NOT NULL
+        RETURNING 1
+      `,
+    );
+    return Array.isArray(rows) ? rows.length : 0;
+  }
+
+  private async stripJsonbKeysIfExists(
+    manager: EntityManager,
+    schema: string,
+    table: string,
+    column: string,
+    keys: string[],
+  ) {
+    const normalizedKeys = keys
+      .map((key) => String(key || '').trim())
+      .filter(Boolean);
+    if (!normalizedKeys.length) return 0;
+    if (!(await this.tableColumnExists(manager, schema, table, column))) {
+      return 0;
+    }
+
+    const qualifiedTable = `${this.quoteSqlIdentifier(
+      schema,
+    )}.${this.quoteSqlIdentifier(table)}`;
+    const quotedColumn = this.quoteSqlIdentifier(column);
+    const placeholders = normalizedKeys.map((_, index) => `$${index + 1}`);
+    const strippedExpression = normalizedKeys.reduce(
+      (expression, _, index) => `${expression} - $${index + 1}`,
+      quotedColumn,
+    );
+    const rows = await manager.query(
+      `
+        UPDATE ${qualifiedTable}
+        SET ${quotedColumn} = ${strippedExpression}
+        WHERE ${quotedColumn} IS NOT NULL
+          AND jsonb_typeof(${quotedColumn}) = 'object'
+          AND ${quotedColumn} ?| ARRAY[${placeholders.join(', ')}]::text[]
+        RETURNING 1
+      `,
+      normalizedKeys,
+    );
+    return Array.isArray(rows) ? rows.length : 0;
+  }
+
   async purgeModule(moduleKey: string, roleName?: string, contextId?: string) {
     this.assertCanPurge(roleName);
     const key = String(moduleKey || '').trim();
@@ -6011,6 +6098,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
         totals[result.key] = (totals[result.key] || 0) + result.affected;
         return result.affected;
+      };
+      const nullify = async (
+        schema: string,
+        table: string,
+        column: string,
+      ) => {
+        await this.nullifyColumnIfExists(
+          manager,
+          schema,
+          table,
+          column,
+        );
+      };
+      const stripJson = async (
+        schema: string,
+        table: string,
+        column: string,
+        keys: string[],
+      ) => {
+        await this.stripJsonbKeysIfExists(
+          manager,
+          schema,
+          table,
+          column,
+          keys,
+        );
       };
 
       switch (key) {
@@ -6086,6 +6199,88 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           await del('lubricaciones', LubricacionPuntoEntity);
           break;
         case 'inteligencia-procedimientos':
+          const procedimientoJsonKeys = [
+            'procedimiento_id',
+            'procedimiento_codigo',
+            'procedimiento_nombre',
+            'procedimiento_actividad_id',
+          ];
+          const procedimientoHeaderJsonKeys = [
+            'procedimiento_id',
+            'procedimiento_codigo',
+            'procedimiento_nombre',
+          ];
+          await nullify(
+            'kpi_maintenance',
+            'tb_work_order_tarea',
+            'procedimiento_actividad_id',
+          );
+          await nullify(
+            'kpi_maintenance',
+            'tb_plan_tarea',
+            'procedimiento_actividad_id',
+          );
+          await nullify(
+            'kpi_process',
+            'tb_work_order',
+            'procedimiento_id',
+          );
+          await nullify(
+            'kpi_maintenance',
+            'tb_programacion_plan',
+            'procedimiento_id',
+          );
+          await nullify(
+            'kpi_maintenance',
+            'tb_programacion_mensual_det',
+            'procedimiento_id',
+          );
+          await nullify(
+            'kpi_maintenance',
+            'tb_plan_tarea',
+            'procedimiento_id',
+          );
+          await nullify(
+            'kpi_maintenance',
+            'tb_plan_mantenimiento',
+            'procedimiento_id',
+          );
+          await stripJson(
+            'kpi_maintenance',
+            'tb_plan_tarea',
+            'meta',
+            procedimientoJsonKeys,
+          );
+          await stripJson(
+            'kpi_maintenance',
+            'tb_work_order_tarea',
+            'task_meta',
+            procedimientoJsonKeys,
+          );
+          await stripJson(
+            'kpi_maintenance',
+            'tb_work_order_tarea',
+            'valor_json',
+            procedimientoJsonKeys,
+          );
+          await stripJson(
+            'kpi_process',
+            'tb_work_order',
+            'valor_json',
+            procedimientoHeaderJsonKeys,
+          );
+          await stripJson(
+            'kpi_maintenance',
+            'tb_programacion_plan',
+            'payload_json',
+            procedimientoHeaderJsonKeys,
+          );
+          await stripJson(
+            'kpi_maintenance',
+            'tb_programacion_mensual_det',
+            'payload_json',
+            procedimientoHeaderJsonKeys,
+          );
           await del('actividades_procedimiento', ProcedimientoActividadEntity);
           await del('plantillas_procedimiento', ProcedimientoPlantillaEntity);
           break;
