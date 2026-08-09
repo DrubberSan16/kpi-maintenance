@@ -21965,6 +21965,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    const currentAudit = (wo.valor_json ?? {}) as Record<string, unknown>;
+    if (this.normalizeRoleName(currentAudit.approval_action) === 'ANULADA') {
+      throw new BadRequestException(
+        'La orden de trabajo esta anulada y no se puede modificar.',
+      );
+    }
     await this.assertOperatorAssignedToWorkOrder(id, actor);
     await this.assertWorkOrderNotBlockedByActiveAnnex(
       wo,
@@ -22204,15 +22210,40 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteWorkOrder(id: string, actor?: RequestActorContext | null) {
+    const normalizedRoleName = this.normalizeRoleName(actor?.roleName);
+    if (
+      ![
+        'ADMINISTRADOR',
+        'SUPER ADMINISTRADOR',
+        'GERENTE GENERAL',
+      ].includes(normalizedRoleName)
+    ) {
+      throw new ForbiddenException(
+        'Solo Administrador, Super Administrador o Gerente General pueden anular documentos.',
+      );
+    }
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
-    await this.assertOperatorAssignedToWorkOrder(id, actor);
+    const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
+    const currentAudit = (wo.valor_json ?? {}) as Record<string, unknown>;
+    if (
+      this.normalizeRoleName(currentAudit.approval_action) === 'ANULADA'
+    ) {
+      return this.wrap(
+        await this.enrichWorkOrder(wo, actor),
+        'Work order ya se encontraba anulada',
+      );
+    }
     await this.assertWorkOrderNotBlockedByActiveAnnex(
       wo,
       undefined,
       'anular la orden',
     );
-    await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'anular');
-    wo.is_deleted = true;
+    const annulledAt = new Date();
+    wo.is_deleted = false;
+    wo.status = 'ANULADA';
+    wo.status_workflow = 'CLOSED';
+    wo.closed_at = annulledAt;
+    wo.updated_at = annulledAt;
     wo.updated_by =
       this.firstNonEmptyString(actor?.username) ?? wo.updated_by ?? null;
     this.applyWorkOrderAuditStamp(wo, actor, 'APPROVED', {
@@ -22224,13 +22255,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       undefined,
       this.resolveActorHistoryUserId(actor),
     );
+    await this.releaseBlockedWorkOrdersFor(wo);
     await this.detachProgramacionesFromWorkOrder(wo.id);
-    await this.appendWorkOrderHistory(wo.id, this.normalizeWorkflowStatus(wo.status_workflow), 'Orden de trabajo eliminada lógicamente', { fromStatus: wo.status_workflow, changedBy: this.resolveActorHistoryUserId(actor) });
+    await this.appendWorkOrderHistory(
+      wo.id,
+      'CLOSED',
+      `Orden de trabajo anulada por ${this.resolveActorLabel(actor) || this.firstNonEmptyString(actor?.username) || 'SYSTEM'}`,
+      {
+        fromStatus: previousStatus,
+        changedBy: this.resolveActorHistoryUserId(actor),
+      },
+    );
     await this.writeSecurityLog({
-      description: `[WO:${wo.id}] Eliminación lógica de OT ${wo.code}`,
+      description: `[WO:${wo.id}] Anulacion administrativa de OT ${wo.code} por ${this.resolveActorLabel(actor) || actor?.username || 'SYSTEM'}`,
       typeLog: 'WORK_ORDER',
     });
-    return this.wrap(true, 'Work order eliminada');
+    return this.wrap(
+      await this.enrichWorkOrder(wo, actor),
+      'Work order anulada',
+    );
   }
 
   async listWorkOrderTareas(

@@ -1655,6 +1655,13 @@ export class KpiMaintenanceController {
     return this.service.deleteWorkOrder(id, getRequestActor(req));
   }
 
+  @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Anular orden de trabajo conservando su auditoria' })
+  @Patch('work-orders/:id/anular')
+  annulWorkOrder(@Param('id') id: string, @Req() req: any) {
+    return this.service.deleteWorkOrder(id, getRequestActor(req));
+  }
+
   @ApiTags('Work Orders - Tareas')
   @ApiOperation({
     summary: 'Listar tareas registradas de una orden de trabajo',
