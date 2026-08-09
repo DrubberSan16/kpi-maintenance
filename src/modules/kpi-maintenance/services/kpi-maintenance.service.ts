@@ -1516,10 +1516,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ADD COLUMN IF NOT EXISTS stock_usado numeric(18, 6) NOT NULL DEFAULT 0
     `);
     await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_inventory.tb_stock_bodega
+      ADD COLUMN IF NOT EXISTS stock_critico numeric(18, 6) NOT NULL DEFAULT 0
+    `);
+    await this.dataSource.query(`
       UPDATE kpi_inventory.tb_stock_bodega
       SET stock_nuevo = COALESCE(stock_actual, 0)
       WHERE COALESCE(stock_nuevo, 0) = 0
         AND COALESCE(stock_usado, 0) = 0
+        AND COALESCE(stock_critico, 0) = 0
         AND COALESCE(stock_actual, 0) <> 0
     `);
     await this.dataSource.query(`
@@ -1530,7 +1535,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
     await this.dataSource.query(`
       UPDATE kpi_inventory.tb_stock_bodega
-      SET stock_actual = COALESCE(stock_nuevo, 0) + COALESCE(stock_usado, 0)
+      SET stock_actual = COALESCE(stock_nuevo, 0)
+        + COALESCE(stock_usado, 0)
+        + COALESCE(stock_critico, 0)
     `);
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_inventory.tb_entrega_material_det
@@ -3743,7 +3750,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       bodegaId,
       manager,
     );
-    const stockActual = this.toNumeric(stock.stock_actual, 0);
+    const stockActual = this.getOperationalStockAmount(stock);
     const reservedQty = await this.getActiveReservedQuantity(
       productoId,
       bodegaId,
@@ -3769,15 +3776,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private normalizeMaterialCondition(value: unknown, fallback: 'NUEVO' | 'USADO' = 'NUEVO') {
+  private normalizeMaterialCondition(
+    value: unknown,
+    fallback: 'NUEVO' | 'USADO' | 'CRITICO' = 'NUEVO',
+  ) {
     const raw = String(value ?? '')
       .trim()
       .toUpperCase();
     if (!raw) return fallback;
     if (['USADO', 'USADA', 'USED'].includes(raw)) return 'USADO';
     if (['NUEVO', 'NUEVA', 'NEW'].includes(raw)) return 'NUEVO';
+    if (['CRITICO', 'CRITICA', 'CRITICAL'].includes(raw)) return 'CRITICO';
     throw new BadRequestException(
-      'La condicion del material debe ser NUEVO o USADO.',
+      'La condicion del material debe ser NUEVO, USADO o CRITICO.',
     );
   }
 
@@ -3785,6 +3796,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     stock: StockBodegaEntity,
     requestedCondition: unknown,
   ) {
+    const stockNuevo = this.getStockNuevoAmount(stock);
+    const stockUsado = this.getStockUsadoAmount(stock);
+    const stockCritico = this.getStockCriticoAmount(stock);
+    if (
+      stockNuevo <= 0.000001 &&
+      stockUsado <= 0.000001 &&
+      stockCritico > 0
+    ) {
+      return 'CRITICO';
+    }
     if (!Boolean(stock.es_usado)) return 'NUEVO';
     const raw = String(requestedCondition ?? '').trim();
     if (!raw) {
@@ -3798,25 +3819,41 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private getStockNuevoAmount(stock: StockBodegaEntity) {
     const actual = this.toNumeric(stock.stock_actual, 0);
     const usado = this.toNumeric(stock.stock_usado, 0);
-    const nuevo = this.toNumeric(stock.stock_nuevo, actual - usado);
-    if (nuevo > 0 || usado > 0 || actual === 0) return Math.max(nuevo, 0);
-    return Math.max(actual, 0);
+    const critico = this.toNumeric(stock.stock_critico, 0);
+    const nuevo = this.toNumeric(stock.stock_nuevo, actual - usado - critico);
+    if (nuevo > 0 || usado > 0 || critico > 0 || actual === 0) {
+      return Math.max(nuevo, 0);
+    }
+    return Math.max(actual - usado - critico, 0);
   }
 
   private getStockUsadoAmount(stock: StockBodegaEntity) {
     return Math.max(this.toNumeric(stock.stock_usado, 0), 0);
   }
 
+  private getStockCriticoAmount(stock: StockBodegaEntity) {
+    return Math.max(this.toNumeric(stock.stock_critico, 0), 0);
+  }
+
+  private getOperationalStockAmount(stock: StockBodegaEntity) {
+    const primary =
+      this.getStockNuevoAmount(stock) + this.getStockUsadoAmount(stock);
+    return primary > 0.000001 ? primary : this.getStockCriticoAmount(stock);
+  }
+
   private setStockBreakdown(
     stock: StockBodegaEntity,
     stockNuevo: number,
     stockUsado: number,
+    stockCritico = this.getStockCriticoAmount(stock),
   ) {
     const normalizedNuevo = Math.max(this.toNumeric(stockNuevo, 0), 0);
     const normalizedUsado = Math.max(this.toNumeric(stockUsado, 0), 0);
-    const total = normalizedNuevo + normalizedUsado;
+    const normalizedCritico = Math.max(this.toNumeric(stockCritico, 0), 0);
+    const total = normalizedNuevo + normalizedUsado + normalizedCritico;
     stock.stock_nuevo = normalizedNuevo;
     stock.stock_usado = normalizedUsado;
+    stock.stock_critico = normalizedCritico;
     stock.stock_actual = total;
     return total;
   }
@@ -3824,12 +3861,34 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private applyIssuedStockByCondition(
     stock: StockBodegaEntity,
     quantity: number,
-    condition: 'NUEVO' | 'USADO',
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
     productLabel: string,
   ) {
     const normalizedQuantity = this.toNumeric(quantity, 0);
     const currentNuevo = this.getStockNuevoAmount(stock);
     const currentUsado = this.getStockUsadoAmount(stock);
+    const currentCritico = this.getStockCriticoAmount(stock);
+
+    if (condition === 'CRITICO') {
+      if (currentNuevo > 0.000001 || currentUsado > 0.000001) {
+        throw new ConflictException(
+          `El stock critico de ${productLabel} solo puede utilizarse cuando el stock nuevo y usado estan en cero.`,
+        );
+      }
+      if (currentCritico < normalizedQuantity) {
+        throw new ConflictException(
+          `Stock critico insuficiente para ${productLabel}. Disponible ${currentCritico.toFixed(
+            2,
+          )}, requerido ${normalizedQuantity.toFixed(2)}.`,
+        );
+      }
+      return this.setStockBreakdown(
+        stock,
+        currentNuevo,
+        currentUsado,
+        currentCritico - normalizedQuantity,
+      );
+    }
 
     if (condition === 'USADO') {
       if (!Boolean(stock.es_usado)) {
@@ -3848,6 +3907,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         stock,
         currentNuevo,
         currentUsado - normalizedQuantity,
+        currentCritico,
       );
     }
 
@@ -3863,6 +3923,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       stock,
       currentNuevo - normalizedQuantity,
       currentUsado,
+      currentCritico,
+    );
+  }
+
+  private resolveAutomaticMaterialCondition(
+    stock: StockBodegaEntity,
+  ): 'NUEVO' | 'USADO' | 'CRITICO' {
+    if (this.getStockNuevoAmount(stock) > 0.000001) return 'NUEVO';
+    if (this.getStockUsadoAmount(stock) > 0.000001) return 'USADO';
+    return 'CRITICO';
+  }
+
+  private applyReceivedStockByCondition(
+    stock: StockBodegaEntity,
+    quantity: number,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+  ) {
+    const normalizedQuantity = this.toNumeric(quantity, 0);
+    const nuevo = this.getStockNuevoAmount(stock);
+    const usado = this.getStockUsadoAmount(stock);
+    const critico = this.getStockCriticoAmount(stock);
+    if (condition === 'USADO') stock.es_usado = true;
+    return this.setStockBreakdown(
+      stock,
+      condition === 'NUEVO' ? nuevo + normalizedQuantity : nuevo,
+      condition === 'USADO' ? usado + normalizedQuantity : usado,
+      condition === 'CRITICO' ? critico + normalizedQuantity : critico,
     );
   }
 
@@ -22885,6 +22972,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           stock_actual: this.toNumeric(stock?.stock_actual, 0),
           stock_nuevo: this.getStockNuevoAmount(stock ?? ({} as StockBodegaEntity)),
           stock_usado: this.getStockUsadoAmount(stock ?? ({} as StockBodegaEntity)),
+          stock_critico: this.getStockCriticoAmount(
+            stock ?? ({} as StockBodegaEntity),
+          ),
         };
       }),
       'Consumos listados',
@@ -23106,6 +23196,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         stock_actual: this.toNumeric(reservableStock.stock?.stock_actual, 0),
         stock_nuevo: this.getStockNuevoAmount(reservableStock.stock),
         stock_usado: this.getStockUsadoAmount(reservableStock.stock),
+        stock_critico: this.getStockCriticoAmount(reservableStock.stock),
       },
       'Consumo registrado',
     );
@@ -23663,7 +23754,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         totalCost += subtotal;
         totalQuantity += quantity;
 
-        sourceStock.stock_actual = sourceStockValue - quantity;
+        const materialCondition = this.resolveAutomaticMaterialCondition(
+          sourceStock,
+        );
+        const sourceStockAfter = this.applyIssuedStockByCondition(
+          sourceStock,
+          quantity,
+          materialCondition,
+          product.nombre || product.id,
+        );
         sourceStock.stock_fisico =
           this.toNumeric(sourceStock.stock_fisico, sourceStockValue) - quantity;
         sourceStock.updated_by = actorName;
@@ -23682,7 +23781,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           destinationStock.stock_actual,
           0,
         );
-        destinationStock.stock_actual = destinationStockActual + quantity;
+        const destinationStockAfter = this.applyReceivedStockByCondition(
+          destinationStock,
+          quantity,
+          materialCondition,
+        );
         destinationStock.stock_fisico =
           this.toNumeric(
             destinationStock.stock_fisico,
@@ -23704,6 +23807,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             cantidad: quantity,
             costo_unitario: unitCost,
             subtotal_costo: subtotal,
+            condicion_material: materialCondition,
             observacion: detailObservation,
             status: 'ACTIVE',
             created_by: actorName,
@@ -23719,6 +23823,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             cantidad: quantity,
             costo_unitario: unitCost,
             subtotal_costo: subtotal,
+            condicion_material: materialCondition,
             observacion: detailObservation,
             status: 'ACTIVE',
             created_by: actorName,
@@ -23739,10 +23844,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             salida_cantidad: quantity,
             costo_unitario: unitCost,
             costo_total: subtotal,
-            saldo_cantidad: sourceStock.stock_actual,
+            saldo_cantidad: sourceStockAfter,
+            condicion_material: materialCondition,
             saldo_costo_promedio: unitCost,
             saldo_valorizado:
-              this.toNumeric(sourceStock.stock_actual, 0) * unitCost,
+              sourceStockAfter * unitCost,
             observacion: detailObservation,
             status: 'ACTIVE',
             created_by: actorName,
@@ -23763,10 +23869,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             salida_cantidad: 0,
             costo_unitario: unitCost,
             costo_total: subtotal,
-            saldo_cantidad: destinationStock.stock_actual,
+            saldo_cantidad: destinationStockAfter,
+            condicion_material: materialCondition,
             saldo_costo_promedio: unitCost,
             saldo_valorizado:
-              this.toNumeric(destinationStock.stock_actual, 0) * unitCost,
+              destinationStockAfter * unitCost,
             observacion: detailObservation,
             status: 'ACTIVE',
             created_by: actorName,
@@ -24050,6 +24157,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         bodega_id: args.bodegaId,
         producto_id: args.productoId,
         stock_actual: 0,
+        stock_nuevo: 0,
+        stock_usado: 0,
+        stock_critico: 0,
         stock_fisico: 0,
         stock_min_bodega: 0,
         stock_max_bodega: 0,

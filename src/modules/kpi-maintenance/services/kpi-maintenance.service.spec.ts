@@ -20,6 +20,7 @@ const createRepos = () => ({
   equipoComponenteRepo: createRepo(),
   locationRepo: createRepo(),
   marcaRepo: createRepo(),
+  sucursalRepo: createRepo(),
   bitacoraRepo: createRepo(),
   alertaRepo: createRepo(),
   estadoRepo: createRepo(),
@@ -50,6 +51,7 @@ const createRepos = () => ({
   stockRepo: createRepo(),
   kardexRepo: createRepo(),
   productoRepo: createRepo(),
+  unidadMedidaRepo: createRepo(),
   bodegaRepo: createRepo(),
   reservaRepo: createRepo(),
   woTareaRepo: createRepo(),
@@ -81,6 +83,7 @@ const createService = (repos: RepoBag, ds: DataSource) =>
     repos.equipoComponenteRepo as any,
     repos.locationRepo as any,
     repos.marcaRepo as any,
+    repos.sucursalRepo as any,
     repos.bitacoraRepo as any,
     repos.alertaRepo as any,
     repos.estadoRepo as any,
@@ -111,6 +114,7 @@ const createService = (repos: RepoBag, ds: DataSource) =>
     repos.stockRepo as any,
     repos.kardexRepo as any,
     repos.productoRepo as any,
+    repos.unidadMedidaRepo as any,
     repos.bodegaRepo as any,
     repos.reservaRepo as any,
     repos.woTareaRepo as any,
@@ -463,6 +467,9 @@ describe('KpiMaintenanceService work orders', () => {
     jest
       .spyOn(service as any, 'registerProcessEvent')
       .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'ensureAutomaticWorkOrderAlertWithManager')
+      .mockResolvedValue({ created: false, alert: { id: null } });
   });
 
   it('rechaza cambios en una OT bloqueada por una anexada activa', async () => {
@@ -544,6 +551,8 @@ describe('KpiMaintenanceService work orders', () => {
       procedimiento_id: 'proc-1',
       valor_json: {
         causa: 'Fuga detectada',
+        accion: 'Cambio de componente',
+        prevencion: 'Revisión semanal',
       },
     } as any);
 
@@ -565,10 +574,23 @@ describe('KpiMaintenanceService work orders', () => {
       'wo-1',
       'PLANNED',
       'Orden de trabajo creada',
+      { changedBy: null },
     );
   });
 
   it('actualiza la OT preservando el estado y mezclando valor_json de forma correcta', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-new',
+      nombre: 'Plan nuevo',
+      codigo: 'PLAN-NUEVO',
+      is_deleted: false,
+    });
     repos.woRepo.findOne.mockResolvedValue({
       id: 'wo-1',
       code: 'OT-A00001',
@@ -627,7 +649,7 @@ describe('KpiMaintenanceService work orders', () => {
       'wo-1',
       'PLANNED',
       'Cabecera de OT actualizada',
-      { fromStatus: 'PLANNED' },
+      { fromStatus: 'PLANNED', changedBy: null },
     );
   });
 
@@ -660,6 +682,9 @@ describe('KpiMaintenanceService work orders', () => {
     }));
     repos.reservaRepo.findOne.mockResolvedValue(null);
     repos.reservaRepo.save.mockImplementation(async (value) => value);
+    jest
+      .spyOn(service as any, 'getActiveReservedQuantity')
+      .mockResolvedValue(0);
 
     await service.createConsumo('wo-1', {
       producto_id: 'producto-1',
@@ -676,5 +701,54 @@ describe('KpiMaintenanceService work orders', () => {
         estado: 'RESERVADO',
       }),
     );
+  });
+
+  it('consume stock crítico cuando no existe stock nuevo ni usado', () => {
+    const stock = {
+      stock_actual: 5,
+      stock_nuevo: 0,
+      stock_usado: 0,
+      stock_critico: 5,
+      es_usado: true,
+    } as any;
+
+    const condition = (service as any).resolveIssueMaterialCondition(
+      stock,
+      undefined,
+    );
+    const total = (service as any).applyIssuedStockByCondition(
+      stock,
+      2,
+      condition,
+      'MAT-1',
+    );
+
+    expect(condition).toBe('CRITICO');
+    expect(total).toBe(3);
+    expect(stock).toMatchObject({
+      stock_actual: 3,
+      stock_nuevo: 0,
+      stock_usado: 0,
+      stock_critico: 3,
+    });
+  });
+
+  it('bloquea el stock crítico mientras exista stock nuevo o usado', () => {
+    const stock = {
+      stock_actual: 6,
+      stock_nuevo: 1,
+      stock_usado: 0,
+      stock_critico: 5,
+      es_usado: true,
+    } as any;
+
+    expect(() =>
+      (service as any).applyIssuedStockByCondition(
+        stock,
+        1,
+        'CRITICO',
+        'MAT-1',
+      ),
+    ).toThrow(ConflictException);
   });
 });

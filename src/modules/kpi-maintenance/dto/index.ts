@@ -1243,8 +1243,9 @@ export class IssueMaterialItemDto {
   cantidad: number;
 
   @ApiPropertyOptional({
-    description: 'Condicion del material a descontar: NUEVO o USADO',
-    enum: ['NUEVO', 'USADO'],
+    description:
+      'Condicion del material a descontar. CRITICO se aplica cuando nuevo y usado estan agotados.',
+    enum: ['NUEVO', 'USADO', 'CRITICO'],
     default: 'NUEVO',
   })
   @IsOptional()

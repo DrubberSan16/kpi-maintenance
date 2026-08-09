@@ -777,6 +777,8 @@ export class StockBodegaEntity {
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_usado: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
+  stock_critico: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_fisico: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   stock_min_bodega: number;
