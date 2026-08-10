@@ -4,7 +4,7 @@ import { KpiMaintenanceService } from './kpi-maintenance.service';
 
 const createRepo = () => ({
   findOne: jest.fn(),
-  find: jest.fn(),
+  find: jest.fn().mockResolvedValue([]),
   save: jest.fn(async (value) => value),
   create: jest.fn((value) => value),
   createQueryBuilder: jest.fn(),
@@ -62,6 +62,7 @@ type RepoBag = ReturnType<typeof createRepos>;
 
 const createDataSourceMock = () =>
   ({
+    query: jest.fn().mockResolvedValue([]),
     createQueryRunner: jest.fn(() => ({
       connect: jest.fn(),
       startTransaction: jest.fn(),
@@ -296,6 +297,163 @@ describe('KpiMaintenanceService alerts', () => {
     expect(stats.created).toBe(1);
     expect(repos.alertaRepo.save).toHaveBeenCalled();
     expect(dispatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('no dispara el correo global de inventario al sincronizar su alerta', async () => {
+    repos.alertaRepo.find.mockResolvedValue([]);
+    repos.alertaRepo.save.mockImplementation(async (value) => ({
+      id: 'alert-inventory',
+      ...value,
+    }));
+    const dispatchSpy = jest
+      .spyOn(service as any, 'dispatchAlertTriggeredNotifications')
+      .mockResolvedValue(undefined);
+
+    await (service as any).syncAlertCandidates(
+      [
+        {
+          tipo_alerta: 'STOCK_BAJO_BODEGA',
+          categoria: 'INVENTARIO',
+          nivel: 'WARNING',
+          origen: 'INVENTARIO',
+          referencia_tipo: 'INVENTARIO_RESUMEN',
+          referencia: 'INVENTARIO:RESUMEN_GENERAL',
+          detalle: '1 material en alerta',
+          payload_json: { inventory_items: [] },
+        },
+      ],
+      {
+        shouldNotifyCandidate: (candidate: any) =>
+          candidate.origen !== 'INVENTARIO',
+      },
+    );
+
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('calcula el stock minimo sin incluir la reserva critica', async () => {
+    repos.stockRepo.find.mockResolvedValue([
+      {
+        id: 'stock-1',
+        producto_id: 'producto-1',
+        bodega_id: 'bodega-1',
+        stock_actual: 10,
+        stock_critico: 4,
+        stock_min_bodega: 7,
+        stock_max_bodega: 20,
+        costo_promedio_bodega: 1,
+        created_by: 'operador',
+        is_deleted: false,
+      },
+    ]);
+    repos.productoRepo.find.mockResolvedValue([
+      { id: 'producto-1', codigo: 'MAT-1', nombre: 'Material uno' },
+    ]);
+    repos.bodegaRepo.find.mockResolvedValue([
+      {
+        id: 'bodega-1',
+        codigo: 'BOD-001',
+        nombre: 'Principal',
+        sucursal_id: 'sucursal-1',
+      },
+    ]);
+
+    const candidates = await (service as any).buildInventoryAlertCandidates();
+    const item = candidates[0].payload_json.inventory_items[0];
+
+    expect(item).toMatchObject({
+      stock_actual: 10,
+      stock_critico: 4,
+      stock_disponible_minimo: 6,
+      stock_min_bodega: 7,
+      sucursal_id: 'sucursal-1',
+    });
+  });
+
+  it('secciona destinatarios por sucursal y deja alcance global al super administrador', async () => {
+    jest.spyOn(service as any, 'fetchSecurityUsers').mockResolvedValue([
+      {
+        id: 'warehouse-a',
+        nameUser: 'bodega-a',
+        nameSurname: 'Bodega A',
+        email: 'bodega-a@example.com',
+        roleName: 'PERSONAL DE BODEGA',
+        roleNames: ['PERSONAL DE BODEGA'],
+        status: 'ACTIVE',
+        isDeleted: false,
+        sucursalIds: ['sucursal-a'],
+        allSucursales: false,
+      },
+      {
+        id: 'admin-b',
+        nameUser: 'admin-b',
+        nameSurname: 'Admin B',
+        email: 'admin-b@example.com',
+        roleName: 'ADMINISTRATIVO',
+        roleNames: ['ADMINISTRATIVO'],
+        status: 'ACTIVE',
+        isDeleted: false,
+        sucursalIds: ['sucursal-b'],
+        allSucursales: false,
+      },
+      {
+        id: 'super',
+        nameUser: 'super',
+        nameSurname: 'Super Administrador',
+        email: 'super@example.com',
+        roleName: 'SUPER ADMINISTRADOR',
+        roleNames: ['SUPER ADMINISTRADOR'],
+        status: 'ACTIVE',
+        isDeleted: false,
+        sucursalIds: [],
+        allSucursales: true,
+      },
+    ]);
+    const items = [
+      { sucursal_id: 'sucursal-a', bodega_id: 'bodega-a' },
+      { sucursal_id: 'sucursal-b', bodega_id: 'bodega-b' },
+    ];
+
+    const scoped = await (service as any).resolveScopedInventoryRecipients(items);
+    const byEmail = new Map(
+      scoped.map((entry: any) => [entry.recipient.email, entry.items]),
+    );
+
+    expect(byEmail.get('bodega-a@example.com')).toHaveLength(1);
+    expect(byEmail.get('admin-b@example.com')).toHaveLength(1);
+    expect(byEmail.get('super@example.com')).toHaveLength(2);
+  });
+
+  it('el correo por movimiento incluye solo el stock afectado', async () => {
+    const sendSpy = jest
+      .spyOn(service as any, 'sendScopedInventoryStockEmails')
+      .mockResolvedValue({ sent: 1, failed: 0, recipients: 1 });
+    const buildItem = (stockId: string) => ({
+      stock_id: stockId,
+      producto_id: `producto-${stockId}`,
+      producto_label: `Material ${stockId}`,
+      bodega_id: 'bodega-1',
+      bodega_label: 'BOD-001',
+      sucursal_id: 'sucursal-1',
+    });
+
+    await (service as any).dispatchInventoryRecalculationEmails(
+      [
+        {
+          origen: 'INVENTARIO',
+          payload_json: {
+            inventory_items: [buildItem('stock-1'), buildItem('stock-2')],
+          },
+        },
+      ],
+      'inventory-kardex-document',
+      { stock_id: 'stock-2', movement_direction: 'decrease' },
+    );
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      [expect.objectContaining({ stock_id: 'stock-2' })],
+      'movement',
+    );
   });
 
   it('cierra alertas gestionadas cuando la condición desaparece', async () => {

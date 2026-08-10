@@ -911,7 +911,7 @@ export class KpiMaintenanceController {
   @Post('alertas/recalcular')
   recalculate(@Body() payload?: Record<string, unknown>) {
     const source = String(payload?.source || 'manual').trim() || 'manual';
-    return this.service.recalculateAlertasNow(source);
+    return this.service.recalculateAlertasNow(source, payload ?? {});
   }
 
   @ApiTags('Alertas')

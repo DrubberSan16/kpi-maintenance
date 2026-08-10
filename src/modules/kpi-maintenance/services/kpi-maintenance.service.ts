@@ -262,7 +262,10 @@ type InventoryAlertItem = {
   bodega_codigo: string | null;
   bodega_nombre: string | null;
   bodega_label: string;
+  sucursal_id: string | null;
   stock_actual: number;
+  stock_critico: number;
+  stock_disponible_minimo: number;
   stock_min_bodega: number;
   stock_max_bodega: number;
   costo_promedio_bodega: number;
@@ -297,6 +300,32 @@ type SecurityUserDirectoryItem = {
   roleNames: string[];
   status: string | null;
   isDeleted: boolean;
+  sucursalIds: string[];
+  allSucursales: boolean;
+};
+
+type InventoryReservationEmailItem = {
+  work_order_id: string;
+  work_order_code: string;
+  work_order_title: string | null;
+  producto_id: string;
+  producto_label: string;
+  bodega_id: string;
+  bodega_label: string;
+  sucursal_id: string | null;
+  cantidad_reservada: number;
+  observacion: string | null;
+};
+
+type AlertRecalculationContext = {
+  stock_id?: string | null;
+  stock_ids?: string[] | null;
+  stock_count?: number | null;
+  movement_direction?: string | null;
+  actor_username?: string | null;
+  actor_user_id?: string | null;
+  actor_email?: string | null;
+  job_id?: string | null;
 };
 
 type WorkOrderTaskResponsible = {
@@ -314,7 +343,12 @@ type WorkOrderAttachmentReference = {
 };
 
 type AlertNotificationRecipient = {
-  type: 'TRANSACTION_OWNER' | 'GENERAL_MANAGER' | 'ADMINISTRATOR';
+  type:
+    | 'TRANSACTION_OWNER'
+    | 'GENERAL_MANAGER'
+    | 'ADMINISTRATOR'
+    | 'SUPER_ADMINISTRATOR'
+    | 'WAREHOUSE_STAFF';
   email: string;
   userId?: string | null;
   username?: string | null;
@@ -2794,7 +2828,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async recalculateAlertasNow(source = 'manual') {
+  async recalculateAlertasNow(
+    source = 'manual',
+    context: AlertRecalculationContext = {},
+  ) {
     const normalizedSource = String(source || 'manual').trim().toLowerCase();
     if (normalizedSource === 'inventory-kardex-import-started') {
       this.inventoryImportSuppressed = true;
@@ -2811,6 +2848,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (this.recalculationRunning) {
+      const requiresInventoryEmail =
+        normalizedSource === 'inventory-kardex-import-completed' ||
+        String(context.movement_direction || '').trim().toLowerCase() ===
+          'decrease';
+      if (requiresInventoryEmail) {
+        const candidates = await this.buildInventoryAlertCandidates();
+        const inventoryEmail = await this.dispatchInventoryRecalculationEmails(
+          candidates,
+          source,
+          context,
+        );
+        return this.wrap(
+          {
+            accepted: true,
+            source,
+            notification_only: true,
+            inventory_email: inventoryEmail,
+          },
+          'Notificacion de inventario procesada durante el recalculo en curso',
+        );
+      }
       return this.wrap(
         { accepted: false, source },
         'Recalculo de alertas ya se encuentra en ejecución',
@@ -2819,7 +2877,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     this.recalculationRunning = true;
     try {
-      return await this.recalculateAlertas(source);
+      return await this.recalculateAlertas(source, context);
     } finally {
       this.recalculationRunning = false;
     }
@@ -4919,6 +4977,85 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private normalizeSecuritySucursalIds(value: unknown) {
+    if (!Array.isArray(value)) return [];
+    return [
+      ...new Set(
+        value
+          .map((item) =>
+            this.firstNonEmptyString(
+              typeof item === 'object' && item !== null
+                ? (item as Record<string, unknown>).id
+                : item,
+            ),
+          )
+          .filter((item): item is string => Boolean(item)),
+      ),
+    ];
+  }
+
+  private async fetchSecurityUsersFromDatabase() {
+    try {
+      const rows = (await this.dataSource.query(`
+        SELECT
+          usr.id::text AS id,
+          usr.name_user,
+          usr.name_surname,
+          usr.email,
+          usr.status,
+          usr.is_deleted,
+          role.nombre AS role_name,
+          COALESCE(
+            ARRAY_AGG(DISTINCT scope.sucursal_id::text)
+              FILTER (
+                WHERE scope.sucursal_id IS NOT NULL
+                  AND COALESCE(scope.is_deleted, false) = false
+              ),
+            ARRAY[]::text[]
+          ) AS sucursal_ids
+        FROM kpi_security.tb_user usr
+        INNER JOIN kpi_security.tb_role role
+          ON role.id = usr.role_id
+         AND COALESCE(role.is_deleted, false) = false
+        LEFT JOIN kpi_security.tb_user_sucursal scope
+          ON scope.user_id = usr.id
+         AND COALESCE(scope.is_deleted, false) = false
+        GROUP BY
+          usr.id,
+          usr.name_user,
+          usr.name_surname,
+          usr.email,
+          usr.status,
+          usr.is_deleted,
+          role.nombre
+      `)) as Array<Record<string, unknown>>;
+
+      return rows.map((item): SecurityUserDirectoryItem => {
+        const sucursalIds = this.normalizeSecuritySucursalIds(
+          item.sucursal_ids,
+        );
+        const roleName = this.firstNonEmptyString(item.role_name);
+        return {
+          id: this.firstNonEmptyString(item.id),
+          nameUser: this.firstNonEmptyString(item.name_user),
+          nameSurname: this.firstNonEmptyString(item.name_surname),
+          email: this.normalizeEmail(item.email),
+          roleName,
+          roleNames: roleName ? [roleName] : [],
+          status: this.firstNonEmptyString(item.status),
+          isDeleted: Boolean(item.is_deleted),
+          sucursalIds,
+          allSucursales: sucursalIds.length === 0,
+        };
+      });
+    } catch (error: any) {
+      this.logger.debug(
+        `No se pudo consultar el directorio de usuarios desde PostgreSQL: ${error?.message ?? 'desconocido'}`,
+      );
+      return [] as SecurityUserDirectoryItem[];
+    }
+  }
+
   private async fetchSecurityUsers(force = false) {
     const now = Date.now();
     if (
@@ -4930,6 +5067,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     if (!force && this.securityUsersAuthBypassUntil > now) {
       return this.securityUsersCache?.items ?? [];
+    }
+
+    const databaseItems = await this.fetchSecurityUsersFromDatabase();
+    if (databaseItems.length) {
+      this.securityUsersAuthBypassUntil = 0;
+      this.securityUsersCache = {
+        expiresAt: now + 5 * 60 * 1000,
+        items: databaseItems,
+      };
+      return databaseItems;
     }
     if (!this.securityServiceUrl) return [];
 
@@ -4955,6 +5102,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             ]
               .map((value) => this.firstNonEmptyString(value))
               .filter((value): value is string => Boolean(value));
+            const explicitSucursalIds = this.normalizeSecuritySucursalIds(
+              item?.sucursales,
+            );
+            const effectiveSucursalIds = this.normalizeSecuritySucursalIds(
+              item?.effectiveSucursales,
+            );
 
             return {
               id: this.firstNonEmptyString(item?.id),
@@ -4965,6 +5118,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               roleNames: [...new Set(rawRoleNames)],
               status: this.firstNonEmptyString(item?.status),
               isDeleted: Boolean(item?.isDeleted ?? item?.is_deleted ?? false),
+              sucursalIds: explicitSucursalIds.length
+                ? explicitSucursalIds
+                : effectiveSucursalIds,
+              allSucursales: Boolean(
+                item?.allSucursales ?? explicitSucursalIds.length === 0,
+              ),
             };
           })
         : [];
@@ -5208,6 +5367,92 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private getSecurityUserNormalizedRoles(item: SecurityUserDirectoryItem) {
+    return [item.roleName, ...(item.roleNames ?? [])]
+      .map((role) => this.normalizeRoleName(role))
+      .filter(Boolean);
+  }
+
+  private isInventorySuperAdministrator(item: SecurityUserDirectoryItem) {
+    return this.getSecurityUserNormalizedRoles(item).some(
+      (role) => role.includes('SUPER ADMIN') || role.includes('SUPERADMIN'),
+    );
+  }
+
+  private isInventoryAdministrator(item: SecurityUserDirectoryItem) {
+    return this.getSecurityUserNormalizedRoles(item).some(
+      (role) =>
+        role.includes('ADMINISTRADOR') ||
+        role.includes('ADMINISTRATIVO') ||
+        role === 'ADMIN',
+    );
+  }
+
+  private isInventoryWarehouseStaff(item: SecurityUserDirectoryItem) {
+    return this.getSecurityUserNormalizedRoles(item).some(
+      (role) =>
+        role.includes('BODEGA') ||
+        role.includes('BODEGUERO') ||
+        role.includes('ALMACEN'),
+    );
+  }
+
+  private canReceiveInventoryEmails(item: SecurityUserDirectoryItem) {
+    return (
+      this.isActiveSecurityUser(item) &&
+      Boolean(this.normalizeEmail(item.email)) &&
+      (this.isInventorySuperAdministrator(item) ||
+        this.isInventoryAdministrator(item) ||
+        this.isInventoryWarehouseStaff(item))
+    );
+  }
+
+  private securityUserCanAccessSucursal(
+    item: SecurityUserDirectoryItem,
+    sucursalId?: string | null,
+  ) {
+    if (this.isInventorySuperAdministrator(item) || item.allSucursales) {
+      return true;
+    }
+    const normalizedSucursalId = String(sucursalId || '').trim();
+    return (
+      Boolean(normalizedSucursalId) &&
+      item.sucursalIds.includes(normalizedSucursalId)
+    );
+  }
+
+  private toInventoryRecipient(
+    item: SecurityUserDirectoryItem,
+  ): AlertNotificationRecipient {
+    return {
+      type: this.isInventorySuperAdministrator(item)
+        ? 'SUPER_ADMINISTRATOR'
+        : this.isInventoryWarehouseStaff(item)
+          ? 'WAREHOUSE_STAFF'
+          : 'ADMINISTRATOR',
+      email: this.normalizeEmail(item.email)!,
+      userId: item.id,
+      username: item.nameUser,
+      displayName: item.nameSurname ?? item.nameUser,
+      roleName: item.roleName,
+    };
+  }
+
+  private async resolveScopedInventoryRecipients<T extends { sucursal_id: string | null }>(
+    items: T[],
+  ) {
+    const users = await this.fetchSecurityUsers();
+    return users
+      .filter((user) => this.canReceiveInventoryEmails(user))
+      .map((user) => ({
+        recipient: this.toInventoryRecipient(user),
+        items: items.filter((item) =>
+          this.securityUserCanAccessSucursal(user, item.sucursal_id),
+        ),
+      }))
+      .filter((entry) => entry.items.length > 0);
+  }
+
   private getAlertNotificationRecipientsUserIds(
     recipients: AlertNotificationRecipient[],
   ) {
@@ -5430,6 +5675,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               item.stock_actual.toFixed(2),
             )}</td>
             <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;text-align:right;">${this.escapeHtml(
+              item.stock_critico.toFixed(2),
+            )}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;text-align:right;">${this.escapeHtml(
+              item.stock_disponible_minimo.toFixed(2),
+            )}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;text-align:right;">${this.escapeHtml(
               item.stock_min_bodega.toFixed(2),
             )}</td>
             <td style="padding:10px 12px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(
@@ -5444,12 +5695,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         <div style="font-size:13px;color:#5f7388;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Materiales afectados</div>
         <div style="border:1px solid #dbe4f0;border-radius:16px;background:#fbfdff;">
           <div style="width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:16px;">
-            <table style="width:100%;min-width:760px;border-collapse:collapse;font-size:14px;color:#193550;">
+            <table style="width:100%;min-width:920px;border-collapse:collapse;font-size:14px;color:#193550;">
               <thead style="background:#eef4fb;">
                 <tr>
                   <th style="padding:12px;text-align:left;">Material</th>
                   <th style="padding:12px;text-align:left;">Bodega</th>
-                  <th style="padding:12px;text-align:right;">Stock actual</th>
+                  <th style="padding:12px;text-align:right;">Stock total</th>
+                  <th style="padding:12px;text-align:right;">Reserva critica</th>
+                  <th style="padding:12px;text-align:right;">Disponible</th>
                   <th style="padding:12px;text-align:right;">Stock minimo</th>
                   <th style="padding:12px;text-align:left;">Observacion</th>
                 </tr>
@@ -5469,7 +5722,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'Materiales afectados:',
       ...items.map(
         (item) =>
-          `- ${item.producto_label} | ${item.bodega_label} | actual ${item.stock_actual.toFixed(
+          `- ${item.producto_label} | ${item.bodega_label} | total ${item.stock_actual.toFixed(
+            2,
+          )} | reserva critica ${item.stock_critico.toFixed(2)} | disponible ${item.stock_disponible_minimo.toFixed(
             2,
           )} | minimo ${item.stock_min_bodega.toFixed(2)} | ${item.observacion}`,
       ),
@@ -10176,14 +10431,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const items = rows
       .map((row): InventoryAlertItem | null => {
         const stockActual = this.toNumeric(row.stock_actual);
+        const stockCritico = Math.max(this.toNumeric(row.stock_critico), 0);
+        const stockDisponibleMinimo = Math.max(stockActual - stockCritico, 0);
         const stockMinimo = this.toNumeric(row.stock_min_bodega);
-        if (stockMinimo <= 0 || stockActual > stockMinimo) return null;
+        if (stockMinimo <= 0 || stockDisponibleMinimo > stockMinimo) return null;
 
         const producto = productMap.get(row.producto_id);
         const bodega = warehouseMap.get(row.bodega_id);
         const productoLabel = this.buildProductoLabel(producto) ?? row.producto_id;
         const bodegaLabel = this.buildBodegaLabel(bodega) ?? row.bodega_id;
-        const isCritical = stockActual <= 0;
+        const isCritical = stockDisponibleMinimo <= 0;
 
         return {
           stock_id: row.id,
@@ -10195,14 +10452,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           bodega_codigo: bodega?.codigo ?? null,
           bodega_nombre: bodega?.nombre ?? null,
           bodega_label: bodegaLabel,
+          sucursal_id: bodega?.sucursal_id ?? null,
           stock_actual: stockActual,
+          stock_critico: stockCritico,
+          stock_disponible_minimo: stockDisponibleMinimo,
           stock_min_bodega: stockMinimo,
           stock_max_bodega: this.toNumeric(row.stock_max_bodega),
           costo_promedio_bodega: this.toNumeric(row.costo_promedio_bodega),
           nivel: isCritical ? 'CRITICAL' : 'WARNING',
           observacion: isCritical
-            ? 'Sin stock. Gestionar reposicion inmediata o traslado entre bodegas.'
-            : 'Bajo minimo. Revisar reabastecimiento antes de afectar mantenimiento u operacion.',
+            ? 'Sin stock disponible fuera de la reserva critica. Gestionar reposicion inmediata o traslado entre bodegas.'
+            : 'Stock disponible bajo minimo luego de separar la reserva critica. Revisar reabastecimiento.',
           actor_username: this.firstNonEmptyString(row.updated_by, row.created_by),
         };
       })
@@ -10241,6 +10501,357 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
       },
     ];
+  }
+
+  private groupInventoryItemsByWarehouse(items: InventoryAlertItem[]) {
+    const grouped = new Map<
+      string,
+      { label: string; items: InventoryAlertItem[] }
+    >();
+    for (const item of items) {
+      const current = grouped.get(item.bodega_id) ?? {
+        label: item.bodega_label,
+        items: [],
+      };
+      current.items.push(item);
+      grouped.set(item.bodega_id, current);
+    }
+    return [...grouped.values()].sort((a, b) =>
+      a.label.localeCompare(b.label, 'es'),
+    );
+  }
+
+  private buildScopedInventoryEmailHtml(
+    recipient: AlertNotificationRecipient,
+    items: InventoryAlertItem[],
+    mode: 'bulk' | 'movement',
+  ) {
+    const recipientLabel =
+      recipient.displayName || recipient.username || 'usuario';
+    const intro =
+      mode === 'bulk'
+        ? 'La carga masiva de inventario finalizo. Estos son los materiales bajo stock minimo dentro de las bodegas que tienes asignadas.'
+        : 'El ultimo movimiento dejo el siguiente material bajo stock minimo, despues de separar la reserva critica de emergencia.';
+    const warehouseSections = this.groupInventoryItemsByWarehouse(items)
+      .map(({ label, items: warehouseItems }) => {
+        const rows = warehouseItems
+          .map(
+            (item) => `
+              <tr>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.producto_label)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.stock_actual.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.stock_critico.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.stock_disponible_minimo.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.stock_min_bodega.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.observacion)}</td>
+              </tr>`,
+          )
+          .join('');
+        return `
+          <div style="margin-top:22px;">
+            <h2 style="margin:0 0 10px;font-size:18px;color:#15314b;">${this.escapeHtml(label)}</h2>
+            <div style="overflow-x:auto;border:1px solid #dbe4f0;border-radius:12px;">
+              <table style="width:100%;min-width:850px;border-collapse:collapse;font-size:13px;color:#193550;">
+                <thead style="background:#eef4fb;">
+                  <tr>
+                    <th style="padding:10px;text-align:left;">Material</th>
+                    <th style="padding:10px;text-align:right;">Stock total</th>
+                    <th style="padding:10px;text-align:right;">Reserva critica</th>
+                    <th style="padding:10px;text-align:right;">Disponible</th>
+                    <th style="padding:10px;text-align:right;">Minimo</th>
+                    <th style="padding:10px;text-align:left;">Observacion</th>
+                  </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+          </div>`;
+      })
+      .join('');
+
+    return `
+      <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
+        <div style="max-width:920px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(21,49,75,.12);">
+          <div style="padding:26px 30px;background:#c0392b;color:#fff;">
+            <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Justice KPI · Inventario</div>
+            <h1 style="margin:10px 0 0;font-size:25px;">Alerta de stock minimo</h1>
+          </div>
+          <div style="padding:26px 30px;">
+            <p style="font-size:15px;line-height:1.6;">Hola ${this.escapeHtml(recipientLabel)}, ${this.escapeHtml(intro)}</p>
+            <p style="padding:12px 14px;border-radius:10px;background:#fff4e5;color:#754c00;font-size:13px;line-height:1.5;">
+              El stock disponible para esta alerta es: stock total menos stock critico. El stock critico permanece reservado para emergencias.
+            </p>
+            ${warehouseSections}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  private buildScopedInventoryEmailText(
+    items: InventoryAlertItem[],
+    mode: 'bulk' | 'movement',
+  ) {
+    const lines = [
+      mode === 'bulk'
+        ? 'Resultado de carga masiva: materiales bajo stock minimo.'
+        : 'El ultimo movimiento dejo un material bajo stock minimo.',
+      'Disponible para minimo = stock total - reserva critica.',
+      '',
+    ];
+    for (const group of this.groupInventoryItemsByWarehouse(items)) {
+      lines.push(`Bodega: ${group.label}`);
+      for (const item of group.items) {
+        lines.push(
+          `- ${item.producto_label} | total ${item.stock_actual.toFixed(2)} | reserva critica ${item.stock_critico.toFixed(2)} | disponible ${item.stock_disponible_minimo.toFixed(2)} | minimo ${item.stock_min_bodega.toFixed(2)}`,
+        );
+      }
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  private async sendScopedInventoryStockEmails(
+    items: InventoryAlertItem[],
+    mode: 'bulk' | 'movement',
+  ) {
+    if (!items.length) return { sent: 0, failed: 0, recipients: 0 };
+    const scopedRecipients = await this.resolveScopedInventoryRecipients(items);
+    const transporter = await this.getAlertMailTransporter();
+    let sent = 0;
+    let failed = 0;
+
+    if (!transporter) {
+      this.logger.warn(
+        `[InventoryEmail:${mode}] SMTP no configurado; destinatarios resueltos=${scopedRecipients.length}.`,
+      );
+      return { sent, failed, recipients: scopedRecipients.length };
+    }
+
+    for (const { recipient, items: recipientItems } of scopedRecipients) {
+      const subject =
+        mode === 'bulk'
+          ? `[Inventario] Stock minimo por bodega · ${recipientItems.length} material(es)`
+          : `[Inventario] Material bajo stock minimo · ${recipientItems[0].producto_label} · ${recipientItems[0].bodega_label}`;
+      try {
+        await transporter.sendMail({
+          from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+          to: recipient.email,
+          subject,
+          html: this.buildScopedInventoryEmailHtml(
+            recipient,
+            recipientItems,
+            mode,
+          ),
+          text: this.buildScopedInventoryEmailText(recipientItems, mode),
+        });
+        sent += 1;
+      } catch (error: any) {
+        failed += 1;
+        this.logger.warn(
+          `[InventoryEmail:${mode}] Fallo envio a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+        );
+      }
+    }
+
+    await this.writeSecurityLog({
+      typeLog:
+        mode === 'bulk'
+          ? 'ALERTA_STOCK_MASIVA_ENVIADA'
+          : 'ALERTA_STOCK_MOVIMIENTO_ENVIADA',
+      description: `[INVENTARIO:${mode}] Materiales=${items.length}, destinatarios=${scopedRecipients.length}, exitosos=${sent}, fallidos=${failed}`,
+      createdBy: 'system',
+    });
+    return { sent, failed, recipients: scopedRecipients.length };
+  }
+
+  private async buildInventoryReservationEmailItems(
+    workOrder: WorkOrderEntity,
+    reservations: Array<{
+      producto_id: string;
+      bodega_id?: string | null;
+      cantidad: number;
+      observacion?: string | null;
+    }>,
+  ) {
+    const valid = reservations.filter(
+      (item) => item.producto_id && item.bodega_id && item.cantidad > 0,
+    );
+    if (!valid.length) return [] as InventoryReservationEmailItem[];
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      valid.map((item) => item.producto_id),
+      valid.map((item) => String(item.bodega_id)),
+    );
+    return valid.map((item): InventoryReservationEmailItem => {
+      const producto = productMap.get(item.producto_id);
+      const bodega = warehouseMap.get(String(item.bodega_id));
+      return {
+        work_order_id: workOrder.id,
+        work_order_code: workOrder.code,
+        work_order_title: workOrder.title ?? null,
+        producto_id: item.producto_id,
+        producto_label:
+          this.buildProductoLabel(producto) ?? item.producto_id,
+        bodega_id: String(item.bodega_id),
+        bodega_label:
+          this.buildBodegaLabel(bodega) ?? String(item.bodega_id),
+        sucursal_id: bodega?.sucursal_id ?? null,
+        cantidad_reservada: this.toNumeric(item.cantidad),
+        observacion: this.firstNonEmptyString(item.observacion),
+      };
+    });
+  }
+
+  private groupReservationsByWarehouse(items: InventoryReservationEmailItem[]) {
+    const grouped = new Map<
+      string,
+      { label: string; items: InventoryReservationEmailItem[] }
+    >();
+    for (const item of items) {
+      const current = grouped.get(item.bodega_id) ?? {
+        label: item.bodega_label,
+        items: [],
+      };
+      current.items.push(item);
+      grouped.set(item.bodega_id, current);
+    }
+    return [...grouped.values()].sort((a, b) =>
+      a.label.localeCompare(b.label, 'es'),
+    );
+  }
+
+  private buildReservationEmailHtml(
+    recipient: AlertNotificationRecipient,
+    items: InventoryReservationEmailItem[],
+  ) {
+    const sections = this.groupReservationsByWarehouse(items)
+      .map(({ label, items: warehouseItems }) => {
+        const rows = warehouseItems
+          .map(
+            (item) => `
+              <tr>
+                <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.producto_label)}</td>
+                <td style="padding:10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.cantidad_reservada.toFixed(2)}</td>
+                <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.work_order_code)}</td>
+                <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.observacion ?? '')}</td>
+              </tr>`,
+          )
+          .join('');
+        return `
+          <div style="margin-top:22px;">
+            <h2 style="margin:0 0 10px;font-size:18px;">${this.escapeHtml(label)}</h2>
+            <table style="width:100%;border-collapse:collapse;border:1px solid #dbe4f0;font-size:13px;">
+              <thead style="background:#eef4fb;"><tr>
+                <th style="padding:10px;text-align:left;">Material</th>
+                <th style="padding:10px;text-align:right;">Cantidad reservada</th>
+                <th style="padding:10px;text-align:left;">Orden de trabajo</th>
+                <th style="padding:10px;text-align:left;">Observacion</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
+      })
+      .join('');
+    const order = items[0];
+    return `
+      <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
+        <div style="max-width:850px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(21,49,75,.12);">
+          <div style="padding:26px 30px;background:#245b84;color:#fff;">
+            <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Justice KPI · Ordenes de trabajo</div>
+            <h1 style="margin:10px 0 0;font-size:25px;">Reserva de materiales</h1>
+          </div>
+          <div style="padding:26px 30px;">
+            <p style="font-size:15px;line-height:1.6;">Hola ${this.escapeHtml(recipient.displayName || recipient.username || 'usuario')}, se registro una reserva de materiales para la orden <strong>${this.escapeHtml(order.work_order_code)}</strong>${order.work_order_title ? ` · ${this.escapeHtml(order.work_order_title)}` : ''}.</p>
+            ${sections}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  private buildReservationEmailText(items: InventoryReservationEmailItem[]) {
+    const lines = [
+      `Reserva de materiales para la orden ${items[0].work_order_code}${items[0].work_order_title ? ` - ${items[0].work_order_title}` : ''}`,
+      '',
+    ];
+    for (const group of this.groupReservationsByWarehouse(items)) {
+      lines.push(`Bodega: ${group.label}`);
+      for (const item of group.items) {
+        lines.push(
+          `- ${item.producto_label} | cantidad reservada ${item.cantidad_reservada.toFixed(2)} | OT ${item.work_order_code}${item.observacion ? ` | ${item.observacion}` : ''}`,
+        );
+      }
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  private async sendInventoryReservationEmails(
+    workOrder: WorkOrderEntity,
+    reservations: Array<{
+      producto_id: string;
+      bodega_id?: string | null;
+      cantidad: number;
+      observacion?: string | null;
+    }>,
+    actor?: RequestActorContext | null,
+  ) {
+    const items = await this.buildInventoryReservationEmailItems(
+      workOrder,
+      reservations,
+    );
+    if (!items.length) return { sent: 0, failed: 0, recipients: 0 };
+    const scopedRecipients = await this.resolveScopedInventoryRecipients(items);
+    const transporter = await this.getAlertMailTransporter();
+    let sent = 0;
+    let failed = 0;
+    if (transporter) {
+      for (const { recipient, items: recipientItems } of scopedRecipients) {
+        try {
+          await transporter.sendMail({
+            from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+            to: recipient.email,
+            subject: `[Inventario] Reserva de materiales · OT ${workOrder.code}`,
+            html: this.buildReservationEmailHtml(recipient, recipientItems),
+            text: this.buildReservationEmailText(recipientItems),
+          });
+          sent += 1;
+        } catch (error: any) {
+          failed += 1;
+          this.logger.warn(
+            `[InventoryReservationEmail:${workOrder.id}] Fallo envio a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+          );
+        }
+      }
+    } else {
+      this.logger.warn(
+        `[InventoryReservationEmail:${workOrder.id}] SMTP no configurado; destinatarios resueltos=${scopedRecipients.length}.`,
+      );
+    }
+    await this.writeSecurityLog({
+      typeLog: 'RESERVA_MATERIALES_NOTIFICADA',
+      description: `[WO:${workOrder.id}] Reserva de ${items.length} material(es); destinatarios=${scopedRecipients.length}, exitosos=${sent}, fallidos=${failed}`,
+      createdBy: this.firstNonEmptyString(actor?.username, actor?.userId),
+    });
+    return { sent, failed, recipients: scopedRecipients.length };
+  }
+
+  private async notifyInventoryDecreaseForPairs(
+    pairs: Array<{ producto_id: string; bodega_id: string }>,
+  ) {
+    const normalized = pairs.filter(
+      (item) => item.producto_id && item.bodega_id,
+    );
+    if (!normalized.length) return null;
+    const stocks = await this.stockRepo.find({
+      where: normalized.map((item) => ({
+        producto_id: item.producto_id,
+        bodega_id: item.bodega_id,
+        is_deleted: false,
+      })),
+    });
+    return this.recalculateAlertasNow('work-order-material-issue', {
+      stock_ids: stocks.map((stock) => stock.id),
+      movement_direction: 'decrease',
+    });
   }
 
   private resolveEquipmentServiceReminder(daysRemaining: number) {
@@ -10373,7 +10984,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private async syncAlertCandidates(
     candidates: AlertCandidate[],
-    options?: { managedOrigins?: AlertOrigin[] },
+    options?: {
+      managedOrigins?: AlertOrigin[];
+      shouldNotifyCandidate?: (candidate: AlertCandidate) => boolean;
+    },
   ) {
     const managedOrigins: AlertOrigin[] = options?.managedOrigins?.length
       ? options.managedOrigins
@@ -10469,7 +11083,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           estado: 'ABIERTA',
         }),
       );
-      await this.dispatchAlertTriggeredNotifications(createdRow);
+      if (options?.shouldNotifyCandidate?.(candidate) !== false) {
+        await this.dispatchAlertTriggeredNotifications(createdRow);
+      }
       created += 1;
     }
 
@@ -19834,7 +20450,47 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async recalculateAlertas(source = 'manual') {
+  private async dispatchInventoryRecalculationEmails(
+    candidates: AlertCandidate[],
+    source: string,
+    context: AlertRecalculationContext,
+  ) {
+    const inventoryCandidate = candidates.find(
+      (candidate) => candidate.origen === 'INVENTARIO',
+    );
+    const allItems = inventoryCandidate
+      ? this.getInventoryAlertItems(inventoryCandidate.payload_json)
+      : [];
+    const normalizedSource = String(source || '').trim().toLowerCase();
+
+    if (normalizedSource === 'inventory-kardex-import-completed') {
+      return this.sendScopedInventoryStockEmails(allItems, 'bulk');
+    }
+
+    if (
+      String(context.movement_direction || '').trim().toLowerCase() !==
+      'decrease'
+    ) {
+      return null;
+    }
+
+    const stockIds = new Set(
+      [context.stock_id, ...(context.stock_ids ?? [])]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean),
+    );
+    if (!stockIds.size) return null;
+
+    const affectedItems = allItems.filter((item) =>
+      stockIds.has(item.stock_id),
+    );
+    return this.sendScopedInventoryStockEmails(affectedItems, 'movement');
+  }
+
+  async recalculateAlertas(
+    source = 'manual',
+    context: AlertRecalculationContext = {},
+  ) {
     const inventoryImportRunning =
       this.inventoryImportSuppressed || (await this.isInventoryImportRunning());
     const managedOrigins: AlertOrigin[] = inventoryImportRunning
@@ -19856,11 +20512,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const candidates = await this.buildAlertCandidates({
       includeInventory: !inventoryImportRunning,
     });
-    const stats = await this.syncAlertCandidates(candidates, { managedOrigins });
+    const stats = await this.syncAlertCandidates(candidates, {
+      managedOrigins,
+      shouldNotifyCandidate: (candidate) => candidate.origen !== 'INVENTARIO',
+    });
+    const inventoryEmail = inventoryImportRunning
+      ? null
+      : await this.dispatchInventoryRecalculationEmails(
+          candidates,
+          source,
+          context,
+        );
     return this.wrap(
       {
         source,
         inventory_import_running: inventoryImportRunning,
+        inventory_email: inventoryEmail,
         ...stats,
       },
       'Alertas recalculadas',
@@ -21726,6 +22393,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await safePostCommit('la sincronizacion de alertas de la OT', () =>
       this.syncAlertsForWorkOrder(saved),
     );
+    if (dto.consumo_pendiente) {
+      await safePostCommit('la notificacion de reserva de materiales', () =>
+        this.sendInventoryReservationEmails(
+          saved,
+          [dto.consumo_pendiente!],
+          actor,
+        ),
+      );
+    }
+    if (dto.salida_materiales_pendiente?.items?.length) {
+      await safePostCommit('la alerta de stock por salida de materiales', () =>
+        this.notifyInventoryDecreaseForPairs(
+          dto.salida_materiales_pendiente!.items.map((item) => ({
+            producto_id: item.producto_id,
+            bodega_id: item.bodega_id,
+          })),
+        ),
+      );
+    }
     const enriched =
       (await safePostCommit('el enriquecimiento de la OT guardada', () =>
         this.enrichWorkOrder(saved, actor),
@@ -23182,6 +23868,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
     });
+    try {
+      await this.sendInventoryReservationEmails(workOrder, [dto], actor);
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo notificar la reserva de materiales de la OT ${workOrder.code}: ${error?.message ?? 'desconocido'}`,
+      );
+    }
     return this.wrap(
       {
         ...this.mapConsumoWithCatalogs(
@@ -23440,6 +24133,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         description: `[WO:${workOrderId}] Emisión de materiales por total ${total}`,
         typeLog: 'MATERIALES',
       });
+      try {
+        await this.notifyInventoryDecreaseForPairs(
+          dto.items.map((item) => ({
+            producto_id: item.producto_id,
+            bodega_id: item.bodega_id,
+          })),
+        );
+      } catch (error: any) {
+        this.logger.warn(
+          `No se pudo notificar el stock minimo luego de la salida de materiales de la OT ${workOrder.code}: ${error?.message ?? 'desconocido'}`,
+        );
+      }
       return this.wrap(
         { entrega_id: em.id, movimiento_id: mov.id, total },
         'Materiales entregados',
