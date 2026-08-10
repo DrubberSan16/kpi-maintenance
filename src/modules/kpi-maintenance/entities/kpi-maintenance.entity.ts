@@ -538,6 +538,8 @@ export class ProgramacionMensualDetalleEntity {
   @Column({ type: 'text', nullable: true }) valor_normalizado?: string | null;
   @Column({ type: 'text', nullable: true }) tipo_mantenimiento?: string | null;
   @Column({ type: 'integer', nullable: true }) frecuencia_horas?: number | null;
+  @Column('numeric', { precision: 10, scale: 2, nullable: true })
+  horas_mantenimiento?: number | null;
   @Column({ type: 'uuid', nullable: true }) procedimiento_id?: string | null;
   @Column({ type: 'uuid', nullable: true }) plan_id?: string | null;
   @Column({ default: false }) es_sincronizable: boolean;

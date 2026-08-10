@@ -622,6 +622,15 @@ export class CreateProgramacionMensualDetalleDto {
   valor_crudo: string;
 
   @ApiPropertyOptional({
+    description: 'Duracion efectiva del mantenimiento para este dia, en horas',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_mantenimiento?: number;
+
+  @ApiPropertyOptional({
     description: 'ID de la plantilla MPG a asociar explícitamente',
     format: 'uuid',
   })
@@ -681,6 +690,16 @@ export class UpdateProgramacionMensualDetalleDto {
   @IsOptional()
   @IsObject()
   payload_json?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description: 'Duracion efectiva del mantenimiento para este dia, en horas',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_mantenimiento?: number;
+
   @ApiPropertyOptional({
     description: 'Horometro actual del equipo para sincronizarlo con la OT vinculada',
     type: Number,
@@ -713,6 +732,15 @@ export class ReprogramProgramacionMensualDetalleDto {
   @IsOptional()
   @IsString()
   valor_crudo?: string;
+
+  @ApiPropertyOptional({
+    description: 'Duracion efectiva del mantenimiento para este dia, en horas',
+    type: Number,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  horas_mantenimiento?: number;
 
   @ApiPropertyOptional({
     description: 'ID de la plantilla MPG a asociar explícitamente',

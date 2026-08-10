@@ -808,7 +808,7 @@ export class KpiMaintenanceController {
 
   @ApiTags('Programaciones')
   @ApiOperation({
-    summary: 'Importar programación mensual MPG desde Excel',
+    summary: 'Importar programación mensual desde PDF, Word o Excel',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -830,7 +830,7 @@ export class KpiMaintenanceController {
     @Body('sucursal_id') sucursalId?: string,
     @Req() req?: any,
   ) {
-    return this.service.importProgramacionMensualWorkbook(file, {
+    return this.service.importProgramacionMensualDocument(file, {
       requested_by: requestedBy,
       requested_by_email: requestedByEmail,
       requested_user_id: requestedUserId,
