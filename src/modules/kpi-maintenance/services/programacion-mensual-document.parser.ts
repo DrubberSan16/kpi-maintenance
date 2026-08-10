@@ -503,10 +503,11 @@ export async function parseMonthlyScheduleDocument(
   buffer: Buffer,
   fileName: string,
 ): Promise<MonthlyScheduleDocumentResult> {
+  const isPdfContent = buffer.subarray(0, 5).toString('ascii') === '%PDF-';
   const extension = String(fileName || '')
     .toLowerCase()
     .match(/\.[^.]+$/)?.[0];
-  if (extension === '.pdf') return parsePdf(buffer);
+  if (isPdfContent || extension === '.pdf') return parsePdf(buffer);
   if (extension === '.docx') return parseWord(buffer);
   if (['.xlsx', '.xls', '.csv'].includes(extension || ''))
     return parseExcel(buffer);
