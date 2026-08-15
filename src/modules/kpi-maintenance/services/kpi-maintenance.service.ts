@@ -18678,10 +18678,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             )
            AND transfer_det.is_deleted = false
           WHERE kardex.is_deleted = false
-            AND kardex.fecha BETWEEN $1 AND $2
+            AND kardex.fecha >= $1::date
+            AND kardex.fecha < ($1::date + INTERVAL '1 day')
           ORDER BY kardex.fecha DESC, kardex.created_at DESC
         `,
-        [dateRange.fromDate.toISOString(), dateRange.toDate.toISOString()],
+        [dateRange.fecha],
       ),
     ]);
 
@@ -18761,20 +18762,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const createdCandidates = await this.woRepo
       .createQueryBuilder('wo')
       .where('wo.is_deleted = false')
-      .andWhere('wo.created_at BETWEEN :from AND :to', {
-        from: dateRange.fromDate.toISOString(),
-        to: dateRange.toDate.toISOString(),
+      .andWhere('wo.created_at >= CAST(:fecha AS date)', {
+        fecha: dateRange.fecha,
       })
+      .andWhere(
+        "wo.created_at < CAST(:fecha AS date) + INTERVAL '1 day'",
+        { fecha: dateRange.fecha },
+      )
       .orderBy('wo.created_at', 'DESC')
       .getMany();
     const closedCandidates = await this.woRepo
       .createQueryBuilder('wo')
       .where('wo.is_deleted = false')
       .andWhere('wo.closed_at IS NOT NULL')
-      .andWhere('wo.closed_at BETWEEN :from AND :to', {
-        from: dateRange.fromDate.toISOString(),
-        to: dateRange.toDate.toISOString(),
+      .andWhere('wo.closed_at >= CAST(:fecha AS date)', {
+        fecha: dateRange.fecha,
       })
+      .andWhere(
+        "wo.closed_at < CAST(:fecha AS date) + INTERVAL '1 day'",
+        { fecha: dateRange.fecha },
+      )
       .orderBy('wo.closed_at', 'DESC')
       .getMany();
 
@@ -18951,8 +18958,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         generated_at: new Date().toISOString(),
         filters: {
           fecha: dateRange.fecha,
-          from: dateRange.fromDate.toISOString().slice(0, 10),
-          to: dateRange.toDate.toISOString().slice(0, 10),
+          from: dateRange.fecha,
+          to: dateRange.fecha,
           label: dateRange.label,
         },
         summary: {
