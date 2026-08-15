@@ -1717,13 +1717,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const raw = this.safeDateOnlyString(value) ?? String(value || '').trim();
     if (!raw) return null;
+    const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+    // Interpret bare date strings in Ecuador timezone (UTC-5) to avoid day-shift
+    // when converting to ISO instants for DB queries.
+    const ECUADOR_OFFSET = '-05:00';
     const parsed = new Date(
-      /^\d{4}-\d{2}-\d{2}$/.test(raw)
-        ? `${raw}T${options?.endOfDay ? '23:59:59.999' : '00:00:00.000'}`
+      isDateOnly
+        ? `${raw}T${options?.endOfDay ? '23:59:59.999' : '00:00:00.000'}${ECUADOR_OFFSET}`
         : raw,
     );
     if (Number.isNaN(parsed.getTime())) return null;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    if (isDateOnly) {
       parsed.setHours(
         options?.endOfDay ? 23 : 0,
         options?.endOfDay ? 59 : 0,
