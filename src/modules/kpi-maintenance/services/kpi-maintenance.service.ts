@@ -18652,6 +18652,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             kardex.created_at AS created_at,
             producto.codigo AS producto_codigo,
             producto.nombre AS producto_nombre,
+            producto.descripcion AS producto_descripcion,
             bodega.codigo AS bodega_codigo,
             bodega.nombre AS bodega_nombre,
             movimiento.id AS movimiento_id,
@@ -18727,6 +18728,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           producto_codigo: this.firstNonEmptyString(row?.producto_codigo) ?? null,
           producto_nombre:
             this.firstNonEmptyString(row?.producto_nombre) ?? 'Sin material',
+          producto_descripcion:
+            this.firstNonEmptyString(row?.producto_descripcion) ?? null,
+          producto_label: (() => {
+            const codigo = this.firstNonEmptyString(row?.producto_codigo);
+            const nombre =
+              this.firstNonEmptyString(row?.producto_nombre) ?? 'Sin material';
+            const descripcion = this.firstNonEmptyString(
+              row?.producto_descripcion,
+            );
+            const material = [codigo, nombre].filter(Boolean).join(' - ');
+            return descripcion ? `${material} (${descripcion})` : material;
+          })(),
           bodega_id: warehouseId || null,
           bodega_label:
             warehouseLabelMap.get(warehouseId) ??
