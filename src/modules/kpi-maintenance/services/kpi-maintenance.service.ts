@@ -983,8 +983,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!producto) return null;
     const codigo = String(producto.codigo || '').trim();
     const nombre = String(producto.nombre || '').trim();
-    if (codigo && nombre) return `${codigo} - ${nombre}`;
-    return nombre || codigo || null;
+    const descripcion = String(producto.descripcion || '').trim();
+    const material = codigo && nombre ? `${codigo}-${nombre}` : nombre || codigo;
+    if (!material) return null;
+    return descripcion ? `${material} (${descripcion})` : material;
   }
 
   private buildBodegaLabel(bodega?: Partial<BodegaEntity> | null) {
@@ -18737,7 +18739,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             const descripcion = this.firstNonEmptyString(
               row?.producto_descripcion,
             );
-            const material = [codigo, nombre].filter(Boolean).join(' - ');
+            const material = codigo && nombre ? `${codigo}-${nombre}` : nombre || codigo;
             return descripcion ? `${material} (${descripcion})` : material;
           })(),
           bodega_id: warehouseId || null,
