@@ -18684,6 +18684,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           WHERE kardex.is_deleted = false
             AND kardex.fecha >= $1::date
             AND kardex.fecha < ($1::date + INTERVAL '1 day')
+            AND (
+              movimiento.id IS NULL
+              OR (
+                UPPER(TRIM(COALESCE(movimiento.tipo_documento, ''))) NOT LIKE 'ANULACION_TRANSFERENCIA%'
+                AND UPPER(TRIM(COALESCE(movimiento.estado, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+                AND UPPER(TRIM(COALESCE(movimiento.status, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM kpi_inventory.tb_transferencia_bodega transferencia_anulada
+              LEFT JOIN kpi_inventory.tb_transferencia_bodega_det transferencia_det_anulada
+                ON transferencia_det_anulada.transferencia_bodega_id = transferencia_anulada.id
+              WHERE (
+                  transferencia_anulada.movimiento_salida_id = kardex.movimiento_id
+                  OR transferencia_anulada.movimiento_ingreso_id = kardex.movimiento_id
+                  OR transferencia_det_anulada.kardex_salida_id = kardex.id
+                  OR transferencia_det_anulada.kardex_ingreso_id = kardex.id
+                )
+                AND (
+                  transferencia_anulada.is_deleted = true
+                  OR UPPER(TRIM(COALESCE(transferencia_anulada.estado, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+                  OR UPPER(TRIM(COALESCE(transferencia_anulada.status, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+                )
+            )
           ORDER BY kardex.fecha DESC, kardex.created_at DESC
         `,
         [dateRange.fecha],
