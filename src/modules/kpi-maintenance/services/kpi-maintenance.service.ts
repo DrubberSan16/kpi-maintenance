@@ -18644,12 +18644,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `
           SELECT
             kardex.id AS kardex_id,
-            kardex.fecha AS fecha,
+            kardex.fecha::date::text AS fecha,
             kardex.producto_id AS producto_id,
             kardex.bodega_id AS bodega_id,
             kardex.tipo_movimiento AS tipo_movimiento,
             kardex.entrada_cantidad AS entrada_cantidad,
             kardex.salida_cantidad AS salida_cantidad,
+            kardex.saldo_cantidad AS stock_actual,
             kardex.observacion AS kardex_observacion,
             kardex.created_at AS created_at,
             producto.codigo AS producto_codigo,
@@ -18710,6 +18711,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .map((row: any) => {
         const entrada = this.toNumeric(row?.entrada_cantidad, 0);
         const salida = this.toNumeric(row?.salida_cantidad, 0);
+        const stockActual = this.toNumeric(row?.stock_actual, 0);
+        const stockAnterior = stockActual - entrada + salida;
         const warehouseId = String(row?.bodega_id || '').trim();
         const workOrderId = String(row?.work_order_id || '').trim() || null;
         const hasPurchaseOrigin = Boolean(
@@ -18724,7 +18727,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
         return {
           kardex_id: String(row?.kardex_id || '').trim(),
-          fecha: row?.fecha ? new Date(row.fecha).toISOString() : null,
+          fecha: this.firstNonEmptyString(row?.fecha) ?? null,
           created_at: row?.created_at ? new Date(row.created_at).toISOString() : null,
           producto_id: String(row?.producto_id || '').trim() || null,
           producto_codigo: this.firstNonEmptyString(row?.producto_codigo) ?? null,
@@ -18749,6 +18752,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             'Sin bodega',
           entrada_cantidad: Number(entrada.toFixed(4)),
           salida_cantidad: Number(salida.toFixed(4)),
+          stock_anterior: Number(stockAnterior.toFixed(4)),
+          stock_actual: Number(stockActual.toFixed(4)),
           tipo_movimiento:
             this.firstNonEmptyString(row?.tipo_movimiento) ?? 'SIN_TIPO',
           documento:
@@ -18819,11 +18824,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ].filter(Boolean),
       ),
     ];
-    const relatedWorkOrders = relatedWorkOrderIds.length
-      ? await this.woRepo.find({
-          where: { id: In(relatedWorkOrderIds), is_deleted: false },
-        })
-      : [];
+    const [relatedWorkOrders, relatedWarehouseReservations] = await Promise.all([
+      relatedWorkOrderIds.length
+        ? this.woRepo.find({
+            where: { id: In(relatedWorkOrderIds), is_deleted: false },
+          })
+        : Promise.resolve([] as WorkOrderEntity[]),
+      relatedWorkOrderIds.length
+        ? this.reservaRepo.find({
+            where: { work_order_id: In(relatedWorkOrderIds), is_deleted: false },
+          })
+        : Promise.resolve([] as ReservaStockEntity[]),
+    ]);
     const relatedEquipmentIds = [
       ...new Set(
         relatedWorkOrders
@@ -18841,6 +18853,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     const workOrderMap = new Map(
       relatedWorkOrders.map((row) => [String(row.id || '').trim(), row]),
+    );
+    const workOrderWarehouseIds = new Map<string, Set<string>>();
+    const addWorkOrderWarehouse = (workOrderId: unknown, warehouseId: unknown) => {
+      const normalizedWorkOrderId = String(workOrderId || '').trim();
+      const normalizedWarehouseId = String(warehouseId || '').trim();
+      if (!normalizedWorkOrderId || !normalizedWarehouseId) return;
+      const warehouseIds = workOrderWarehouseIds.get(normalizedWorkOrderId) ?? new Set<string>();
+      warehouseIds.add(normalizedWarehouseId);
+      workOrderWarehouseIds.set(normalizedWorkOrderId, warehouseIds);
+    };
+    normalizedMovementRows.forEach((row) =>
+      addWorkOrderWarehouse(row.work_order_id, row.bodega_id),
+    );
+    relatedWarehouseReservations.forEach((row) =>
+      addWorkOrderWarehouse(row.work_order_id, row.bodega_id),
     );
 
     const movementDetails = normalizedMovementRows.map((row) => {
@@ -18953,6 +18980,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const equipment = workOrder.equipment_id
         ? equipmentMap.get(String(workOrder.equipment_id || '').trim())
         : null;
+      const bodegaIds = [...(workOrderWarehouseIds.get(workOrder.id) ?? [])]
+        .filter((warehouseId) => visibleWarehouseIds.has(warehouseId));
       return {
         work_order_id: workOrder.id,
         code: workOrder.code,
@@ -18962,6 +18991,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment_label:
           [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
           'Sin equipo',
+        bodega_ids: bodegaIds,
+        bodega_label:
+          bodegaIds
+            .map((warehouseId) => warehouseLabelMap.get(warehouseId))
+            .filter(Boolean)
+            .join(' | ') || 'Sin bodega asociada',
         fecha_evento: workOrder[dateField]
           ? new Date(workOrder[dateField] as Date).toISOString()
           : null,
@@ -18991,6 +19026,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
         source_breakdown,
         warehouse_breakdown,
+        warehouse_options: visibleWarehouses.map((row) => ({
+          value: row.id,
+          title: this.buildBodegaLabel(row) ?? 'Sin bodega',
+        })),
         movements: movementDetails.slice(0, 120),
         work_orders_pending: visiblePendingOrders.map((row) =>
           mapDailyWorkOrderRow(row, 'created_at'),
