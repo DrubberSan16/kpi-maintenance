@@ -279,7 +279,7 @@ export class KpiMaintenanceController {
     return this.service.listEquipos(query, getSucursalScopeId(req));
   }
   @ApiTags('Equipos')
-  @ApiOperation({ summary: 'Obtener siguiente cÃ³digo autogenerado de equipo' })
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de equipo' })
   @Get('equipos/next-code')
   getNextEquipoCode() {
     return this.service.getNextEquipoCode();
@@ -406,7 +406,7 @@ export class KpiMaintenanceController {
   @ApiOperation({ summary: 'Obtener locación por ID' })
   @ApiParam({ name: 'id', description: 'ID de la locación', required: true })
   @ApiTags('Locaciones')
-  @ApiOperation({ summary: 'Obtener siguiente cÃ³digo autogenerado de ubicaciÃ³n' })
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de ubicación' })
   @Get('locaciones/code/next')
   getNextLocationCode() {
     return this.service.getNextLocationCode();
@@ -931,7 +931,7 @@ export class KpiMaintenanceController {
   @ApiTags('Componentes')
   @ApiOperation({ summary: 'Obtener componente por ID' })
   @ApiTags('Componentes')
-  @ApiOperation({ summary: 'Obtener siguiente cÃ³digo autogenerado de componente' })
+  @ApiOperation({ summary: 'Obtener siguiente código autogenerado de componente' })
   @Get('componentes/code/next')
   getNextComponenteCode() {
     return this.service.getNextComponenteCode();
@@ -1487,7 +1487,7 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({
     summary:
-      'Obtener reportes consolidados del sistema con filtros por fecha, bodega y agrupaciÃ³n',
+      'Obtener reportes consolidados del sistema con filtros por fecha, bodega y agrupación',
   })
   @Get('inteligencia/reportes-sistema')
   getSystemReports(@Query() query: SystemReportsQueryDto, @Req() req: any) {

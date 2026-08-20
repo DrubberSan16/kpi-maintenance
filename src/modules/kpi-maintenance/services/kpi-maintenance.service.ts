@@ -4301,35 +4301,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async getNextEquipoCode() {
     return this.wrap(
       { code: await this.generateNextEquipoCode() },
-      'Siguiente cÃ³digo de equipo generado',
+      'Siguiente código de equipo generado',
     );
   }
 
   async getNextEquipoTipoCode() {
     return this.wrap(
       { code: await this.generateNextEquipoTipoCode() },
-      'Siguiente cÃ³digo de tipo de equipo generado',
+      'Siguiente código de tipo de equipo generado',
     );
   }
 
   async getNextLocationCode() {
     return this.wrap(
       { code: await this.generateNextLocationCode() },
-      'Siguiente cÃ³digo de ubicaciÃ³n generado',
+      'Siguiente código de ubicación generado',
     );
   }
 
   async getNextPlanCode() {
     return this.wrap(
       { code: await this.generateNextPlanCode() },
-      'Siguiente cÃ³digo de plan generado',
+      'Siguiente código de plan generado',
     );
   }
 
   async getNextComponenteCode() {
     return this.wrap(
       { code: await this.generateNextComponenteCode() },
-      'Siguiente cÃ³digo de componente generado',
+      'Siguiente código de componente generado',
     );
   }
 
@@ -4479,7 +4479,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       codeWasReassigned: generatedCode !== candidate,
       reassignmentReason: existing.is_deleted
         ? deletedMessage
-        : 'El cÃ³digo solicitado ya estaba en uso.',
+        : 'El código solicitado ya estaba en uso.',
     };
   }
 
@@ -7974,7 +7974,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipoModelo,
       ]
         .filter(Boolean)
-        .join(' Â· '),
+        .join(' · '),
       lubricante_lookup_key: this.normalizeSearchToken(
         [lubricanteCodigo, lubricante, marcaLubricante].filter(Boolean).join(' '),
       ),
@@ -12517,7 +12517,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.equipoRepo,
       dto.codigo,
       () => this.generateNextEquipoCode(),
-      'El cÃ³digo solicitado existÃ­a en un equipo eliminado lÃ³gicamente.',
+      'El código solicitado existía en un equipo eliminado lógicamente.',
     );
     let saved: EquipoEntity | null = null;
 
@@ -12557,14 +12557,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           codeWasReassigned: true,
           reassignmentReason:
             resolution.reassignmentReason ||
-            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+            'El código solicitado ya no estaba disponible al momento de guardar.',
         };
       }
     }
 
     if (!saved) {
       throw new ConflictException(
-        'No se pudo generar un cÃ³digo Ãºnico para el equipo.',
+        'No se pudo generar un código único para el equipo.',
       );
     }
     if (Array.isArray(dto.componentes)) {
@@ -12659,7 +12659,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.equipoTipoRepo,
       dto.codigo,
       () => this.generateNextEquipoTipoCode(),
-      'El cÃ³digo solicitado existÃ­a en un tipo de equipo eliminado lÃ³gicamente.',
+      'El código solicitado existía en un tipo de equipo eliminado lógicamente.',
     );
     let saved: EquipoTipoEntity | null = null;
 
@@ -12683,14 +12683,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           codeWasReassigned: true,
           reassignmentReason:
             resolution.reassignmentReason ||
-            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+            'El código solicitado ya no estaba disponible al momento de guardar.',
         };
       }
     }
 
     if (!saved) {
       throw new ConflictException(
-        'No se pudo generar un cÃ³digo Ãºnico para el tipo de equipo.',
+        'No se pudo generar un código único para el tipo de equipo.',
       );
     }
 
@@ -12789,7 +12789,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.locationRepo,
       dto.codigo,
       () => this.generateNextLocationCode(),
-      'El cÃ³digo solicitado existÃ­a en una ubicaciÃ³n eliminada lÃ³gicamente.',
+      'El código solicitado existía en una ubicación eliminada lógicamente.',
     );
     let saved: LocationEntity | null = null;
 
@@ -12813,14 +12813,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           codeWasReassigned: true,
           reassignmentReason:
             resolution.reassignmentReason ||
-            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+            'El código solicitado ya no estaba disponible al momento de guardar.',
         };
       }
     }
 
     if (!saved) {
       throw new ConflictException(
-        'No se pudo generar un cÃ³digo Ãºnico para la ubicaciÃ³n.',
+        'No se pudo generar un código único para la ubicación.',
       );
     }
 
@@ -13022,7 +13022,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.planRepo,
       dto.codigo,
       () => this.generateNextPlanCode(),
-      'El cÃ³digo solicitado existÃ­a en un plan eliminado lÃ³gicamente.',
+      'El código solicitado existía en un plan eliminado lógicamente.',
     );
     let saved: PlanMantenimientoEntity | null = null;
 
@@ -13046,14 +13046,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           codeWasReassigned: true,
           reassignmentReason:
             resolution.reassignmentReason ||
-            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+            'El código solicitado ya no estaba disponible al momento de guardar.',
         };
       }
     }
 
     if (!saved) {
       throw new ConflictException(
-        'No se pudo generar un cÃ³digo Ãºnico para el plan.',
+        'No se pudo generar un código único para el plan.',
       );
     }
 
@@ -13268,7 +13268,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         scope &&
         !scope.equipmentIds.has(String(row.equipo_id || '').trim())
       ) {
-        throw new NotFoundException('ProgramaciÃ³n no encontrada');
+        throw new NotFoundException('Programación no encontrada');
       }
     }
     return this.wrap(
@@ -13703,7 +13703,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.equipoComponenteRepo,
       dto.codigo,
       () => this.generateNextComponenteCode(),
-      'El cÃ³digo solicitado existÃ­a en un componente eliminado lÃ³gicamente.',
+      'El código solicitado existía en un componente eliminado lógicamente.',
     );
     let saved: EquipoComponenteEntity | null = null;
 
@@ -13732,14 +13732,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           codeWasReassigned: true,
           reassignmentReason:
             resolution.reassignmentReason ||
-            'El cÃ³digo solicitado ya no estaba disponible al momento de guardar.',
+            'El código solicitado ya no estaba disponible al momento de guardar.',
         };
       }
     }
 
     if (!saved) {
       throw new ConflictException(
-        'No se pudo generar un cÃ³digo Ãºnico para el componente.',
+        'No se pudo generar un código único para el componente.',
       );
     }
 

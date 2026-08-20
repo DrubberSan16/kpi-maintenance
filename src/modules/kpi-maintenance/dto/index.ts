@@ -153,7 +153,7 @@ export class CreateEquipoDto {
   @IsString()
   @IsNotEmpty()
   nombre: string;
-  @ApiPropertyOptional({ description: 'Nombre real o denominaciÃ³n completa del equipo' })
+  @ApiPropertyOptional({ description: 'Nombre real o denominación completa del equipo' })
   @IsOptional()
   @IsString()
   nombre_real?: string;
@@ -161,7 +161,7 @@ export class CreateEquipoDto {
   @IsOptional()
   @IsString()
   modelo?: string;
-  @ApiPropertyOptional({ description: 'CÃ³digo o referencia del lubricante esperado para el equipo' })
+  @ApiPropertyOptional({ description: 'Código o referencia del lubricante esperado para el equipo' })
   @IsOptional()
   @IsString()
   codigo_lubricante?: string;
@@ -1755,19 +1755,19 @@ export class AnalisisLubricanteDashboardQueryDto {
   @IsOptional()
   @IsString()
   marca_lubricante?: string;
-  @ApiPropertyOptional({ description: 'ID del equipo asociado al anÃ¡lisis' })
+  @ApiPropertyOptional({ description: 'ID del equipo asociado al análisis' })
   @IsOptional()
   @IsString()
   equipo_id?: string;
-  @ApiPropertyOptional({ description: 'CÃ³digo del equipo asociado al anÃ¡lisis' })
+  @ApiPropertyOptional({ description: 'Código del equipo asociado al análisis' })
   @IsOptional()
   @IsString()
   equipo_codigo?: string;
-  @ApiPropertyOptional({ description: 'Nombre del equipo asociado al anÃ¡lisis' })
+  @ApiPropertyOptional({ description: 'Nombre del equipo asociado al análisis' })
   @IsOptional()
   @IsString()
   equipo_nombre?: string;
-  @ApiPropertyOptional({ description: 'Modelo del equipo asociado al anÃ¡lisis' })
+  @ApiPropertyOptional({ description: 'Modelo del equipo asociado al análisis' })
   @IsOptional()
   @IsString()
   equipo_modelo?: string;
@@ -2281,7 +2281,7 @@ export class SystemReportsQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'AgrupaciÃ³n sugerida del reporte: OT, BODEGA, EQUIPO, RESPONSABLE, MATERIAL o MES',
+      'Agrupación sugerida del reporte: OT, BODEGA, EQUIPO, RESPONSABLE, MATERIAL o MES',
   })
   @IsOptional()
   @IsString()
