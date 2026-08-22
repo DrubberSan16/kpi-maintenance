@@ -11577,6 +11577,290 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return nextPayload;
   }
 
+  /**
+   * Modo y origen con los que se registra la programacion generada desde la
+   * cabecera de una OT de tipo CEBADO. `CALENDARIO` es obligatorio: en cualquier
+   * otro modo `recalculateProgramacionFields` recalcularia `proxima_fecha` a
+   * partir de la frecuencia del plan y pisaria la fecha capturada por el usuario.
+   */
+  private readonly CEBADO_PROGRAMACION_MODE = 'CALENDARIO';
+  private readonly CEBADO_PROGRAMACION_ORIGIN = 'ORDEN_TRABAJO';
+
+  private normalizeDateOnlyInput(value: unknown) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const isoMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+    if (isoMatch) {
+      const candidate = `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+      const parsed = new Date(`${candidate}T00:00:00Z`);
+      if (Number.isNaN(parsed.getTime())) return null;
+      // descarta fechas inexistentes como 2026-02-30, que Date desplaza en silencio
+      return parsed.toISOString().slice(0, 10) === candidate ? candidate : null;
+    }
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  private readWorkOrderProgramacionDate(
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    return this.firstNonEmptyString(
+      (payload ?? {}).fecha_programacion,
+      (payload ?? {}).fecha_programada,
+    );
+  }
+
+  /**
+   * Las OT de tipo CEBADO exigen fecha de programacion en la cabecera: es la
+   * fecha con la que se genera automaticamente su programacion. Normaliza el
+   * valor dentro del propio payload para que quede guardado como `YYYY-MM-DD`.
+   */
+  private applyCebadoProgramacionDate(
+    maintenanceKind: unknown,
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    if (this.normalizeMaintenanceKind(maintenanceKind) !== 'CEBADO') {
+      return null;
+    }
+    const rawValue = this.readWorkOrderProgramacionDate(payload);
+    if (!rawValue) {
+      throw new BadRequestException(
+        'La fecha de programacion es obligatoria en las ordenes de trabajo de tipo Cebado.',
+      );
+    }
+    const normalized = this.normalizeDateOnlyInput(rawValue);
+    if (!normalized) {
+      throw new BadRequestException(
+        `La fecha de programacion "${rawValue}" no es una fecha valida.`,
+      );
+    }
+    if (payload && typeof payload === 'object') {
+      payload.fecha_programacion = normalized;
+    }
+    return normalized;
+  }
+
+  /**
+   * La sincronizacion automatica de programacion (syncCebadoProgramacionFromWorkOrder)
+   * requiere equipo y plantilla MPG y, si faltan, se limita a devolver null en
+   * silencio. Sin esta validacion previa, una OT de Cebado podia guardarse con
+   * fecha de programacion pero sin equipo/plan, quedando en un estado parcial
+   * donde nunca se genera su programacion. createWorkOrder y updateWorkOrder
+   * deben llamar a este metodo antes de persistir para evitar ese estado.
+   */
+  private assertCebadoWorkOrderHasRequiredLinks(
+    maintenanceKind: unknown,
+    equipmentId: unknown,
+    planId: unknown,
+  ) {
+    if (this.normalizeMaintenanceKind(maintenanceKind) !== 'CEBADO') {
+      return;
+    }
+    if (!this.firstNonEmptyString(equipmentId)) {
+      throw new BadRequestException(
+        'El equipo es obligatorio en las ordenes de trabajo de tipo Cebado.',
+      );
+    }
+    if (!this.firstNonEmptyString(planId)) {
+      throw new BadRequestException(
+        'Debes seleccionar una plantilla MPG en las ordenes de trabajo de tipo Cebado.',
+      );
+    }
+  }
+
+  /**
+   * Mantiene sincronizada la programacion de una OT de tipo CEBADO con la fecha
+   * capturada en su cabecera: si no existe la crea en el modulo de programacion,
+   * y si ya existe la reprograma. Devuelve null cuando no hay nada que
+   * sincronizar (OT de otro tipo o sin fecha).
+   */
+  private async syncCebadoProgramacionFromWorkOrder(
+    workOrder: WorkOrderEntity,
+    fechaProgramacion: string | null,
+    actor?: RequestActorContext | null,
+    manager?: EntityManager,
+  ) {
+    if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) !== 'CEBADO') {
+      return null;
+    }
+    if (!fechaProgramacion) return null;
+    const equipoId = this.firstNonEmptyString(workOrder.equipment_id);
+    const planId = this.firstNonEmptyString(workOrder.plan_id);
+    if (!equipoId || !planId) return null;
+
+    const repo =
+      manager?.getRepository(ProgramacionPlanEntity) ?? this.programacionRepo;
+    const linked = await repo.find({
+      where: { work_order_id: workOrder.id, is_deleted: false },
+    });
+    const existing = linked.find((row) => row.activo) ?? linked[0] ?? null;
+
+    const duplicate = linked.find(
+      (row) =>
+        row.id !== existing?.id &&
+        row.activo &&
+        this.safeDateOnlyString(row.proxima_fecha) === fechaProgramacion,
+    );
+    if (duplicate) {
+      throw new BadRequestException(
+        'La orden de trabajo ya está programada para ese día.',
+      );
+    }
+
+    const previousPayload = (existing?.payload_json ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const nextPayload = this.mergeProgramacionWorkOrderPayload(
+      {
+        ...previousPayload,
+        generada_desde_orden_trabajo: true,
+        fecha_programacion_origen: fechaProgramacion,
+        actor_user_id:
+          this.firstNonEmptyString(
+            actor?.userId,
+            previousPayload.actor_user_id,
+          ) ?? null,
+        actor_username:
+          this.firstNonEmptyString(
+            actor?.username,
+            previousPayload.actor_username,
+            workOrder.created_by,
+          ) ?? null,
+      },
+      workOrder,
+    );
+
+    if (existing) {
+      const previousDate = this.safeDateOnlyString(existing.proxima_fecha);
+      existing.equipo_id = equipoId;
+      existing.plan_id = planId;
+      existing.proxima_fecha = fechaProgramacion;
+      existing.modo_programacion = this.CEBADO_PROGRAMACION_MODE;
+      existing.origen_programacion = this.CEBADO_PROGRAMACION_ORIGIN;
+      existing.payload_json = nextPayload;
+      existing.activo = true;
+      existing.status = 'ACTIVE';
+      const saved = await repo.save(existing);
+      return {
+        programacion: saved,
+        action: previousDate === fechaProgramacion ? 'unchanged' : 'updated',
+        previousDate,
+      } as const;
+    }
+
+    const created = await repo.save(
+      repo.create({
+        codigo: this.firstNonEmptyString(workOrder.code) ?? null,
+        equipo_id: equipoId,
+        plan_id: planId,
+        work_order_id: workOrder.id,
+        modo_programacion: this.CEBADO_PROGRAMACION_MODE,
+        origen_programacion: this.CEBADO_PROGRAMACION_ORIGIN,
+        proxima_fecha: fechaProgramacion,
+        documento_origen: this.firstNonEmptyString(workOrder.code) ?? null,
+        payload_json: nextPayload,
+        activo: true,
+        status: 'ACTIVE',
+        is_deleted: false,
+      }),
+    );
+    return { programacion: created, action: 'created', previousDate: null } as const;
+  }
+
+  /**
+   * Efectos posteriores al alta o reprogramacion automatica: historial de la OT,
+   * notificacion interna y log de seguridad. Nunca interrumpe el guardado.
+   */
+  private async publishCebadoProgramacionSync(
+    workOrder: WorkOrderEntity,
+    sync: {
+      programacion: ProgramacionPlanEntity;
+      action: 'created' | 'updated' | 'unchanged';
+      previousDate: string | null;
+    } | null,
+    actor?: RequestActorContext | null,
+  ) {
+    if (!sync || sync.action === 'unchanged') return null;
+    const fecha = this.safeDateOnlyString(sync.programacion.proxima_fecha);
+    const note =
+      sync.action === 'created'
+        ? `Programación generada automáticamente para el ${fecha} desde la cabecera de la OT de tipo Cebado`
+        : `Programación reprogramada automáticamente del ${sync.previousDate ?? 'sin fecha'} al ${fecha} desde la cabecera de la OT de tipo Cebado`;
+    try {
+      await this.appendWorkOrderHistory(
+        workOrder.id,
+        this.normalizeWorkflowStatus(workOrder.status_workflow),
+        note,
+        { changedBy: this.resolveActorHistoryUserId(actor) },
+      );
+      await this.publishInAppNotification({
+        title:
+          sync.action === 'created'
+            ? 'Programación generada desde una OT de Cebado'
+            : 'Programación de Cebado reprogramada',
+        body: `${workOrder.code} quedó programada para el ${fecha}`,
+        module: 'maintenance',
+        entityType: 'programacion',
+        entityId: sync.programacion.id,
+        level: 'info',
+      });
+      await this.writeSecurityLog({
+        description: `[WO:${workOrder.id}] ${note} (programacion ${sync.programacion.id})`,
+        typeLog: 'PROGRAMACION',
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo notificar la programación automática de la OT ${workOrder.code}: ${error?.message ?? 'desconocido'}`,
+      );
+    }
+    return sync.programacion.id;
+  }
+
+  /**
+   * Contraparte de syncCebadoProgramacionFromWorkOrder: si la programacion de una
+   * OT de Cebado se reprograma desde el modulo de programacion, la cabecera de la
+   * OT debe reflejar la nueva fecha para no quedar desfasada.
+   */
+  private async mirrorProgramacionDateIntoCebadoWorkOrder(
+    programacion: ProgramacionPlanEntity,
+    actor?: RequestActorContext | null,
+  ) {
+    const workOrderId = this.firstNonEmptyString(programacion.work_order_id);
+    const fecha = this.safeDateOnlyString(programacion.proxima_fecha);
+    if (!workOrderId || !fecha) return null;
+    try {
+      const workOrder = await this.woRepo.findOne({
+        where: { id: workOrderId, is_deleted: false },
+      });
+      if (!workOrder) return null;
+      if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) !== 'CEBADO') {
+        return null;
+      }
+      const payload = {
+        ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
+      };
+      const previous = this.normalizeDateOnlyInput(payload.fecha_programacion);
+      if (previous === fecha) return null;
+      payload.fecha_programacion = fecha;
+      workOrder.valor_json = payload;
+      await this.woRepo.save(workOrder);
+      await this.appendWorkOrderHistory(
+        workOrder.id,
+        this.normalizeWorkflowStatus(workOrder.status_workflow),
+        `Fecha de programación de la cabecera actualizada del ${previous ?? 'sin fecha'} al ${fecha} desde el módulo de programación`,
+        { changedBy: this.resolveActorHistoryUserId(actor) },
+      );
+      return fecha;
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo reflejar la fecha de programación en la OT ${workOrderId}: ${error?.message ?? 'desconocido'}`,
+      );
+      return null;
+    }
+  }
+
   private firstNullableNumeric(...values: unknown[]) {
     for (const value of values) {
       if (value === null || value === undefined || value === '') continue;
@@ -13206,6 +13490,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       is_deleted: false,
     });
     const saved = await this.programacionRepo.save(entity);
+    await this.mirrorProgramacionDateIntoCebadoWorkOrder(saved);
     const enriched = await this.recalculateProgramacionFields(saved);
     await this.publishInAppNotification({
       title: 'Nueva programación de mantenimiento',
@@ -13364,6 +13649,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actor,
       });
     }
+    await this.mirrorProgramacionDateIntoCebadoWorkOrder(saved, actor);
     const enriched = await this.recalculateProgramacionFields(saved);
     await this.publishInAppNotification({
       title: 'Programación actualizada',
@@ -22508,6 +22794,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           reassignmentReason: null,
         };
     let saved: WorkOrderEntity | null = null;
+    let cebadoProgramacionDate: string | null = null;
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const entity = workOrder
@@ -22537,6 +22824,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         resolvedProcedure,
       );
       this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+      cebadoProgramacionDate = this.applyCebadoProgramacionDate(
+        resolvedMaintenanceKind,
+        nextHeaderPayload,
+      );
 
       Object.assign(entity, {
         code: isNew ? resolution.resolvedCode : entity.code,
@@ -22657,6 +22948,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    const programacionSync = await this.syncCebadoProgramacionFromWorkOrder(
+      saved,
+      cebadoProgramacionDate,
+      actor,
+      manager,
+    );
+
     if (saved.blocked_by_work_order_id) {
       const blocker = await workOrderRepo.findOne({
         where: { id: saved.blocked_by_work_order_id, is_deleted: false },
@@ -22692,6 +22990,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       alertaId: explicitAlertId ?? automaticAlert?.alert.id ?? null,
       alertWasAutoCreated: Boolean(automaticAlert?.created),
       horometerHistoryNotes,
+      programacionSync,
     };
   }
 
@@ -22729,6 +23028,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             alertaId: string | null;
             alertWasAutoCreated: boolean;
             horometerHistoryNotes: string[];
+            programacionSync: Awaited<
+              ReturnType<
+                KpiMaintenanceService['syncCebadoProgramacionFromWorkOrder']
+              >
+            >;
           }
       | null = null;
 
@@ -22959,6 +23263,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    await safePostCommit('la programacion automatica de la OT de Cebado', () =>
+      this.publishCebadoProgramacionSync(
+        saved,
+        transactionResult!.programacionSync,
+        actor,
+      ),
+    );
+
     for (const note of transactionResult.horometerHistoryNotes ?? []) {
       await safePostCommit('el historial de horometro', () =>
         this.appendWorkOrderHistory(saved.id, normalizedSavedStatus, note, {
@@ -23137,6 +23449,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.maintenance_kind,
       'CORRECTIVO',
     );
+    this.assertCebadoWorkOrderHasRequiredLinks(
+      resolvedMaintenanceKind,
+      dto.equipment_id,
+      resolvedPlanId,
+    );
     const emergencyState = this.resolveWorkOrderEmergencyState(
       dto.is_emergency ?? false,
       dto.emergency_reason,
@@ -23153,6 +23470,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     let resolution = await this.resolveRequestedWorkOrderCode(dto.code);
     let created: WorkOrderEntity | null = null;
+    let cebadoProgramacionDate: string | null = null;
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const nextHeaderPayload = {
@@ -23162,6 +23480,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : {}),
       };
       this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+      cebadoProgramacionDate = this.applyCebadoProgramacionDate(
+        resolvedMaintenanceKind,
+        nextHeaderPayload,
+      );
       const entity = this.woRepo.create({
         code: resolution.resolvedCode,
         type: dto.type,
@@ -23244,6 +23566,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!created) {
       throw new ConflictException('No se pudo generar un código único para la orden de trabajo.');
     }
+    const createdProgramacionSync =
+      await this.syncCebadoProgramacionFromWorkOrder(
+        created,
+        cebadoProgramacionDate,
+        actor,
+      );
+    await this.publishCebadoProgramacionSync(created, createdProgramacionSync, actor);
     const createdHorometerHistoryNotes =
       await this.syncEquipmentHorometerFromWorkOrder(created, null, actor);
 
@@ -23436,6 +23765,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }
         : ((wo.valor_json as Record<string, unknown> | null) ?? {});
     this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+    const nextMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
+      dto.maintenance_kind,
+      wo.maintenance_kind,
+      'CORRECTIVO',
+    );
+    this.assertCebadoWorkOrderHasRequiredLinks(
+      nextMaintenanceKind,
+      wo.equipment_id,
+      resolvedPlanId,
+    );
+    const cebadoProgramacionDate = this.applyCebadoProgramacionDate(
+      nextMaintenanceKind,
+      nextHeaderPayload,
+    );
     Object.assign(wo, {
       ...dto,
       plan_id: resolvedPlanId,
@@ -23459,11 +23802,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipment,
       resolvedProcedure,
     );
-    wo.maintenance_kind = this.resolveWorkOrderMaintenanceKind(
-      dto.maintenance_kind,
-      wo.maintenance_kind,
-      'CORRECTIVO',
-    );
+    wo.maintenance_kind = nextMaintenanceKind;
     wo.requested_by =
       wo.requested_by ??
       this.firstNonEmptyString(actor?.userId, dtoOwnershipHints.userId) ??
@@ -23500,6 +23839,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
     const saved = await this.woRepo.save(wo);
+    const updatedProgramacionSync =
+      await this.syncCebadoProgramacionFromWorkOrder(
+        saved,
+        cebadoProgramacionDate,
+        actor,
+      );
+    await this.publishCebadoProgramacionSync(saved, updatedProgramacionSync, actor);
     const updatedHorometerHistoryNotes =
       await this.syncEquipmentHorometerFromWorkOrder(
         saved,

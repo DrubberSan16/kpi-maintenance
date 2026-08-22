@@ -1,4 +1,8 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
 
@@ -811,6 +815,184 @@ describe('KpiMaintenanceService work orders', () => {
     );
   });
 
+  it('rechaza crear una OT de Cebado sin equipo aunque tenga plantilla y fecha', async () => {
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+
+    await expect(
+      service.createWorkOrder({
+        code: 'OT-A00002',
+        type: 'MANTENIMIENTO',
+        title: 'Cebado UG 03',
+        maintenance_kind: 'CEBADO',
+        plan_id: 'plan-1',
+        status_workflow: 'PLANNED',
+        valor_json: { fecha_programacion: '2026-09-04' },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repos.woRepo.save).not.toHaveBeenCalled();
+    expect(repos.programacionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('rechaza crear una OT de Cebado sin plantilla aunque tenga equipo y fecha', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+
+    await expect(
+      service.createWorkOrder({
+        code: 'OT-A00002',
+        type: 'MANTENIMIENTO',
+        title: 'Cebado UG 03',
+        maintenance_kind: 'CEBADO',
+        equipment_id: 'equipo-1',
+        status_workflow: 'PLANNED',
+        valor_json: { fecha_programacion: '2026-09-04' },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repos.woRepo.save).not.toHaveBeenCalled();
+    expect(repos.programacionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('crea la OT de Cebado y su programacion cuando tiene equipo, plantilla y fecha', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    repos.woRepo.save.mockImplementation(async (value) => ({
+      id: 'wo-1',
+      ...value,
+    }));
+    repos.programacionRepo.find.mockResolvedValue([]);
+    repos.programacionRepo.create.mockImplementation((value: any) => ({
+      id: 'prog-1',
+      ...value,
+    }));
+    repos.programacionRepo.save.mockImplementation(async (value: any) => value);
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockResolvedValue({
+        id: 'wo-1',
+        code: 'OT-A00002',
+        title: 'Cebado UG 03',
+        status_workflow: 'PLANNED',
+        plan_id: 'plan-1',
+      });
+
+    await service.createWorkOrder({
+      code: 'OT-A00002',
+      type: 'MANTENIMIENTO',
+      title: 'Cebado UG 03',
+      maintenance_kind: 'CEBADO',
+      equipment_id: 'equipo-1',
+      plan_id: 'plan-1',
+      status_workflow: 'PLANNED',
+      valor_json: {
+        fecha_programacion: '2026-09-04',
+        causa: 'Cebado programado',
+        accion: 'Cebado de graseras',
+        prevencion: 'Cumplir plan de lubricacion',
+      },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ maintenance_kind: 'CEBADO' }),
+    );
+    expect(repos.programacionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_id: 'equipo-1',
+        plan_id: 'plan-1',
+        work_order_id: 'wo-1',
+        proxima_fecha: '2026-09-04',
+      }),
+    );
+  });
+
+  it('rechaza actualizar una OT a Cebado si no tiene equipo asignado', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00001',
+      type: 'MANTENIMIENTO',
+      equipment_id: null,
+      plan_id: 'plan-1',
+      title: 'Orden sin equipo',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      valor_json: {},
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+
+    await expect(
+      service.updateWorkOrder('wo-1', {
+        maintenance_kind: 'CEBADO',
+        valor_json: {
+          fecha_programacion: '2026-09-04',
+          causa: 'Cebado programado',
+          accion: 'Cebado de graseras',
+          prevencion: 'Cumplir plan de lubricacion',
+        },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repos.woRepo.save).not.toHaveBeenCalled();
+    expect(repos.programacionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('rechaza actualizar una OT a Cebado si no tiene plantilla asignada', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00001',
+      type: 'MANTENIMIENTO',
+      equipment_id: 'equipo-1',
+      plan_id: null,
+      title: 'Orden sin plantilla',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      valor_json: {},
+      is_deleted: false,
+    });
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+
+    await expect(
+      service.updateWorkOrder('wo-1', {
+        maintenance_kind: 'CEBADO',
+        valor_json: {
+          fecha_programacion: '2026-09-04',
+          causa: 'Cebado programado',
+          accion: 'Cebado de graseras',
+          prevencion: 'Cumplir plan de lubricacion',
+        },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repos.woRepo.save).not.toHaveBeenCalled();
+    expect(repos.programacionRepo.save).not.toHaveBeenCalled();
+  });
+
   it('registrar consumo crea o incrementa la reserva de stock para la OT', async () => {
     repos.woRepo.findOne.mockResolvedValue({
       id: 'wo-1',
@@ -1254,5 +1436,170 @@ describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
       } as any),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(repos.woRepo.findOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('KpiMaintenanceService programacion automatica de OT de Cebado', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
+    jest
+      .spyOn(service as any, 'appendWorkOrderHistory')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'publishInAppNotification')
+      .mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'writeSecurityLog').mockResolvedValue(undefined);
+  });
+
+  it('exige la fecha de programacion en la cabecera de una OT de Cebado', () => {
+    expect(() =>
+      (service as any).applyCebadoProgramacionDate('CEBADO', {
+        causa: 'x',
+        accion: 'y',
+        prevencion: 'z',
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  it('no exige la fecha de programacion en OT de otro tipo', () => {
+    expect(
+      (service as any).applyCebadoProgramacionDate('CORRECTIVO', {}),
+    ).toBeNull();
+  });
+
+  it('normaliza la fecha dentro del payload de la cabecera', () => {
+    const payload: Record<string, unknown> = {
+      fecha_programacion: '2026-09-04T05:00:00.000Z',
+    };
+    const resolved = (service as any).applyCebadoProgramacionDate(
+      'CEBADO',
+      payload,
+    );
+    expect(resolved).toBe('2026-09-04');
+    expect(payload.fecha_programacion).toBe('2026-09-04');
+  });
+
+  it('rechaza una fecha inexistente', () => {
+    expect(() =>
+      (service as any).applyCebadoProgramacionDate('CEBADO', {
+        fecha_programacion: '2026-02-30',
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  it('crea la programacion en modo CALENDARIO cuando la OT de Cebado aun no tiene una', async () => {
+    repos.programacionRepo.find.mockResolvedValue([]);
+    repos.programacionRepo.create.mockImplementation((value: any) => ({
+      id: 'prog-1',
+      ...value,
+    }));
+    repos.programacionRepo.save.mockImplementation(async (value: any) => value);
+
+    const result = await (service as any).syncCebadoProgramacionFromWorkOrder(
+      {
+        id: 'wo-1',
+        code: 'OT-A00001',
+        title: 'Cebado UG 03',
+        equipment_id: 'equipo-1',
+        plan_id: 'plan-1',
+        maintenance_kind: 'CEBADO',
+        status_workflow: 'PLANNED',
+      },
+      '2026-09-04',
+      { userId: 'user-1', username: 'operador' },
+    );
+
+    expect(result?.action).toBe('created');
+    expect(repos.programacionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_id: 'equipo-1',
+        plan_id: 'plan-1',
+        work_order_id: 'wo-1',
+        proxima_fecha: '2026-09-04',
+        // CALENDARIO evita que recalculateProgramacionFields pise la fecha
+        modo_programacion: 'CALENDARIO',
+        origen_programacion: 'ORDEN_TRABAJO',
+        activo: true,
+      }),
+    );
+  });
+
+  it('reprograma la programacion existente cuando cambia la fecha en la cabecera', async () => {
+    const existing = {
+      id: 'prog-1',
+      work_order_id: 'wo-1',
+      equipo_id: 'equipo-1',
+      plan_id: 'plan-1',
+      proxima_fecha: '2026-09-04',
+      modo_programacion: 'CALENDARIO',
+      origen_programacion: 'ORDEN_TRABAJO',
+      payload_json: {},
+      activo: true,
+      status: 'ACTIVE',
+      is_deleted: false,
+    };
+    repos.programacionRepo.find.mockResolvedValue([existing]);
+    repos.programacionRepo.save.mockImplementation(async (value: any) => value);
+
+    const result = await (service as any).syncCebadoProgramacionFromWorkOrder(
+      {
+        id: 'wo-1',
+        code: 'OT-A00001',
+        equipment_id: 'equipo-1',
+        plan_id: 'plan-1',
+        maintenance_kind: 'CEBADO',
+        status_workflow: 'PLANNED',
+      },
+      '2026-09-11',
+      null,
+    );
+
+    expect(result).toMatchObject({
+      action: 'updated',
+      previousDate: '2026-09-04',
+    });
+    expect(existing.proxima_fecha).toBe('2026-09-11');
+    expect(repos.programacionRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('ignora la sincronizacion en OT que no son de Cebado', async () => {
+    const result = await (service as any).syncCebadoProgramacionFromWorkOrder(
+      {
+        id: 'wo-1',
+        equipment_id: 'equipo-1',
+        plan_id: 'plan-1',
+        maintenance_kind: 'PREVENTIVO',
+      },
+      '2026-09-04',
+      null,
+    );
+    expect(result).toBeNull();
+    expect(repos.programacionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('refleja en la cabecera la fecha reprogramada desde el modulo de programacion', async () => {
+    const workOrder = {
+      id: 'wo-1',
+      code: 'OT-A00001',
+      maintenance_kind: 'CEBADO',
+      status_workflow: 'PLANNED',
+      valor_json: { fecha_programacion: '2026-09-04' },
+      is_deleted: false,
+    };
+    repos.woRepo.findOne.mockResolvedValue(workOrder);
+    repos.woRepo.save.mockImplementation(async (value: any) => value);
+
+    const result = await (service as any).mirrorProgramacionDateIntoCebadoWorkOrder(
+      { id: 'prog-1', work_order_id: 'wo-1', proxima_fecha: '2026-09-18' },
+      null,
+    );
+
+    expect(result).toBe('2026-09-18');
+    expect(workOrder.valor_json.fecha_programacion).toBe('2026-09-18');
   });
 });
