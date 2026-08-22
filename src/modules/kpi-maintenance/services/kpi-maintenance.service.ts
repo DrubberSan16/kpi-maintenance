@@ -13511,7 +13511,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return String(value ?? '')
       .trim()
       .normalize('NFD')
-      .replace(/[̀-ͯ]/g, '')
+      .replace(/[\u0300-\u036f]/g, '')
       .toUpperCase();
   }
 
@@ -23604,24 +23604,653 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(enriched, 'Work order actualizada');
   }
 
-  async deleteWorkOrder(id: string, actor?: RequestActorContext | null) {
-    const normalizedRoleName = this.normalizeRoleName(actor?.roleName);
+  private readonly WORK_ORDER_ANNULMENT_ROLES = [
+    'ADMINISTRADOR',
+    'SUPER ADMINISTRADOR',
+    'GERENTE GENERAL',
+  ];
+
+  private readonly WORK_ORDER_MENU_COMPONENTS = [
+    'work-orders',
+    'ordenes-de-trabajo',
+    'ordenes-trabajo',
+    'ot',
+  ];
+
+  private normalizeMenuComponentName(value: unknown) {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toLowerCase()
+      .replace(/^\/+/, '')
+      .replace(/^app\//, '')
+      .replace(/[\s_]+/g, '-');
+  }
+
+  private findWorkOrderMenuDeletePermission(nodes: unknown): boolean {
+    if (!Array.isArray(nodes)) return false;
+    for (const node of nodes as Array<Record<string, any>>) {
+      if (!node || typeof node !== 'object') continue;
+      const component = this.normalizeMenuComponentName(node.urlComponent);
+      const label = this.normalizeMenuComponentName(node.nombre);
+      if (
+        this.WORK_ORDER_MENU_COMPONENTS.includes(component) ||
+        this.WORK_ORDER_MENU_COMPONENTS.includes(label)
+      ) {
+        if (node.permissions?.permitDeleted === true) return true;
+      }
+      if (this.findWorkOrderMenuDeletePermission(node.children)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Permiso de anulacion de OT: lo concede el rol administrativo o el permiso
+   * "Eliminar" configurado para el rol/usuario sobre el menu de ordenes de trabajo.
+   */
+  private async hasWorkOrderAnnulmentPermission(
+    actor?: RequestActorContext | null,
+  ) {
     if (
-      ![
-        'ADMINISTRADOR',
-        'SUPER ADMINISTRADOR',
-        'GERENTE GENERAL',
-      ].includes(normalizedRoleName)
+      this.WORK_ORDER_ANNULMENT_ROLES.includes(
+        this.normalizeRoleName(actor?.roleName),
+      )
     ) {
-      throw new ForbiddenException(
-        'Solo Administrador, Super Administrador o Gerente General pueden anular documentos.',
+      return true;
+    }
+    const userId = this.firstNonEmptyString(actor?.userId);
+    if (!userId || !this.securityServiceUrl) return false;
+    try {
+      const payload = await this.getJson(
+        `${this.securityServiceUrl}/menu-users/tree/by-user/${encodeURIComponent(
+          userId,
+        )}`,
+      );
+      return this.findWorkOrderMenuDeletePermission(
+        this.unwrapServiceData<unknown>(payload),
+      );
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo verificar el permiso de anulacion de OT del usuario ${userId}: ${error?.message ?? 'desconocido'}`,
+      );
+      return false;
+    }
+  }
+
+  private async assertWorkOrderAnnulmentAllowed(
+    actor?: RequestActorContext | null,
+  ) {
+    if (await this.hasWorkOrderAnnulmentPermission(actor)) return;
+    throw new ForbiddenException(
+      'No tienes permiso para anular ordenes de trabajo. Se requiere un rol administrativo o el permiso de eliminacion sobre el modulo de ordenes de trabajo.',
+    );
+  }
+
+  /**
+   * Suma (delta > 0) o descuenta (delta < 0) stock respetando la condicion del
+   * material. A diferencia de applyIssuedStockByCondition no aplica la regla de
+   * "solo critico cuando nuevo y usado estan en cero": una reversion debe poder
+   * devolver el material exactamente al bucket del que salio.
+   */
+  private applyStockDeltaByConditionForMaintenance(
+    stock: StockBodegaEntity,
+    delta: number,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+    productLabel: string,
+  ) {
+    const normalizedDelta = this.toNumeric(delta, 0);
+    const nuevo = this.getStockNuevoAmount(stock);
+    const usado = this.getStockUsadoAmount(stock);
+    const critico = this.getStockCriticoAmount(stock);
+    const current =
+      condition === 'NUEVO' ? nuevo : condition === 'USADO' ? usado : critico;
+    const next = current + normalizedDelta;
+    if (next < -0.000001) {
+      throw new ConflictException(
+        `Stock ${condition.toLowerCase()} insuficiente para revertir ${productLabel}. Disponible ${current.toFixed(
+          2,
+        )}, requerido ${Math.abs(normalizedDelta).toFixed(2)}.`,
       );
     }
+    if (condition === 'USADO' && normalizedDelta > 0) stock.es_usado = true;
+    return this.setStockBreakdown(
+      stock,
+      condition === 'NUEVO' ? Math.max(next, 0) : nuevo,
+      condition === 'USADO' ? Math.max(next, 0) : usado,
+      condition === 'CRITICO' ? Math.max(next, 0) : critico,
+    );
+  }
+
+  private async applyMaintenanceStockReversal(
+    manager: EntityManager,
+    args: {
+      bodegaId: string;
+      producto: ProductoEntity;
+      cantidad: number;
+      costoUnitario: number;
+      condicion: 'NUEVO' | 'USADO' | 'CRITICO';
+      direction: 'INGRESO' | 'SALIDA';
+      movimientoId: string;
+      observacion: string;
+      fecha: Date;
+      actorName: string;
+    },
+  ) {
+    const signedQuantity =
+      args.direction === 'INGRESO' ? args.cantidad : -args.cantidad;
+    const productLabel =
+      this.buildProductoLabel(args.producto) ?? args.producto.id;
+    const stock = await this.getOrCreateStockRowForMaintenance(manager, {
+      bodegaId: args.bodegaId,
+      productoId: args.producto.id,
+      costoPromedio: args.costoUnitario,
+      userName: args.actorName,
+    });
+    const previousStockActual = this.toNumeric(stock.stock_actual, 0);
+    const stockAfter = this.applyStockDeltaByConditionForMaintenance(
+      stock,
+      signedQuantity,
+      args.condicion,
+      productLabel,
+    );
+    stock.stock_fisico = Math.max(
+      this.toNumeric(stock.stock_fisico, previousStockActual) + signedQuantity,
+      0,
+    );
+    stock.updated_by = args.actorName;
+    await manager.save(StockBodegaEntity, stock);
+
+    const subtotal = args.cantidad * args.costoUnitario;
+    const movimientoDet = await manager.save(
+      MovimientoInventarioDetEntity,
+      manager.create(MovimientoInventarioDetEntity, {
+        movimiento_id: args.movimientoId,
+        producto_id: args.producto.id,
+        cantidad: args.cantidad,
+        costo_unitario: args.costoUnitario,
+        subtotal_costo: subtotal,
+        condicion_material: args.condicion,
+        observacion: args.observacion,
+        status: 'ACTIVE',
+        created_by: args.actorName,
+        updated_by: args.actorName,
+      }),
+    );
+    await manager.save(
+      KardexEntity,
+      manager.create(KardexEntity, {
+        fecha: args.fecha,
+        bodega_id: args.bodegaId,
+        producto_id: args.producto.id,
+        movimiento_id: args.movimientoId,
+        movimiento_det_id: movimientoDet.id,
+        tipo_movimiento: args.direction,
+        entrada_cantidad: args.direction === 'INGRESO' ? args.cantidad : 0,
+        salida_cantidad: args.direction === 'SALIDA' ? args.cantidad : 0,
+        costo_unitario: args.costoUnitario,
+        costo_total: subtotal,
+        saldo_cantidad: stockAfter,
+        condicion_material: args.condicion,
+        saldo_costo_promedio: args.costoUnitario,
+        saldo_valorizado: stockAfter * args.costoUnitario,
+        observacion: args.observacion,
+        status: 'ACTIVE',
+        created_by: args.actorName,
+        updated_by: args.actorName,
+      }),
+    );
+    return { stock, subtotal };
+  }
+
+  /**
+   * Marca movimientos de inventario y su kardex como anulados. Se aplica tanto a
+   * los movimientos originales de la OT como a los de reverso, igual que hace
+   * kpi-inventory al anular una transferencia: el saldo queda restituido y el
+   * kardex operativo no conserva el par movimiento/contramovimiento.
+   */
+  private async annulInventoryMovementsWithManager(
+    manager: EntityManager,
+    movementIds: Array<string | null | undefined>,
+    actorName: string,
+    annulledAt: Date,
+  ) {
+    const ids = [
+      ...new Set(
+        movementIds
+          .map((value) => this.firstNonEmptyString(value))
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    if (!ids.length) return [];
+    await manager
+      .createQueryBuilder()
+      .update(MovimientoInventarioEntity)
+      .set({
+        estado: 'ANULADO',
+        status: 'INACTIVE',
+        updated_by: actorName,
+        is_deleted: true,
+        deleted_at: annulledAt,
+        deleted_by: actorName,
+      })
+      .where('id IN (:...ids)', { ids })
+      .execute();
+    await manager
+      .createQueryBuilder()
+      .update(MovimientoInventarioDetEntity)
+      .set({
+        status: 'INACTIVE',
+        updated_by: actorName,
+        is_deleted: true,
+        deleted_at: annulledAt,
+        deleted_by: actorName,
+      })
+      .where('movimiento_id IN (:...ids)', { ids })
+      .execute();
+    await manager
+      .createQueryBuilder()
+      .update(KardexEntity)
+      .set({
+        status: 'INACTIVE',
+        updated_by: actorName,
+        is_deleted: true,
+        deleted_at: annulledAt,
+        deleted_by: actorName,
+      })
+      .where('movimiento_id IN (:...ids)', { ids })
+      .execute();
+    return ids;
+  }
+
+  /**
+   * Devuelve a bodega los materiales entregados a la OT: por cada entrega abierta
+   * genera un ingreso de reverso con su kardex y restituye el stock.
+   */
+  private async reverseWorkOrderMaterialIssues(
+    manager: EntityManager,
+    workOrder: WorkOrderEntity,
+    context: { actorName: string; fecha: Date; motivo?: string | null },
+  ) {
+    const empty = {
+      entregas: 0,
+      items: 0,
+      total: 0,
+      affectedPairs: [] as Array<{ producto_id: string; bodega_id: string }>,
+      movimientos: [] as string[],
+    };
+    const entregas = await manager.find(EntregaMaterialEntity, {
+      where: { work_order_id: workOrder.id, is_deleted: false },
+    });
+    if (!entregas.length) return empty;
+
+    const entregaIds = entregas.map((row) => row.id);
+    const detalles = await manager.find(EntregaMaterialDetEntity, {
+      where: { entrega_id: In(entregaIds) },
+    });
+    const reference = this.buildWorkOrderInventoryReference(workOrder);
+    const observation = context.motivo
+      ? `Anulacion de OT ${reference}: reingreso de materiales entregados. ${context.motivo}`
+      : `Anulacion de OT ${reference}: reingreso de materiales entregados`;
+
+    const affectedPairs: Array<{ producto_id: string; bodega_id: string }> = [];
+    let total = 0;
+    let movimiento: MovimientoInventarioEntity | null = null;
+
+    if (detalles.length) {
+      const targetWarehouses = [
+        ...new Set(
+          detalles
+            .map((row) => this.firstNonEmptyString(row.bodega_id))
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ];
+      movimiento = await manager.save(
+        MovimientoInventarioEntity,
+        manager.create(MovimientoInventarioEntity, {
+          tipo_movimiento: 'INGRESO',
+          fecha_movimiento: context.fecha,
+          tipo_documento: 'ANULACION_ORDEN_TRABAJO',
+          numero_documento: await this.generateMaintenanceInventoryDocumentCode(
+            manager,
+            'IB',
+          ),
+          referencia: reference,
+          observacion: observation,
+          bodega_destino_id:
+            targetWarehouses.length === 1 ? targetWarehouses[0] : null,
+          work_order_id: workOrder.id,
+          moneda: 'USD',
+          tipo_cambio: 1,
+          total_costos: 0,
+          estado: 'CONFIRMADO',
+          status: 'ACTIVE',
+          created_by: context.actorName,
+          updated_by: context.actorName,
+        }),
+      );
+
+      for (const detalle of detalles) {
+        const cantidad = this.toNumeric(detalle.cantidad, 0);
+        if (!(cantidad > 0)) continue;
+        const producto = await manager.findOne(ProductoEntity, {
+          where: { id: detalle.producto_id },
+        });
+        if (!producto) {
+          throw new NotFoundException(
+            `No se puede revertir la entrega: el material ${detalle.producto_id} ya no existe.`,
+          );
+        }
+        const { subtotal } = await this.applyMaintenanceStockReversal(manager, {
+          bodegaId: detalle.bodega_id,
+          producto,
+          cantidad,
+          costoUnitario: this.toNumeric(detalle.costo_unitario, 0),
+          condicion: this.normalizeMaterialCondition(detalle.condicion_material),
+          direction: 'INGRESO',
+          movimientoId: movimiento.id,
+          observacion: observation,
+          fecha: context.fecha,
+          actorName: context.actorName,
+        });
+        total += subtotal;
+        affectedPairs.push({
+          producto_id: detalle.producto_id,
+          bodega_id: detalle.bodega_id,
+        });
+      }
+
+      movimiento.total_costos = total;
+      movimiento.updated_by = context.actorName;
+      await manager.save(MovimientoInventarioEntity, movimiento);
+    }
+
+    const originalMovements = await manager.find(MovimientoInventarioEntity, {
+      where: {
+        work_order_id: workOrder.id,
+        tipo_documento: 'EGRESO_BODEGA',
+        is_deleted: false,
+      },
+    });
+    const movimientos = await this.annulInventoryMovementsWithManager(
+      manager,
+      [...originalMovements.map((row) => row.id), movimiento?.id],
+      context.actorName,
+      context.fecha,
+    );
+
+    await manager
+      .createQueryBuilder()
+      .update(EntregaMaterialEntity)
+      .set({ is_deleted: true })
+      .where('id IN (:...entregaIds)', { entregaIds })
+      .execute();
+
+    return {
+      entregas: entregas.length,
+      items: detalles.length,
+      total,
+      affectedPairs,
+      movimientos,
+    };
+  }
+
+  /**
+   * Devuelve desde la bodega chatarra a la bodega origen todo lo que la OT envio
+   * a desecho, anulando la transferencia y su kardex de ingreso/egreso.
+   */
+  private async reverseWorkOrderScrapTransfers(
+    manager: EntityManager,
+    workOrder: WorkOrderEntity,
+    context: { actorName: string; fecha: Date; motivo?: string | null },
+  ) {
+    const headers = await manager.find(WorkOrderDesechoEntity, {
+      where: { work_order_id: workOrder.id, is_deleted: false },
+    });
+    const affectedPairs: Array<{ producto_id: string; bodega_id: string }> = [];
+    const movimientos: string[] = [];
+    let totalItems = 0;
+    let totalCost = 0;
+    if (!headers.length) {
+      return { desechos: 0, items: 0, total: 0, affectedPairs, movimientos };
+    }
+
+    const detalles = await manager.find(WorkOrderDesechoDetEntity, {
+      where: {
+        work_order_desecho_id: In(headers.map((row) => row.id)),
+        is_deleted: false,
+      },
+    });
+    const reference = this.buildWorkOrderInventoryReference(workOrder);
+    const observation = context.motivo
+      ? `Anulacion de OT ${reference}: retorno de material desechado. ${context.motivo}`
+      : `Anulacion de OT ${reference}: retorno de material desechado`;
+
+    for (const header of headers) {
+      const headerDetails = detalles.filter(
+        (row) => row.work_order_desecho_id === header.id,
+      );
+
+      let headerCost = 0;
+      let scrapOut: MovimientoInventarioEntity | null = null;
+      let sourceIn: MovimientoInventarioEntity | null = null;
+
+      if (headerDetails.length) {
+        scrapOut = await manager.save(
+          MovimientoInventarioEntity,
+          manager.create(MovimientoInventarioEntity, {
+            tipo_movimiento: 'SALIDA',
+            fecha_movimiento: context.fecha,
+            tipo_documento: 'ANULACION_ORDEN_TRABAJO',
+            numero_documento:
+              await this.generateMaintenanceInventoryDocumentCode(manager, 'EB'),
+            referencia: reference,
+            observacion: observation,
+            bodega_origen_id: header.bodega_chatarra_id,
+            work_order_id: workOrder.id,
+            moneda: 'USD',
+            tipo_cambio: 1,
+            total_costos: 0,
+            estado: 'CONFIRMADO',
+            status: 'ACTIVE',
+            created_by: context.actorName,
+            updated_by: context.actorName,
+          }),
+        );
+        sourceIn = await manager.save(
+          MovimientoInventarioEntity,
+          manager.create(MovimientoInventarioEntity, {
+            tipo_movimiento: 'INGRESO',
+            fecha_movimiento: context.fecha,
+            tipo_documento: 'ANULACION_ORDEN_TRABAJO',
+            numero_documento:
+              await this.generateMaintenanceInventoryDocumentCode(manager, 'IB'),
+            referencia: reference,
+            observacion: observation,
+            bodega_destino_id: header.bodega_origen_id,
+            work_order_id: workOrder.id,
+            moneda: 'USD',
+            tipo_cambio: 1,
+            total_costos: 0,
+            estado: 'CONFIRMADO',
+            status: 'ACTIVE',
+            created_by: context.actorName,
+            updated_by: context.actorName,
+          }),
+        );
+
+        for (const detalle of headerDetails) {
+          const cantidad = this.toNumeric(detalle.cantidad, 0);
+          if (!(cantidad > 0)) continue;
+          const producto = await manager.findOne(ProductoEntity, {
+            where: { id: detalle.producto_id },
+          });
+          if (!producto) {
+            throw new NotFoundException(
+              `No se puede revertir el desecho: el material ${detalle.producto_id} ya no existe.`,
+            );
+          }
+          const transferDetail = detalle.transferencia_bodega_det_id
+            ? await manager.findOne(TransferenciaBodegaDetEntity, {
+                where: { id: detalle.transferencia_bodega_det_id },
+              })
+            : null;
+          const originalKardex = transferDetail?.kardex_salida_id
+            ? await manager.findOne(KardexEntity, {
+                where: { id: transferDetail.kardex_salida_id },
+              })
+            : null;
+          const condicion = this.normalizeMaterialCondition(
+            originalKardex?.condicion_material,
+          );
+          const costoUnitario = this.toNumeric(detalle.costo_unitario, 0);
+
+          await this.applyMaintenanceStockReversal(manager, {
+            bodegaId: header.bodega_chatarra_id,
+            producto,
+            cantidad,
+            costoUnitario,
+            condicion,
+            direction: 'SALIDA',
+            movimientoId: scrapOut.id,
+            observacion: observation,
+            fecha: context.fecha,
+            actorName: context.actorName,
+          });
+          const { subtotal } = await this.applyMaintenanceStockReversal(
+            manager,
+            {
+              bodegaId: header.bodega_origen_id,
+              producto,
+              cantidad,
+              costoUnitario,
+              condicion,
+              direction: 'INGRESO',
+              movimientoId: sourceIn.id,
+              observacion: observation,
+              fecha: context.fecha,
+              actorName: context.actorName,
+            },
+          );
+          headerCost += subtotal;
+          totalItems += 1;
+          affectedPairs.push(
+            { producto_id: producto.id, bodega_id: header.bodega_chatarra_id },
+            { producto_id: producto.id, bodega_id: header.bodega_origen_id },
+          );
+        }
+
+        scrapOut.total_costos = headerCost;
+        scrapOut.updated_by = context.actorName;
+        sourceIn.total_costos = headerCost;
+        sourceIn.updated_by = context.actorName;
+        await manager.save(MovimientoInventarioEntity, [scrapOut, sourceIn]);
+        totalCost += headerCost;
+      }
+
+      const transfer = this.firstNonEmptyString(header.transferencia_bodega_id)
+        ? await manager.findOne(TransferenciaBodegaEntity, {
+            where: { id: header.transferencia_bodega_id },
+          })
+        : null;
+      movimientos.push(
+        ...(await this.annulInventoryMovementsWithManager(
+          manager,
+          [
+            transfer?.movimiento_salida_id,
+            transfer?.movimiento_ingreso_id,
+            scrapOut?.id,
+            sourceIn?.id,
+          ],
+          context.actorName,
+          context.fecha,
+        )),
+      );
+
+      if (transfer) {
+        transfer.estado = 'ANULADA';
+        transfer.status = 'INACTIVE';
+        transfer.updated_by = context.actorName;
+        transfer.is_deleted = true;
+        transfer.deleted_at = context.fecha;
+        transfer.deleted_by = context.actorName;
+        await manager.save(TransferenciaBodegaEntity, transfer);
+        await manager
+          .createQueryBuilder()
+          .update(TransferenciaBodegaDetEntity)
+          .set({
+            status: 'INACTIVE',
+            updated_by: context.actorName,
+            is_deleted: true,
+            deleted_at: context.fecha,
+            deleted_by: context.actorName,
+          })
+          .where('transferencia_bodega_id = :transferId', {
+            transferId: transfer.id,
+          })
+          .execute();
+      }
+
+      header.status = 'ANULADO';
+      header.updated_by = context.actorName;
+      header.is_deleted = true;
+      header.deleted_at = context.fecha;
+      header.deleted_by = context.actorName;
+      await manager.save(WorkOrderDesechoEntity, header);
+      await manager
+        .createQueryBuilder()
+        .update(WorkOrderDesechoDetEntity)
+        .set({
+          status: 'INACTIVE',
+          updated_by: context.actorName,
+          is_deleted: true,
+          deleted_at: context.fecha,
+          deleted_by: context.actorName,
+        })
+        .where('work_order_desecho_id = :desechoId', { desechoId: header.id })
+        .execute();
+    }
+
+    return {
+      desechos: headers.length,
+      items: totalItems,
+      total: totalCost,
+      affectedPairs,
+      movimientos,
+    };
+  }
+
+  private async annulWorkOrderConsumosWithManager(
+    manager: EntityManager,
+    workOrderId: string,
+  ) {
+    const result = await manager
+      .createQueryBuilder()
+      .update(ConsumoRepuestoEntity)
+      .set({ is_deleted: true })
+      .where('work_order_id = :workOrderId', { workOrderId })
+      .andWhere('is_deleted = false')
+      .execute();
+    return Number(result.affected ?? 0);
+  }
+
+  /**
+   * Anula una OT en cualquier estado -incluida finalizada o cerrada- y revierte
+   * todo su rastro de inventario: entregas de material, desechos enviados a
+   * chatarra, reservas abiertas y consumos planificados. El stock de bodega y el
+   * kardex quedan como antes de la OT.
+   */
+  async annulWorkOrder(
+    id: string,
+    actor?: RequestActorContext | null,
+    options?: { motivo?: string | null },
+  ) {
+    await this.assertWorkOrderAnnulmentAllowed(actor);
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
-    const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
     const currentAudit = (wo.valor_json ?? {}) as Record<string, unknown>;
     if (
-      this.normalizeRoleName(currentAudit.approval_action) === 'ANULADA'
+      this.normalizeRoleName(currentAudit.approval_action) === 'ANULADA' ||
+      this.normalizeRoleName(wo.status) === 'ANULADA'
     ) {
       return this.wrap(
         await this.enrichWorkOrder(wo, actor),
@@ -23633,42 +24262,154 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       undefined,
       'anular la orden',
     );
+
+    const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
+    const actorName = this.resolveInventoryActorName(actor);
+    const motivo = this.trimNullableText(options?.motivo);
     const annulledAt = new Date();
-    wo.is_deleted = false;
-    wo.status = 'ANULADA';
-    wo.status_workflow = 'CLOSED';
-    wo.closed_at = annulledAt;
-    wo.updated_at = annulledAt;
-    wo.updated_by =
-      this.firstNonEmptyString(actor?.username) ?? wo.updated_by ?? null;
-    this.applyWorkOrderAuditStamp(wo, actor, 'APPROVED', {
-      action: 'ANULADA',
+
+    const reversal = await this.dataSource.transaction(async (manager) => {
+      const workOrder = await manager.findOne(WorkOrderEntity, {
+        where: { id, is_deleted: false },
+      });
+      if (!workOrder) throw new NotFoundException('Registro no encontrado');
+
+      // El desecho se revierte primero: al anular su transferencia queda
+      // marcado is_deleted el egreso de chatarra, de modo que la reversion de
+      // entregas no vuelva a tomarlo como una salida de materiales de la OT.
+      const scrap = await this.reverseWorkOrderScrapTransfers(
+        manager,
+        workOrder,
+        { actorName, fecha: annulledAt, motivo },
+      );
+      const issues = await this.reverseWorkOrderMaterialIssues(
+        manager,
+        workOrder,
+        { actorName, fecha: annulledAt, motivo },
+      );
+      const reservas = await this.releaseOpenReservationsForWorkOrder(
+        workOrder.id,
+        manager,
+        this.resolveActorHistoryUserId(actor),
+      );
+      const consumos = await this.annulWorkOrderConsumosWithManager(
+        manager,
+        workOrder.id,
+      );
+
+      workOrder.is_deleted = false;
+      workOrder.status = 'ANULADA';
+      workOrder.status_workflow = 'CLOSED';
+      workOrder.closed_at = annulledAt;
+      workOrder.updated_at = annulledAt;
+      workOrder.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'APPROVED', {
+        action: 'ANULADA',
+      });
+      workOrder.valor_json = {
+        ...((workOrder.valor_json ?? {}) as Record<string, unknown>),
+        annulment: {
+          annulled_at: annulledAt.toISOString(),
+          annulled_by: actorName,
+          motivo,
+          previous_status_workflow: previousStatus,
+          entregas_revertidas: issues.entregas,
+          materiales_reingresados: issues.items,
+          desechos_revertidos: scrap.desechos,
+          materiales_retornados_chatarra: scrap.items,
+          reservas_liberadas: reservas ?? 0,
+          consumos_anulados: consumos,
+        },
+      };
+      await manager.save(WorkOrderEntity, workOrder);
+
+      return {
+        workOrder,
+        issues,
+        scrap,
+        reservas: reservas ?? 0,
+        consumos,
+      };
     });
-    await this.woRepo.save(wo);
-    await this.releaseOpenReservationsForWorkOrder(
-      wo.id,
-      undefined,
-      this.resolveActorHistoryUserId(actor),
-    );
-    await this.releaseBlockedWorkOrdersFor(wo);
-    await this.detachProgramacionesFromWorkOrder(wo.id);
+
+    const affectedPairs = [
+      ...reversal.issues.affectedPairs,
+      ...reversal.scrap.affectedPairs,
+    ];
+
+    await this.releaseBlockedWorkOrdersFor(reversal.workOrder);
+    await this.detachProgramacionesFromWorkOrder(reversal.workOrder.id);
     await this.appendWorkOrderHistory(
-      wo.id,
+      reversal.workOrder.id,
       'CLOSED',
-      `Orden de trabajo anulada por ${this.resolveActorLabel(actor) || this.firstNonEmptyString(actor?.username) || 'SYSTEM'}`,
+      [
+        `Orden de trabajo anulada por ${this.resolveActorLabel(actor) || actorName}`,
+        `Reversion: ${reversal.issues.items} material(es) reingresados, ${reversal.scrap.items} retornados desde chatarra, ${reversal.reservas} reserva(s) liberadas, ${reversal.consumos} consumo(s) anulados`,
+        motivo ? `Motivo: ${motivo}` : null,
+      ]
+        .filter(Boolean)
+        .join('. '),
       {
         fromStatus: previousStatus,
         changedBy: this.resolveActorHistoryUserId(actor),
       },
     );
     await this.writeSecurityLog({
-      description: `[WO:${wo.id}] Anulacion administrativa de OT ${wo.code} por ${this.resolveActorLabel(actor) || actor?.username || 'SYSTEM'}`,
+      description: `[WO:${reversal.workOrder.id}] Anulacion de OT ${reversal.workOrder.code} por ${
+        this.resolveActorLabel(actor) || actorName
+      } con reverso de inventario (${reversal.issues.items} entregas, ${reversal.scrap.items} desechos)`,
       typeLog: 'WORK_ORDER',
     });
+    try {
+      const stocks = affectedPairs.length
+        ? await this.stockRepo.find({
+            where: affectedPairs.map((pair) => ({
+              producto_id: pair.producto_id,
+              bodega_id: pair.bodega_id,
+              is_deleted: false,
+            })),
+          })
+        : [];
+      await this.recalculateAlertasNow('work-order-annulment', {
+        stock_ids: stocks.map((stock) => stock.id),
+        actor_username: this.firstNonEmptyString(actor?.username),
+        actor_user_id: this.resolveActorHistoryUserId(actor),
+        actor_email: this.normalizeEmail(actor?.email),
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo recalcular las alertas luego de anular la OT ${reversal.workOrder.code}: ${error?.message ?? 'desconocido'}`,
+      );
+    }
+
     return this.wrap(
-      await this.enrichWorkOrder(wo, actor),
-      'Work order anulada',
+      {
+        ...(await this.enrichWorkOrder(reversal.workOrder, actor)),
+        anulacion: {
+          motivo,
+          estado_anterior: previousStatus,
+          entregas_revertidas: reversal.issues.entregas,
+          materiales_reingresados: reversal.issues.items,
+          costo_reingresado: reversal.issues.total,
+          desechos_revertidos: reversal.scrap.desechos,
+          materiales_retornados_chatarra: reversal.scrap.items,
+          costo_retornado: reversal.scrap.total,
+          reservas_liberadas: reversal.reservas,
+          consumos_anulados: reversal.consumos,
+          movimientos_anulados: [
+            ...reversal.issues.movimientos,
+            ...reversal.scrap.movimientos,
+          ].length,
+        },
+      },
+      'Work order anulada y movimientos de inventario revertidos',
     );
+  }
+
+  /** @deprecated usar annulWorkOrder; se mantiene por compatibilidad de rutas. */
+  async deleteWorkOrder(id: string, actor?: RequestActorContext | null) {
+    return this.annulWorkOrder(id, actor);
   }
 
   async listWorkOrderTareas(

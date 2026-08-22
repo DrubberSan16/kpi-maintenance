@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
 
@@ -908,5 +908,351 @@ describe('KpiMaintenanceService work orders', () => {
         'MAT-1',
       ),
     ).toThrow(ConflictException);
+  });
+});
+
+describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+
+  type ManagerStub = {
+    manager: any;
+    rows: Record<string, any[]>;
+    saved: Record<string, any[]>;
+    updates: Array<{ entity: string; values: any; where: string[] }>;
+  };
+
+  const createManagerStub = (rows: Record<string, any[]>): ManagerStub => {
+    let sequence = 0;
+    const saved: Record<string, any[]> = {};
+    const updates: Array<{ entity: string; values: any; where: string[] }> = [];
+    const nameOf = (entity: any) =>
+      typeof entity === 'function' ? entity.name : String(entity);
+
+    const manager: any = {
+      create: (entity: any, value: any) => ({
+        id: value?.id ?? `${nameOf(entity)}-${++sequence}`,
+        ...value,
+      }),
+      save: async (entity: any, value: any) => {
+        const key = nameOf(entity);
+        const list = Array.isArray(value) ? value : [value];
+        saved[key] = [...(saved[key] ?? []), ...list];
+        return value;
+      },
+      find: async (entity: any) => rows[nameOf(entity)] ?? [],
+      findOne: async (entity: any) => (rows[nameOf(entity)] ?? [])[0] ?? null,
+      createQueryBuilder: () => {
+        const state: { entity: string; values: any; where: string[] } = {
+          entity: '',
+          values: null,
+          where: [],
+        };
+        const builder: any = {
+          update: (entity: any) => {
+            state.entity = nameOf(entity);
+            return builder;
+          },
+          set: (values: any) => {
+            state.values = values;
+            return builder;
+          },
+          where: (clause: string) => {
+            state.where.push(clause);
+            return builder;
+          },
+          andWhere: (clause: string) => {
+            state.where.push(clause);
+            return builder;
+          },
+          execute: async () => {
+            updates.push({ ...state });
+            return { affected: 1 };
+          },
+        };
+        return builder;
+      },
+    };
+
+    return { manager, rows, saved, updates };
+  };
+
+  const previousSecurityUrl = process.env.SECURITY_SERVICE_URL;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // la verificacion de permisos consulta el arbol de menus de kpi-security
+    process.env.SECURITY_SERVICE_URL = 'http://127.0.0.1:3015';
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
+  });
+
+  afterAll(() => {
+    if (previousSecurityUrl === undefined) delete process.env.SECURITY_SERVICE_URL;
+    else process.env.SECURITY_SERVICE_URL = previousSecurityUrl;
+  });
+
+  it('devuelve el stock al bucket original sin exigir que nuevo y usado esten en cero', () => {
+    const stock = {
+      stock_actual: 4,
+      stock_nuevo: 3,
+      stock_usado: 0,
+      stock_critico: 1,
+      es_usado: false,
+    } as any;
+
+    const total = (service as any).applyStockDeltaByConditionForMaintenance(
+      stock,
+      2,
+      'CRITICO',
+      'MAT-1',
+    );
+
+    expect(total).toBe(6);
+    expect(stock).toMatchObject({
+      stock_actual: 6,
+      stock_nuevo: 3,
+      stock_usado: 0,
+      stock_critico: 3,
+    });
+  });
+
+  it('rechaza el reverso cuando el material ya no esta disponible en la bodega', () => {
+    const stock = {
+      stock_actual: 1,
+      stock_nuevo: 1,
+      stock_usado: 0,
+      stock_critico: 0,
+    } as any;
+
+    expect(() =>
+      (service as any).applyStockDeltaByConditionForMaintenance(
+        stock,
+        -5,
+        'NUEVO',
+        'MAT-1',
+      ),
+    ).toThrow(ConflictException);
+  });
+
+  it('reingresa a bodega los materiales entregados y anula el kardex de egreso', async () => {
+    const stock = {
+      id: 'stock-1',
+      bodega_id: 'bodega-1',
+      producto_id: 'producto-1',
+      stock_actual: 5,
+      stock_nuevo: 5,
+      stock_usado: 0,
+      stock_critico: 0,
+      stock_fisico: 5,
+      is_deleted: false,
+    };
+    const stub = createManagerStub({
+      EntregaMaterialEntity: [
+        { id: 'entrega-1', work_order_id: 'wo-1', is_deleted: false },
+      ],
+      EntregaMaterialDetEntity: [
+        {
+          id: 'entrega-det-1',
+          entrega_id: 'entrega-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 3,
+          costo_unitario: 10,
+          condicion_material: 'NUEVO',
+        },
+      ],
+      MovimientoInventarioEntity: [
+        {
+          id: 'mov-egreso-1',
+          work_order_id: 'wo-1',
+          tipo_documento: 'EGRESO_BODEGA',
+          numero_documento: 'EB-00000004',
+          is_deleted: false,
+        },
+      ],
+      ProductoEntity: [
+        { id: 'producto-1', codigo: 'MAT', nombre: 'MATERIAL', ultimo_costo: 10 },
+      ],
+      StockBodegaEntity: [stock],
+    });
+
+    const result = await (service as any).reverseWorkOrderMaterialIssues(
+      stub.manager,
+      { id: 'wo-1', code: 'OT-A00001' },
+      { actorName: 'tester', fecha: new Date('2026-08-22T10:00:00Z'), motivo: null },
+    );
+
+    expect(result).toMatchObject({ entregas: 1, items: 1, total: 30 });
+    expect(stock).toMatchObject({
+      stock_actual: 8,
+      stock_nuevo: 8,
+      stock_fisico: 8,
+    });
+
+    const movimiento = stub.saved.MovimientoInventarioEntity?.[0];
+    expect(movimiento).toMatchObject({
+      tipo_movimiento: 'INGRESO',
+      tipo_documento: 'ANULACION_ORDEN_TRABAJO',
+      bodega_destino_id: 'bodega-1',
+      work_order_id: 'wo-1',
+    });
+    expect(stub.saved.KardexEntity?.[0]).toMatchObject({
+      bodega_id: 'bodega-1',
+      producto_id: 'producto-1',
+      tipo_movimiento: 'INGRESO',
+      entrada_cantidad: 3,
+      salida_cantidad: 0,
+      saldo_cantidad: 8,
+    });
+
+    const annulledEntities = stub.updates.map((item) => item.entity);
+    expect(annulledEntities).toEqual(
+      expect.arrayContaining([
+        'MovimientoInventarioEntity',
+        'MovimientoInventarioDetEntity',
+        'KardexEntity',
+        'EntregaMaterialEntity',
+      ]),
+    );
+    expect(
+      stub.updates.find((item) => item.entity === 'KardexEntity')?.values,
+    ).toMatchObject({ is_deleted: true, status: 'INACTIVE' });
+    expect(result.movimientos).toEqual(
+      expect.arrayContaining(['mov-egreso-1']),
+    );
+  });
+
+  it('retorna desde chatarra a la bodega origen el material desechado por la OT', async () => {
+    const scrapStock = {
+      id: 'stock-chatarra',
+      bodega_id: 'bodega-chatarra',
+      producto_id: 'producto-1',
+      stock_actual: 4,
+      stock_nuevo: 4,
+      stock_usado: 0,
+      stock_critico: 0,
+      stock_fisico: 4,
+      is_deleted: false,
+    };
+    const sourceStock = {
+      id: 'stock-origen',
+      bodega_id: 'bodega-1',
+      producto_id: 'producto-1',
+      stock_actual: 1,
+      stock_nuevo: 1,
+      stock_usado: 0,
+      stock_critico: 0,
+      stock_fisico: 1,
+      is_deleted: false,
+    };
+    const stub = createManagerStub({
+      WorkOrderDesechoEntity: [
+        {
+          id: 'desecho-1',
+          work_order_id: 'wo-1',
+          bodega_origen_id: 'bodega-1',
+          bodega_chatarra_id: 'bodega-chatarra',
+          transferencia_bodega_id: 'transfer-1',
+          is_deleted: false,
+        },
+      ],
+      WorkOrderDesechoDetEntity: [
+        {
+          id: 'desecho-det-1',
+          work_order_desecho_id: 'desecho-1',
+          producto_id: 'producto-1',
+          cantidad: 2,
+          costo_unitario: 7,
+          transferencia_bodega_det_id: 'transfer-det-1',
+          is_deleted: false,
+        },
+      ],
+      TransferenciaBodegaEntity: [
+        {
+          id: 'transfer-1',
+          movimiento_salida_id: 'mov-salida-1',
+          movimiento_ingreso_id: 'mov-ingreso-1',
+        },
+      ],
+      TransferenciaBodegaDetEntity: [
+        { id: 'transfer-det-1', kardex_salida_id: 'kardex-salida-1' },
+      ],
+      KardexEntity: [{ id: 'kardex-salida-1', condicion_material: 'NUEVO' }],
+      ProductoEntity: [
+        { id: 'producto-1', codigo: 'MAT', nombre: 'MATERIAL', ultimo_costo: 7 },
+      ],
+      MovimientoInventarioEntity: [],
+    });
+    jest
+      .spyOn(service as any, 'getOrCreateStockRowForMaintenance')
+      .mockImplementation(async (_manager: any, args: any) =>
+        args.bodegaId === 'bodega-chatarra' ? scrapStock : sourceStock,
+      );
+
+    const result = await (service as any).reverseWorkOrderScrapTransfers(
+      stub.manager,
+      { id: 'wo-1', code: 'OT-A00001' },
+      { actorName: 'tester', fecha: new Date('2026-08-22T10:00:00Z'), motivo: null },
+    );
+
+    expect(result).toMatchObject({ desechos: 1, items: 1, total: 14 });
+    expect(scrapStock).toMatchObject({ stock_actual: 2, stock_nuevo: 2 });
+    expect(sourceStock).toMatchObject({ stock_actual: 3, stock_nuevo: 3 });
+    expect(result.movimientos).toEqual(
+      expect.arrayContaining(['mov-salida-1', 'mov-ingreso-1']),
+    );
+    const kardexDirections = (stub.saved.KardexEntity ?? []).map(
+      (row: any) => row.tipo_movimiento,
+    );
+    expect(kardexDirections).toEqual(['SALIDA', 'INGRESO']);
+  });
+
+  it('permite anular con el permiso de eliminacion del menu aunque el rol no sea administrativo', async () => {
+    jest
+      .spyOn(service as any, 'getJson')
+      .mockResolvedValue([
+        {
+          nombre: 'Mantenimiento',
+          urlComponent: 'mantenimiento',
+          permissions: { permitDeleted: false },
+          children: [
+            {
+              nombre: 'Ordenes de trabajo',
+              urlComponent: 'work-orders',
+              permissions: { permitDeleted: true },
+              children: [],
+            },
+          ],
+        },
+      ]);
+
+    await expect(
+      (service as any).hasWorkOrderAnnulmentPermission({
+        userId: '2c2f5e02-2f0a-4c4d-9f2a-9c9d1f3a5b21',
+        roleName: 'JEFE DE TALLER',
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it('rechaza la anulacion cuando el usuario no tiene rol ni permiso de eliminacion', async () => {
+    jest
+      .spyOn(service as any, 'getJson')
+      .mockResolvedValue([
+        {
+          nombre: 'Ordenes de trabajo',
+          urlComponent: 'work-orders',
+          permissions: { permitDeleted: false },
+          children: [],
+        },
+      ]);
+
+    await expect(
+      service.annulWorkOrder('wo-1', {
+        userId: '2c2f5e02-2f0a-4c4d-9f2a-9c9d1f3a5b21',
+        roleName: 'OPERADOR',
+      } as any),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(repos.woRepo.findOne).not.toHaveBeenCalled();
   });
 });

@@ -70,6 +70,7 @@ import {
   UpdateCronogramaSemanalDto,
   WorkOrderQueryDto,
   CreateEquipoTipoDto,
+  AnnulWorkOrderDto,
   CreateWorkOrderDto,
   UpdateEquipoTipoDto,
   UpdateComponenteDto,
@@ -1656,10 +1657,27 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
-  @ApiOperation({ summary: 'Anular orden de trabajo conservando su auditoria' })
+  @ApiOperation({
+    summary:
+      'Anular orden de trabajo en cualquier estado y revertir sus movimientos de inventario',
+    description:
+      'Anula la OT aunque este finalizada o cerrada. Reingresa a bodega los materiales entregados, retorna desde chatarra los materiales desechados, libera reservas y anula consumos, generando el kardex de reverso correspondiente. Requiere rol administrativo o el permiso de eliminacion sobre el menu de ordenes de trabajo.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiBody({ type: AnnulWorkOrderDto, required: false })
   @Patch('work-orders/:id/anular')
-  annulWorkOrder(@Param('id') id: string, @Req() req: any) {
-    return this.service.deleteWorkOrder(id, getRequestActor(req));
+  annulWorkOrder(
+    @Param('id') id: string,
+    @Body() dto: AnnulWorkOrderDto,
+    @Req() req: any,
+  ) {
+    return this.service.annulWorkOrder(id, getRequestActor(req), {
+      motivo: dto?.motivo ?? null,
+    });
   }
 
   @ApiTags('Work Orders - Tareas')

@@ -1148,6 +1148,16 @@ export class CreateWorkOrderDto {
   blocked_reason?: string;
 }
 
+export class AnnulWorkOrderDto {
+  @ApiPropertyOptional({
+    description:
+      'Motivo de la anulacion; queda registrado en el historial de la OT y en las observaciones del kardex de reverso',
+  })
+  @IsOptional()
+  @IsString()
+  motivo?: string;
+}
+
 export class UpdateWorkOrderDto {
   @ApiPropertyOptional({ description: 'Estado de workflow de la OT' })
   @IsOptional()
