@@ -1390,6 +1390,150 @@ describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
     expect(kardexDirections).toEqual(['SALIDA', 'INGRESO']);
   });
 
+  it('anula logicamente (activo=false, status=ANULADA) la programacion activa vinculada a la OT sin desvincularla', async () => {
+    const programacion = {
+      id: 'prog-1',
+      work_order_id: 'wo-1',
+      is_deleted: false,
+      activo: true,
+      status: 'ACTIVE',
+      payload_json: { work_order_id: 'wo-1', work_order_code: 'OT-A00005' },
+    };
+    const stub = createManagerStub({
+      ProgramacionPlanEntity: [programacion],
+    });
+
+    const count = await (service as any).annulProgramacionesForWorkOrder(
+      stub.manager,
+      'wo-1',
+      {
+        actorName: 'tester',
+        annulledAt: new Date('2026-08-22T10:00:00Z'),
+        motivo: 'Anulacion de prueba',
+      },
+    );
+
+    expect(count).toBe(1);
+    expect(stub.saved.ProgramacionPlanEntity).toHaveLength(1);
+    expect(stub.saved.ProgramacionPlanEntity[0]).toMatchObject({
+      id: 'prog-1',
+      work_order_id: 'wo-1',
+      activo: false,
+      status: 'ANULADA',
+    });
+    expect(
+      (stub.saved.ProgramacionPlanEntity[0].payload_json as any)
+        .work_order_annulment,
+    ).toMatchObject({
+      annulled_by: 'tester',
+      motivo: 'Anulacion de prueba',
+    });
+    // preserva el vinculo original para trazabilidad
+    expect(
+      (stub.saved.ProgramacionPlanEntity[0].payload_json as any)
+        .work_order_id,
+    ).toBe('wo-1');
+  });
+
+  it('no anula programaciones sin vinculo activo a la OT (ninguna coincidencia)', async () => {
+    const stub = createManagerStub({ ProgramacionPlanEntity: [] });
+
+    const count = await (service as any).annulProgramacionesForWorkOrder(
+      stub.manager,
+      'wo-1',
+      { actorName: 'tester', annulledAt: new Date('2026-08-22T10:00:00Z') },
+    );
+
+    expect(count).toBe(0);
+    expect(stub.saved.ProgramacionPlanEntity).toBeUndefined();
+  });
+
+  it('al anular una OT, anula en la misma transaccion la programacion vinculada y reporta el conteo', async () => {
+    jest
+      .spyOn(service as any, 'assertWorkOrderAnnulmentAllowed')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'assertWorkOrderNotBlockedByActiveAnnex')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'releaseBlockedWorkOrdersFor')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'appendWorkOrderHistory')
+      .mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'writeSecurityLog').mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'recalculateAlertasNow')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockResolvedValue({ id: 'wo-1', code: 'OT-A00005' });
+    jest
+      .spyOn(service as any, 'reverseWorkOrderScrapTransfers')
+      .mockResolvedValue({
+        desechos: 0,
+        items: 0,
+        total: 0,
+        affectedPairs: [],
+        movimientos: [],
+      });
+    jest
+      .spyOn(service as any, 'reverseWorkOrderMaterialIssues')
+      .mockResolvedValue({
+        entregas: 0,
+        items: 0,
+        total: 0,
+        affectedPairs: [],
+        movimientos: [],
+      });
+    jest
+      .spyOn(service as any, 'releaseOpenReservationsForWorkOrder')
+      .mockResolvedValue(0);
+    jest
+      .spyOn(service as any, 'annulWorkOrderConsumosWithManager')
+      .mockResolvedValue(0);
+
+    const workOrder = {
+      id: 'wo-1',
+      code: 'OT-A00005',
+      status: 'CERRADA',
+      status_workflow: 'CLOSED',
+      valor_json: {},
+      is_deleted: false,
+    };
+    repos.woRepo.findOne.mockResolvedValue(workOrder);
+    repos.stockRepo.find.mockResolvedValue([]);
+
+    const programacion = {
+      id: 'prog-1',
+      work_order_id: 'wo-1',
+      is_deleted: false,
+      activo: true,
+      status: 'ACTIVE',
+      payload_json: { work_order_id: 'wo-1', work_order_code: 'OT-A00005' },
+    };
+    const stub = createManagerStub({
+      WorkOrderEntity: [workOrder],
+      ProgramacionPlanEntity: [programacion],
+    });
+    (service as any).dataSource = {
+      transaction: async (cb: any) => cb(stub.manager),
+    };
+
+    const result = await service.annulWorkOrder('wo-1', {
+      username: 'tester',
+    } as any);
+
+    expect(stub.saved.ProgramacionPlanEntity).toHaveLength(1);
+    expect(stub.saved.ProgramacionPlanEntity[0]).toMatchObject({
+      id: 'prog-1',
+      work_order_id: 'wo-1',
+      activo: false,
+      status: 'ANULADA',
+    });
+    expect((result as any).data.anulacion.programaciones_anuladas).toBe(1);
+  });
+
   it('permite anular con el permiso de eliminacion del menu aunque el rol no sea administrativo', async () => {
     jest
       .spyOn(service as any, 'getJson')

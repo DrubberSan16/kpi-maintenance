@@ -12264,19 +12264,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private async detachProgramacionesFromWorkOrder(workOrderId: string) {
-    const rows = await this.programacionRepo.find({
-      where: { work_order_id: workOrderId, is_deleted: false },
+  /**
+   * Anula logicamente toda ProgramacionPlan vinculada a la OT anulada: conserva
+   * work_order_id y el payload de vinculo para trazabilidad, pero la marca
+   * inactiva/ANULADA para que quede excluida de los listados de programacion
+   * pendiente. Solo alcanza a programaciones con vinculo activo a esta OT; las
+   * programaciones manuales sin vinculo no se tocan.
+   */
+  private async annulProgramacionesForWorkOrder(
+    manager: EntityManager,
+    workOrderId: string,
+    context: { actorName?: string | null; annulledAt: Date; motivo?: string | null },
+  ) {
+    const rows = await manager.find(ProgramacionPlanEntity, {
+      where: { work_order_id: workOrderId, is_deleted: false, activo: true },
     });
-    if (!rows.length) return;
+    if (!rows.length) return 0;
     for (const row of rows) {
-      row.work_order_id = null;
-      row.payload_json = this.mergeProgramacionWorkOrderPayload(
-        row.payload_json,
-        null,
-      );
+      row.activo = false;
+      row.status = 'ANULADA';
+      row.payload_json = {
+        ...(row.payload_json ?? {}),
+        work_order_annulment: {
+          annulled_at: context.annulledAt.toISOString(),
+          annulled_by: context.actorName ?? null,
+          motivo: context.motivo ?? null,
+        },
+      };
     }
-    await this.programacionRepo.save(rows);
+    await manager.save(ProgramacionPlanEntity, rows);
+    return rows.length;
   }
 
   private async recalculateProgramacionFields(
@@ -24642,6 +24659,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         manager,
         workOrder.id,
       );
+      const programaciones = await this.annulProgramacionesForWorkOrder(
+        manager,
+        workOrder.id,
+        { actorName, annulledAt, motivo },
+      );
 
       workOrder.is_deleted = false;
       workOrder.status = 'ANULADA';
@@ -24666,6 +24688,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           materiales_retornados_chatarra: scrap.items,
           reservas_liberadas: reservas ?? 0,
           consumos_anulados: consumos,
+          programaciones_anuladas: programaciones,
         },
       };
       await manager.save(WorkOrderEntity, workOrder);
@@ -24676,6 +24699,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         scrap,
         reservas: reservas ?? 0,
         consumos,
+        programaciones,
       };
     });
 
@@ -24685,13 +24709,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ];
 
     await this.releaseBlockedWorkOrdersFor(reversal.workOrder);
-    await this.detachProgramacionesFromWorkOrder(reversal.workOrder.id);
     await this.appendWorkOrderHistory(
       reversal.workOrder.id,
       'CLOSED',
       [
         `Orden de trabajo anulada por ${this.resolveActorLabel(actor) || actorName}`,
-        `Reversion: ${reversal.issues.items} material(es) reingresados, ${reversal.scrap.items} retornados desde chatarra, ${reversal.reservas} reserva(s) liberadas, ${reversal.consumos} consumo(s) anulados`,
+        `Reversion: ${reversal.issues.items} material(es) reingresados, ${reversal.scrap.items} retornados desde chatarra, ${reversal.reservas} reserva(s) liberadas, ${reversal.consumos} consumo(s) anulados, ${reversal.programaciones} programacion(es) anuladas`,
         motivo ? `Motivo: ${motivo}` : null,
       ]
         .filter(Boolean)
@@ -24743,6 +24766,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           costo_retornado: reversal.scrap.total,
           reservas_liberadas: reversal.reservas,
           consumos_anulados: reversal.consumos,
+          programaciones_anuladas: reversal.programaciones,
           movimientos_anulados: [
             ...reversal.issues.movimientos,
             ...reversal.scrap.movimientos,
