@@ -3892,6 +3892,47 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return normalized === 'PLANNED' || normalized === 'IN_PROGRESS';
   }
 
+  private isWorkOrderAnnulled(
+    workOrder?: Pick<WorkOrderEntity, 'status' | 'valor_json'> | null,
+  ): boolean {
+    if (!workOrder) return false;
+    const ANNULLED_VALUES = [
+      'ANULADA',
+      'ANULADO',
+      'CANCELLED',
+      'CANCELED',
+      'CANCELADA',
+      'CANCELADO',
+      'VOID',
+      'VOIDED',
+    ];
+    if (ANNULLED_VALUES.includes(this.normalizeRoleName(workOrder.status))) {
+      return true;
+    }
+    const payload = (workOrder.valor_json ?? {}) as Record<string, unknown>;
+    if (
+      ANNULLED_VALUES.includes(this.normalizeRoleName(payload.approval_action))
+    ) {
+      return true;
+    }
+    if (payload.annulment && typeof payload.annulment === 'object') {
+      return true;
+    }
+    return false;
+  }
+
+  private buildEquipmentReportLabel(
+    equipment?: Pick<EquipoEntity, 'codigo' | 'nombre' | 'modelo'> | null,
+  ): string {
+    if (!equipment) return 'Sin equipo';
+    const codigo = this.firstNonEmptyString(equipment.codigo);
+    const nombre = this.firstNonEmptyString(equipment.nombre);
+    const modelo = this.firstNonEmptyString(equipment.modelo);
+    const base = [codigo, nombre].filter(Boolean).join(' - ');
+    if (!base) return 'Sin equipo';
+    return modelo ? `${base} (${modelo})` : base;
+  }
+
   private isWorkOrderReservationActive(status: unknown) {
     return this.normalizeWorkflowStatus(status) !== 'CLOSED';
   }
@@ -19380,10 +19421,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .orderBy('wo.closed_at', 'DESC')
       .getMany();
 
-    const [visibleCreatedOrders, visibleClosedOrders] = await Promise.all([
-      this.filterWorkOrdersByScope(createdCandidates, scope),
-      this.filterWorkOrdersByScope(closedCandidates, scope),
-    ]);
+    const [visibleCreatedOrders, visibleClosedOrders] = (
+      await Promise.all([
+        this.filterWorkOrdersByScope(createdCandidates, scope),
+        this.filterWorkOrdersByScope(closedCandidates, scope),
+      ])
+    ).map((rows) => rows.filter((row) => !this.isWorkOrderAnnulled(row)));
     const visiblePendingOrders = visibleCreatedOrders.filter((row) =>
       this.isPendingDailyWorkOrderStatus(row.status_workflow),
     );
@@ -19457,9 +19500,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_code: workOrder?.code ?? null,
         work_order_title: workOrder?.title ?? null,
         maintenance_kind: workOrder?.maintenance_kind ?? null,
-        equipment_label:
-          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
-          'Sin equipo',
+        equipment_label: this.buildEquipmentReportLabel(equipment),
       };
     });
 
@@ -19563,9 +19604,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         title: workOrder.title,
         status: this.normalizeWorkflowStatus(workOrder.status_workflow),
         maintenance_kind: workOrder.maintenance_kind,
-        equipment_label:
-          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
-          'Sin equipo',
+        equipment_label: this.buildEquipmentReportLabel(equipment),
         bodega_ids: bodegaIds,
         bodega_label:
           bodegaIds
@@ -19667,10 +19706,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const visibleWarehouseIds = new Set(
       visibleWarehouses.map((row) => String(row.id || '').trim()).filter(Boolean),
     );
-    const visibleWorkOrders = await this.filterWorkOrdersByScope(
-      rawWorkOrders,
-      scope,
-    );
+    const visibleWorkOrders = (
+      await this.filterWorkOrdersByScope(rawWorkOrders, scope)
+    ).filter((row) => !this.isWorkOrderAnnulled(row));
     const scopedWorkOrders = requestedEquipmentId
       ? visibleWorkOrders.filter(
           (row) => String(row.equipment_id || '').trim() === requestedEquipmentId,
@@ -19885,13 +19923,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment_id: equipment?.id ?? workOrder.equipment_id ?? null,
         equipment_code: equipment?.codigo ?? null,
         equipment_name:
-          this.firstNonEmptyString(
-            equipment?.nombre,
-            [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - '),
-          ) ?? 'Sin equipo',
-        equipment_label:
-          [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
-          'Sin equipo',
+          this.firstNonEmptyString(equipment?.nombre) ??
+          this.buildEquipmentReportLabel(equipment),
+        equipment_label: this.buildEquipmentReportLabel(equipment),
         plan_id: plan?.id ?? workOrder.plan_id ?? null,
         plan_code: plan?.codigo ?? null,
         plan_name: plan?.nombre ?? procedure?.nombre ?? null,
@@ -21070,10 +21104,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { id: In(workOrderIds), is_deleted: false },
         })
       : [];
-    const visibleWorkOrders = await this.filterWorkOrdersByScope(
-      rawWorkOrders,
-      scope,
-    );
+    const visibleWorkOrders = (
+      await this.filterWorkOrdersByScope(rawWorkOrders, scope)
+    ).filter((row) => !this.isWorkOrderAnnulled(row));
     const filteredWorkOrders = onlyCebado
       ? visibleWorkOrders.filter(
           (row) =>
@@ -21194,9 +21227,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           equipment_id: equipment?.id ?? row.equipment_id ?? null,
           equipment_code: equipment?.codigo ?? null,
           equipment_name: equipment?.nombre ?? null,
-          equipment_label:
-            [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') ||
-            'Sin equipo',
+          equipment_label: this.buildEquipmentReportLabel(equipment),
           bodegas: bodegaLabels,
           bodega_label: bodegaLabels.join(' | ') || 'Sin bodega',
           movimientos: row.movimientos,
@@ -22174,10 +22205,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     qb.orderBy('wo.created_at', 'DESC');
-    const rows = await this.filterWorkOrdersByScope(
+    const scopedRows = await this.filterWorkOrdersByScope(
       await qb.getMany(),
       await this.buildSucursalScopeContext(sucursalId),
     );
+    const canViewAnnulled = this.isSuperAdministratorRoleName(actor?.roleName ?? undefined);
+    const rows = canViewAnnulled
+      ? scopedRows
+      : scopedRows.filter((row) => !this.isWorkOrderAnnulled(row));
     return this.wrap(
       await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor))),
       'Work orders listadas',
@@ -22193,6 +22228,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id,
       is_deleted: false,
     });
+    if (
+      this.isWorkOrderAnnulled(row) &&
+      !this.isSuperAdministratorRoleName(actor?.roleName ?? undefined)
+    ) {
+      throw new NotFoundException('Registro no encontrado');
+    }
     await this.assertWorkOrderVisibleForSucursal(row, sucursalId);
     await this.assertOperatorAssignedToWorkOrder(id, actor);
     return this.wrap(

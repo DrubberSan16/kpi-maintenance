@@ -1098,6 +1098,152 @@ describe('KpiMaintenanceService work orders', () => {
       ),
     ).toThrow(ConflictException);
   });
+
+  it('detecta OT anuladas por status, approval_action o marca de anulacion', () => {
+    const isAnnulled = (workOrder: any) =>
+      (service as any).isWorkOrderAnnulled(workOrder);
+
+    expect(isAnnulled({ status: 'ANULADA', valor_json: {} })).toBe(true);
+    expect(
+      isAnnulled({ status: 'ACTIVE', valor_json: { approval_action: 'ANULADA' } }),
+    ).toBe(true);
+    expect(
+      isAnnulled({
+        status: 'ACTIVE',
+        valor_json: { annulment: { motivo: 'stock' } },
+      }),
+    ).toBe(true);
+    expect(
+      isAnnulled({ status: 'ACTIVE', valor_json: { approval_action: 'CERRADA' } }),
+    ).toBe(false);
+    expect(isAnnulled(null)).toBe(false);
+  });
+
+  it('construye la etiqueta de equipo como codigo - nombre (modelo)', () => {
+    const buildLabel = (equipment: any) =>
+      (service as any).buildEquipmentReportLabel(equipment);
+
+    expect(
+      buildLabel({ codigo: 'UG03', nombre: 'GENERADOR', modelo: 'CAT 3512' }),
+    ).toBe('UG03 - GENERADOR (CAT 3512)');
+    expect(buildLabel({ codigo: 'UG03', nombre: 'GENERADOR', modelo: null })).toBe(
+      'UG03 - GENERADOR',
+    );
+    expect(buildLabel(null)).toBe('Sin equipo');
+  });
+
+  it('excluye OT anuladas del listado para roles distintos de Super Administrador', async () => {
+    const rows = [
+      {
+        id: 'wo-cerrada',
+        status: 'ACTIVE',
+        status_workflow: 'CLOSED',
+        valor_json: { approval_action: 'CERRADA' },
+        is_deleted: false,
+      },
+      {
+        id: 'wo-anulada',
+        status: 'ANULADA',
+        status_workflow: 'CLOSED',
+        valor_json: { approval_action: 'ANULADA' },
+        is_deleted: false,
+      },
+    ];
+    const qb: any = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue(rows),
+    };
+    repos.woRepo.createQueryBuilder.mockReturnValue(qb);
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockImplementation(async (row: any) => row);
+
+    const result = await service.listWorkOrders(
+      {} as any,
+      undefined,
+      { roleName: 'SUPERVISOR' } as any,
+    );
+
+    expect(result.data.map((row: any) => row.id)).toEqual(['wo-cerrada']);
+  });
+
+  it('incluye OT anuladas en el listado solo para Super Administrador', async () => {
+    const rows = [
+      {
+        id: 'wo-cerrada',
+        status: 'ACTIVE',
+        status_workflow: 'CLOSED',
+        valor_json: { approval_action: 'CERRADA' },
+        is_deleted: false,
+      },
+      {
+        id: 'wo-anulada',
+        status: 'ANULADA',
+        status_workflow: 'CLOSED',
+        valor_json: { approval_action: 'ANULADA' },
+        is_deleted: false,
+      },
+    ];
+    const qb: any = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue(rows),
+    };
+    repos.woRepo.createQueryBuilder.mockReturnValue(qb);
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockImplementation(async (row: any) => row);
+
+    const result = await service.listWorkOrders(
+      {} as any,
+      undefined,
+      { roleName: 'SUPER ADMINISTRADOR' } as any,
+    );
+
+    expect(result.data.map((row: any) => row.id)).toEqual([
+      'wo-cerrada',
+      'wo-anulada',
+    ]);
+  });
+
+  it('oculta el detalle de una OT anulada a roles distintos de Super Administrador', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-anulada',
+      status: 'ANULADA',
+      status_workflow: 'CLOSED',
+      valor_json: { approval_action: 'ANULADA' },
+      is_deleted: false,
+    });
+
+    await expect(
+      service.getWorkOrder('wo-anulada', undefined, {
+        roleName: 'SUPERVISOR',
+      } as any),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('permite al Super Administrador consultar el detalle de una OT anulada', async () => {
+    const workOrder = {
+      id: 'wo-anulada',
+      status: 'ANULADA',
+      status_workflow: 'CLOSED',
+      valor_json: { approval_action: 'ANULADA' },
+      is_deleted: false,
+    };
+    repos.woRepo.findOne.mockResolvedValue(workOrder);
+    jest
+      .spyOn(service as any, 'enrichWorkOrder')
+      .mockResolvedValue(workOrder);
+
+    const result = await service.getWorkOrder('wo-anulada', undefined, {
+      roleName: 'SUPER ADMINISTRADOR',
+    } as any);
+
+    expect(result.data).toEqual(workOrder);
+  });
 });
 
 describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
