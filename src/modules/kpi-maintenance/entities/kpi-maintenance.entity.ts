@@ -13,6 +13,8 @@ export class EquipoEntity {
   @Column({ default: 'MEDIA' }) criticidad: string;
   @Column({ default: 'OPERATIVO' }) estado_operativo: string;
   @Column({ default: 'PARADO' }) estado_funcionamiento: string;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  estado_funcionamiento_actualizado_en?: Date | null;
   @Column('numeric', { precision: 18, scale: 2, default: 0 })
   horometro_actual: number;
   @Column({ type: 'timestamp without time zone', nullable: true })
@@ -58,6 +60,33 @@ export class EquipoComponenteEntity {
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ default: false }) is_deleted: boolean;
+}
+
+@Entity({
+  schema: 'kpi_maintenance',
+  name: 'tb_equipo_funcionamiento_historial',
+})
+export class EquipoFuncionamientoHistorialEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) equipo_id: string;
+  @Column({ type: 'text', nullable: true }) estado_anterior?: string | null;
+  @Column({ type: 'text' }) estado_nuevo: string;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  estado_anterior_desde?: Date | null;
+  @Column({
+    type: 'bigint',
+    nullable: true,
+    transformer: {
+      to: (value?: number | null) => value ?? null,
+      from: (value?: string | null) =>
+        value === null || value === undefined ? null : Number(value),
+    },
+  })
+  duracion_estado_anterior_segundos?: number | null;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  changed_at: Date;
+  @Column({ type: 'uuid', nullable: true }) changed_by_id?: string | null;
+  @Column({ type: 'text', nullable: true }) changed_by?: string | null;
 }
 
 @Entity({ schema: 'kpi_inventory', name: 'tb_marca' })

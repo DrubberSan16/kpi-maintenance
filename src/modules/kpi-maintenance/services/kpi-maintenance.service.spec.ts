@@ -6,6 +6,10 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
+import {
+  EquipoEntity,
+  EquipoFuncionamientoHistorialEntity,
+} from '../entities/kpi-maintenance.entity';
 
 const createRepo = () => ({
   findOne: jest.fn(),
@@ -61,6 +65,7 @@ const createRepos = () => ({
   reservaRepo: createRepo(),
   woTareaRepo: createRepo(),
   woAdjuntoRepo: createRepo(),
+  equipoFuncionamientoHistorialRepo: createRepo(),
 });
 
 type RepoBag = ReturnType<typeof createRepos>;
@@ -125,6 +130,7 @@ const createService = (repos: RepoBag, ds: DataSource) =>
     repos.reservaRepo as any,
     repos.woTareaRepo as any,
     repos.woAdjuntoRepo as any,
+    repos.equipoFuncionamientoHistorialRepo as any,
     ds,
   );
 
@@ -1753,23 +1759,130 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
   let repos: RepoBag;
   let service: KpiMaintenanceService;
 
+  const createTransactionalDataSourceMock = (bag: RepoBag) => {
+    const entityRepoMap = new Map<any, any>([
+      [EquipoEntity, bag.equipoRepo],
+      [
+        EquipoFuncionamientoHistorialEntity,
+        bag.equipoFuncionamientoHistorialRepo,
+      ],
+    ]);
+    return {
+      query: jest.fn().mockResolvedValue([]),
+      transaction: jest.fn(async (cb: any) =>
+        cb({ getRepository: (entity: any) => entityRepoMap.get(entity) }),
+      ),
+    } as unknown as DataSource;
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
     repos = createRepos();
-    service = createService(repos, createDataSourceMock());
+    service = createService(repos, createTransactionalDataSourceMock(repos));
   });
 
-  it('actualiza solo el estado_funcionamiento y conserva el estado_operativo', async () => {
+  it('actualiza el estado_funcionamiento, conserva el estado_operativo y registra el historial', async () => {
     const equipo = {
       id: 'equipo-1',
       codigo: 'EQ-001',
       estado_operativo: 'OPERATIVO',
       estado_funcionamiento: 'PARADO',
+      estado_funcionamiento_actualizado_en: null,
       updated_by: 'anterior',
       is_deleted: false,
     };
     repos.equipoRepo.findOne.mockResolvedValue(equipo);
     repos.equipoRepo.save.mockImplementation(async (value: any) => value);
+    repos.equipoFuncionamientoHistorialRepo.save.mockImplementation(
+      async (value: any) => value,
+    );
+
+    const result = await service.updateEquipoEstadoFuncionamiento(
+      'equipo-1',
+      { estado_funcionamiento: 'FUNCIONAMIENTO' as any },
+      {
+        userId: '2c2f5e02-2f0a-4c4d-9f2a-9c9d1f3a5b21',
+        username: 'jdoe',
+        displayName: 'John Doe',
+      },
+    );
+
+    expect(equipo.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+    expect(equipo.estado_operativo).toBe('OPERATIVO');
+    expect(equipo.updated_by).toBe('John Doe');
+    expect(equipo.estado_funcionamiento_actualizado_en).toBeInstanceOf(Date);
+    expect(repos.equipoRepo.save).toHaveBeenCalledWith(equipo);
+    expect(repos.equipoFuncionamientoHistorialRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_id: 'equipo-1',
+        estado_anterior: 'PARADO',
+        estado_nuevo: 'FUNCIONAMIENTO',
+        estado_anterior_desde: null,
+        duracion_estado_anterior_segundos: null,
+        changed_by_id: '2c2f5e02-2f0a-4c4d-9f2a-9c9d1f3a5b21',
+        changed_by: 'John Doe',
+        changed_at: equipo.estado_funcionamiento_actualizado_en,
+      }),
+    );
+    expect(result.data.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+    expect(result.data.estado_funcionamiento_actualizado_en).toBeInstanceOf(
+      Date,
+    );
+  });
+
+  it('calcula la duracion exacta del tramo anterior al cerrar PARADO->FUNCIONAMIENTO', async () => {
+    const inicioParada = new Date('2026-08-20T10:00:00.000Z');
+    const ahora = new Date('2026-08-20T10:05:30.000Z'); // +330s
+    jest.useFakeTimers().setSystemTime(ahora);
+    const equipo = {
+      id: 'equipo-1',
+      codigo: 'EQ-001',
+      estado_operativo: 'OPERATIVO',
+      estado_funcionamiento: 'PARADO',
+      estado_funcionamiento_actualizado_en: inicioParada,
+      updated_by: 'anterior',
+      is_deleted: false,
+    };
+    repos.equipoRepo.findOne.mockResolvedValue(equipo);
+    repos.equipoRepo.save.mockImplementation(async (value: any) => value);
+    repos.equipoFuncionamientoHistorialRepo.save.mockImplementation(
+      async (value: any) => value,
+    );
+
+    try {
+      await service.updateEquipoEstadoFuncionamiento(
+        'equipo-1',
+        { estado_funcionamiento: 'FUNCIONAMIENTO' as any },
+        { userId: 'u1', username: 'jdoe', displayName: 'John Doe' },
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(
+      repos.equipoFuncionamientoHistorialRepo.save,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        estado_anterior: 'PARADO',
+        estado_nuevo: 'FUNCIONAMIENTO',
+        estado_anterior_desde: inicioParada,
+        duracion_estado_anterior_segundos: 330,
+        changed_at: ahora,
+      }),
+    );
+  });
+
+  it('no crea un evento ni cambia la fecha del ultimo cambio cuando el estado se repite', async () => {
+    const fecha = new Date('2026-08-20T10:00:00.000Z');
+    const equipo = {
+      id: 'equipo-1',
+      estado_operativo: 'OPERATIVO',
+      estado_funcionamiento: 'FUNCIONAMIENTO',
+      estado_funcionamiento_actualizado_en: fecha,
+      updated_by: 'anterior',
+      is_deleted: false,
+    };
+    repos.equipoRepo.findOne.mockResolvedValue(equipo);
 
     const result = await service.updateEquipoEstadoFuncionamiento(
       'equipo-1',
@@ -1777,21 +1890,16 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
       { userId: 'u1', username: 'jdoe', displayName: 'John Doe' },
     );
 
-    expect(equipo.estado_funcionamiento).toBe('FUNCIONAMIENTO');
-    expect(equipo.estado_operativo).toBe('OPERATIVO');
-    expect(equipo.updated_by).toBe('John Doe');
-    expect(repos.equipoRepo.save).toHaveBeenCalledWith(equipo);
-    expect(result.data.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+    expect(repos.equipoRepo.save).not.toHaveBeenCalled();
+    expect(
+      repos.equipoFuncionamientoHistorialRepo.save,
+    ).not.toHaveBeenCalled();
+    expect(equipo.estado_funcionamiento_actualizado_en).toBe(fecha);
+    expect(equipo.updated_by).toBe('anterior');
+    expect(result.data.estado_funcionamiento_actualizado_en).toBe(fecha);
   });
 
   it('rechaza valores distintos de FUNCIONAMIENTO/PARADO', async () => {
-    repos.equipoRepo.findOne.mockResolvedValue({
-      id: 'equipo-1',
-      estado_operativo: 'OPERATIVO',
-      estado_funcionamiento: 'PARADO',
-      is_deleted: false,
-    });
-
     await expect(
       service.updateEquipoEstadoFuncionamiento(
         'equipo-1',
@@ -1799,6 +1907,7 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
         {},
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repos.equipoRepo.findOne).not.toHaveBeenCalled();
     expect(repos.equipoRepo.save).not.toHaveBeenCalled();
   });
 
@@ -1812,6 +1921,9 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
         {},
       ),
     ).rejects.toBeInstanceOf(NotFoundException);
+    expect(
+      repos.equipoFuncionamientoHistorialRepo.save,
+    ).not.toHaveBeenCalled();
   });
 
   it('crea un equipo con estado_funcionamiento por defecto PARADO', async () => {
@@ -1828,5 +1940,42 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
     } as any);
 
     expect(result.data.estado_funcionamiento).toBe('PARADO');
+  });
+
+  it('lista el historial de estado de funcionamiento ordenado por fecha descendente', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      is_deleted: false,
+    });
+    const rows = [
+      { id: 'h-2', changed_at: new Date('2026-08-21T00:00:00.000Z') },
+      { id: 'h-1', changed_at: new Date('2026-08-20T00:00:00.000Z') },
+    ];
+    const qb: any = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue(rows),
+    };
+    repos.equipoFuncionamientoHistorialRepo.createQueryBuilder.mockReturnValue(
+      qb,
+    );
+
+    const result = await service.listEquipoFuncionamientoHistorial(
+      'equipo-1',
+      { from: '2026-08-01', to: '2026-08-31' } as any,
+    );
+
+    expect(qb.where).toHaveBeenCalledWith('h.equipo_id = :equipoId', {
+      equipoId: 'equipo-1',
+    });
+    expect(qb.andWhere).toHaveBeenCalledWith('h.changed_at >= :from', {
+      from: '2026-08-01',
+    });
+    expect(qb.andWhere).toHaveBeenCalledWith('h.changed_at <= :to', {
+      to: '2026-08-31',
+    });
+    expect(qb.orderBy).toHaveBeenCalledWith('h.changed_at', 'DESC');
+    expect(result.data).toEqual(rows);
   });
 });

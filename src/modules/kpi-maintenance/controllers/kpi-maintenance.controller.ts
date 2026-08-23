@@ -342,6 +342,18 @@ export class KpiMaintenanceController {
     );
   }
   @ApiTags('Equipos')
+  @ApiOperation({
+    summary: 'Listar historial de estado de funcionamiento de un equipo',
+  })
+  @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
+  @Get('equipos/:id/estado-funcionamiento/historial')
+  listEquipoEstadoFuncionamientoHistorial(
+    @Param('id') id: string,
+    @Query() range: DateRangeDto,
+  ) {
+    return this.service.listEquipoFuncionamientoHistorial(id, range);
+  }
+  @ApiTags('Equipos')
   @ApiOperation({ summary: 'Eliminar fisicamente todos los equipos' })
   @Delete('equipos/purge-all')
   purgeEquipos(@Headers('x-role-name') roleName?: string) {

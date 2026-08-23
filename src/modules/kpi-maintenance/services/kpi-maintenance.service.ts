@@ -50,6 +50,7 @@ import {
   EntregaMaterialEntity,
   EquipoComponenteEntity,
   EquipoEntity,
+  EquipoFuncionamientoHistorialEntity,
   EquipoTipoEntity,
   EstadoEquipoCatalogoEntity,
   EstadoEquipoEntity,
@@ -957,6 +958,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly woTareaRepo: Repository<WorkOrderTareaEntity>,
     @InjectRepository(WorkOrderAdjuntoEntity)
     private readonly woAdjuntoRepo: Repository<WorkOrderAdjuntoEntity>,
+    @InjectRepository(EquipoFuncionamientoHistorialEntity)
+    private readonly equipoFuncionamientoHistorialRepo: Repository<EquipoFuncionamientoHistorialEntity>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
@@ -1724,6 +1727,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ADD COLUMN IF NOT EXISTS estado_funcionamiento text NULL
     `);
     await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS estado_funcionamiento_actualizado_en timestamp without time zone NULL
+    `);
+    await this.dataSource.query(`
       DO $$
       BEGIN
         IF to_regclass('kpi_maintenance.tb_equipo') IS NULL THEN
@@ -1750,6 +1757,79 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           CHECK (estado_funcionamiento IN ('FUNCIONAMIENTO', 'PARADO'));
         END IF;
       END $$;
+    `);
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS kpi_maintenance.tb_equipo_funcionamiento_historial (
+        id uuid PRIMARY KEY,
+        equipo_id uuid NOT NULL,
+        estado_anterior text NULL,
+        estado_nuevo text NOT NULL,
+        estado_anterior_desde timestamp without time zone NULL,
+        duracion_estado_anterior_segundos bigint NULL,
+        changed_at timestamp without time zone NOT NULL DEFAULT now(),
+        changed_by_id uuid NULL,
+        changed_by text NULL
+      )
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo_funcionamiento_historial
+      ADD COLUMN IF NOT EXISTS estado_anterior_desde timestamp without time zone NULL
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo_funcionamiento_historial
+      ADD COLUMN IF NOT EXISTS duracion_estado_anterior_segundos bigint NULL
+    `);
+    await this.dataSource.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('kpi_maintenance.tb_equipo_funcionamiento_historial') IS NULL THEN
+          RETURN;
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_tb_equipo_funcionamiento_historial_estado_nuevo'
+            AND conrelid = 'kpi_maintenance.tb_equipo_funcionamiento_historial'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_equipo_funcionamiento_historial
+          ADD CONSTRAINT chk_tb_equipo_funcionamiento_historial_estado_nuevo
+          CHECK (estado_nuevo IN ('FUNCIONAMIENTO', 'PARADO'));
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_tb_equipo_funcionamiento_historial_estado_anterior'
+            AND conrelid = 'kpi_maintenance.tb_equipo_funcionamiento_historial'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_equipo_funcionamiento_historial
+          ADD CONSTRAINT chk_tb_equipo_funcionamiento_historial_estado_anterior
+          CHECK (estado_anterior IS NULL OR estado_anterior IN ('FUNCIONAMIENTO', 'PARADO'));
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'fk_tb_equipo_funcionamiento_historial_equipo'
+            AND conrelid = 'kpi_maintenance.tb_equipo_funcionamiento_historial'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_equipo_funcionamiento_historial
+          ADD CONSTRAINT fk_tb_equipo_funcionamiento_historial_equipo
+          FOREIGN KEY (equipo_id) REFERENCES kpi_maintenance.tb_equipo (id);
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_tb_equipo_funcionamiento_historial_duracion'
+            AND conrelid = 'kpi_maintenance.tb_equipo_funcionamiento_historial'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_equipo_funcionamiento_historial
+          ADD CONSTRAINT chk_tb_equipo_funcionamiento_historial_duracion
+          CHECK (duracion_estado_anterior_segundos IS NULL OR duracion_estado_anterior_segundos >= 0);
+        END IF;
+      END $$;
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_equipo_funcionamiento_historial_equipo_fecha
+      ON kpi_maintenance.tb_equipo_funcionamiento_historial (equipo_id, changed_at DESC)
     `);
   }
 
@@ -6647,6 +6727,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         await del('estados_equipo', EstadoEquipoEntity);
         await del('bitacora', BitacoraDiariaEntity);
         await del('componentes', EquipoComponenteEntity);
+        await del(
+          'funcionamiento_historial',
+          EquipoFuncionamientoHistorialEntity,
+        );
       };
       const clearPlanReferences = async () => {
         const planJsonKeys = ['plan_id', 'plan_codigo', 'plan_nombre'];
@@ -13004,7 +13088,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       displayName?: string | null;
     },
   ) {
-    const e = await this.findEquipoOrFail(id);
     const estado_funcionamiento = this.normalizeEquipoEstadoFuncionamiento(
       dto.estado_funcionamiento,
     );
@@ -13013,14 +13096,85 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `El estado de funcionamiento del equipo no es válido. Valores permitidos: ${EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES.join(', ')}.`,
       );
     }
-    e.estado_funcionamiento = estado_funcionamiento;
-    e.updated_by =
+    const changedById =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        String(actor?.userId || '').trim(),
+      )
+        ? String(actor?.userId).trim()
+        : null;
+    const changedByLabel =
       String(
         actor?.displayName || actor?.username || actor?.userId || '',
-      ).trim() || e.updated_by;
-    e.updated_at = new Date();
-    const saved = await this.equipoRepo.save(e);
+      ).trim() || null;
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const equipoRepo = manager.getRepository(EquipoEntity);
+      const historialRepo = manager.getRepository(
+        EquipoFuncionamientoHistorialEntity,
+      );
+      const e = await equipoRepo.findOne({
+        where: { id, is_deleted: false } as any,
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!e) {
+        throw new NotFoundException('Registro no encontrado');
+      }
+      const estadoAnterior = e.estado_funcionamiento;
+      if (estadoAnterior === estado_funcionamiento) {
+        return e;
+      }
+      const now = new Date();
+      const estadoAnteriorDesde =
+        e.estado_funcionamiento_actualizado_en &&
+        !Number.isNaN(new Date(e.estado_funcionamiento_actualizado_en).getTime())
+          ? new Date(e.estado_funcionamiento_actualizado_en)
+          : null;
+      const duracionEstadoAnteriorSegundos = estadoAnteriorDesde
+        ? Math.max(
+            0,
+            Math.floor(
+              (now.getTime() - estadoAnteriorDesde.getTime()) / 1000,
+            ),
+          )
+        : null;
+      e.estado_funcionamiento = estado_funcionamiento;
+      e.estado_funcionamiento_actualizado_en = now;
+      e.updated_by = changedByLabel || e.updated_by;
+      e.updated_at = now;
+      const savedEquipo = await equipoRepo.save(e);
+      await historialRepo.save(
+        historialRepo.create({
+          id: randomUUID(),
+          equipo_id: id,
+          estado_anterior: estadoAnterior,
+          estado_nuevo: estado_funcionamiento,
+          estado_anterior_desde: estadoAnteriorDesde,
+          duracion_estado_anterior_segundos: duracionEstadoAnteriorSegundos,
+          changed_at: now,
+          changed_by_id: changedById,
+          changed_by: changedByLabel,
+        }),
+      );
+      return savedEquipo;
+    });
     return this.wrap(saved, 'Estado de funcionamiento actualizado');
+  }
+
+  async listEquipoFuncionamientoHistorial(
+    equipoId: string,
+    range: DateRangeDto,
+  ) {
+    await this.findEquipoOrFail(equipoId);
+    const qb = this.equipoFuncionamientoHistorialRepo
+      .createQueryBuilder('h')
+      .where('h.equipo_id = :equipoId', { equipoId });
+    if (range.from)
+      qb.andWhere('h.changed_at >= :from', { from: range.from });
+    if (range.to) qb.andWhere('h.changed_at <= :to', { to: range.to });
+    return this.wrap(
+      await qb.orderBy('h.changed_at', 'DESC').getMany(),
+      'Historial de estado de funcionamiento listado',
+    );
   }
   async deleteEquipo(id: string) {
     const e = await this.findEquipoOrFail(id);
