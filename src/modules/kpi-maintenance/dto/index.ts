@@ -3,6 +3,7 @@ import {
   IsArray,
   IsBoolean,
   IsDateString,
+  IsDefined,
   IsEnum,
   IsNotEmpty,
   IsNumber,
@@ -1635,6 +1636,15 @@ export class AnalisisLubricanteDetalleDto {
 }
 
 export class CreateAnalisisLubricanteDto {
+  @ApiProperty({
+    description: 'ID del producto de inventario marcado como aceite',
+    format: 'uuid',
+  })
+  @IsUUID()
+  @IsDefined()
+  @IsNotEmpty()
+  producto_id?: string;
+
   @ValidateIf(
     (_obj, value) =>
       value !== undefined && value !== null && String(value).trim() !== '',

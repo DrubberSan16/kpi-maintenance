@@ -433,6 +433,7 @@ export class ProcedimientoActividadEntity {
 export class AnalisisLubricanteEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column() codigo: string;
+  @Column({ type: 'uuid', nullable: true }) producto_id?: string | null;
   @Column({ type: 'text', nullable: true }) cliente?: string | null;
   @Column({ type: 'uuid', nullable: true }) equipo_id?: string | null;
   @Column({ type: 'text', nullable: true }) lubricante?: string | null;
@@ -1100,6 +1101,7 @@ export class ProductoEntity {
   @Column({ type: 'varchar', length: 60, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 250, nullable: true }) nombre?: string | null;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
+  @Column({ type: 'uuid', nullable: true }) marca_id?: string | null;
   @Column({ type: 'uuid', nullable: true }) unidad_medida_id?: string | null;
   @Column({ type: 'boolean', default: false }) es_aceite: boolean;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })

@@ -391,6 +391,8 @@ type LubricantImportJobState = {
   current_index: number;
   total_steps: number;
   upsert_existing: boolean;
+  producto_id: string;
+  producto_label: string;
   requested_by: string | null;
   created_at: string;
   started_at: string | null;
@@ -997,6 +999,67 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return descripcion ? `${material} (${descripcion})` : material;
   }
 
+  private async resolveAnalisisOilProduct(
+    productoId: unknown,
+    manager?: EntityManager,
+  ) {
+    const normalizedId = String(productoId ?? '').trim();
+    if (!normalizedId) {
+      throw new BadRequestException(
+        'Debes seleccionar el aceite asociado al análisis de lubricante.',
+      );
+    }
+
+    const productoRepo = manager?.getRepository(ProductoEntity) ?? this.productoRepo;
+    const marcaRepo = manager?.getRepository(MarcaEntity) ?? this.marcaRepo;
+    const producto = await productoRepo.findOne({
+      where: { id: normalizedId, is_deleted: false },
+    });
+    if (!producto) {
+      throw new BadRequestException('El aceite seleccionado no existe o está inactivo.');
+    }
+    if (!Boolean(producto.es_aceite)) {
+      throw new BadRequestException(
+        'El producto seleccionado no está configurado como aceite.',
+      );
+    }
+
+    const marca = producto.marca_id
+      ? await marcaRepo.findOne({
+          where: { id: producto.marca_id, is_deleted: false },
+        })
+      : null;
+    return {
+      producto,
+      marca,
+      productoLabel: this.buildProductoLabel(producto) ?? producto.id,
+      lubricante: String(producto.nombre || '').trim() || this.buildProductoLabel(producto),
+      marcaLubricante: String(marca?.nombre || '').trim() || null,
+    };
+  }
+
+  private applyAnalisisOilSnapshot(
+    dto: CreateAnalisisLubricanteDto,
+    oil: Awaited<ReturnType<KpiMaintenanceService['resolveAnalisisOilProduct']>>,
+  ): CreateAnalisisLubricanteDto {
+    const payload = { ...((dto.payload_json ?? {}) as Record<string, unknown>) };
+    return {
+      ...dto,
+      producto_id: oil.producto.id,
+      lubricante: oil.lubricante ?? undefined,
+      marca_lubricante: oil.marcaLubricante ?? undefined,
+      payload_json: {
+        ...payload,
+        producto_id: oil.producto.id,
+        producto_label: oil.productoLabel,
+        lubricante_codigo: oil.producto.codigo ?? null,
+        lubricante_descripcion: oil.producto.descripcion ?? null,
+        lubricante: oil.lubricante ?? null,
+        marca_lubricante: oil.marcaLubricante,
+      },
+    };
+  }
+
   private buildBodegaLabel(bodega?: Partial<BodegaEntity> | null) {
     if (!bodega) return null;
     const codigo = String(bodega.codigo || '').trim();
@@ -1551,6 +1614,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         AND COALESCE(es_aceite, false) = false
         AND UPPER(COALESCE(nombre, '')) LIKE '%ACEITE%'
       `);
+  }
+
+  private async ensureAnalisisLubricanteOilSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_analisis_lubricante
+      ADD COLUMN IF NOT EXISTS producto_id uuid NULL
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS idx_tb_analisis_lubricante_producto
+      ON kpi_maintenance.tb_analisis_lubricante (producto_id)
+      WHERE is_deleted = false
+    `);
   }
 
   private async ensureInventoryStockSchema() {
@@ -2907,6 +2982,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     await this.ensureInventoryOilSchema();
+    await this.ensureAnalisisLubricanteOilSchema();
     await this.ensureInventoryStockSchema();
     await this.ensurePlanMaintenanceSchema();
     await this.ensureProgramacionScheduleSchema();
@@ -8072,6 +8148,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const payload = (row?.payload_json ?? {}) as Record<string, unknown>;
     const sampleInfo = ((payload.sample_info ?? payload.muestra) ||
       {}) as Record<string, unknown>;
+    const productoId =
+      String(row?.producto_id ?? payload.producto_id ?? '').trim() || null;
 
     const lubricante =
       String(
@@ -8123,6 +8201,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     const identityLookupKey = this.normalizeSearchToken(
       [
+        productoId,
         lubricanteCodigo,
         lubricante,
         marcaLubricante,
@@ -8136,6 +8215,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
 
     return {
+      producto_id: productoId,
       lubricante,
       marca_lubricante: marcaLubricante,
       lubricante_codigo: lubricanteCodigo,
@@ -8524,10 +8604,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async buildAnalisisLubricantePayload(row: AnalisisLubricanteEntity) {
-    const detalles = await this.analisisLubricanteDetRepo.find({
-      where: { analisis_id: row.id, is_deleted: false },
-      order: { orden: 'ASC', created_at: 'ASC' },
-    });
+    const [detalles, producto] = await Promise.all([
+      this.analisisLubricanteDetRepo.find({
+        where: { analisis_id: row.id, is_deleted: false },
+        order: { orden: 'ASC', created_at: 'ASC' },
+      }),
+      row.producto_id
+        ? this.productoRepo.findOne({
+            where: { id: row.producto_id, is_deleted: false },
+          })
+        : Promise.resolve(null),
+    ]);
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
     const identity = this.resolveLubricantIdentity(row);
     const sampleInfo = this.extractAnalysisSampleInfo(payload);
@@ -8649,6 +8736,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return {
       ...row,
+      producto_id: row.producto_id ?? identity.producto_id,
+      producto_label:
+        this.buildProductoLabel(producto) ||
+        String(payload.producto_label || '').trim() ||
+        null,
       lubricante: identity.lubricante,
       marca_lubricante: identity.marca_lubricante,
       lubricante_codigo: identity.lubricante_codigo,
@@ -8681,6 +8773,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildAnalisisImportIdentity(input: {
+    producto_id?: string | null;
     equipo_id?: string | null;
     equipo_codigo?: string | null;
     compartimento_principal?: string | null;
@@ -8701,6 +8794,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.normalizeSearchToken(input.equipo_codigo) ||
       'GLOBAL';
     const lubricanteKey = this.normalizeSearchToken(input.lubricante);
+    const productoKey = String(input.producto_id || payload.producto_id || '').trim();
 
     if (!numeroMuestra && !fechaMuestra) {
       return null;
@@ -8711,7 +8805,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       compartimento || 'GENERAL',
       numeroMuestra || 'SIN_MUESTRA',
       fechaMuestra || 'SIN_FECHA',
-      lubricanteKey || 'SIN_LUBRICANTE',
+      productoKey || lubricanteKey || 'SIN_LUBRICANTE',
     ].join('::');
   }
 
@@ -14830,6 +14924,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       string,
       {
         key: string;
+        producto_id: string | null;
         lubricante: string;
         marca_lubricante: string | null;
         lubricante_codigo: string | null;
@@ -14857,6 +14952,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!identity.identity_lookup_key || !identity.lubricante) continue;
       const existing = catalog.get(identity.identity_lookup_key) ?? {
         key: identity.identity_lookup_key,
+        producto_id: identity.producto_id,
         lubricante: identity.lubricante,
         marca_lubricante: identity.marca_lubricante,
         lubricante_codigo: identity.lubricante_codigo,
@@ -15211,6 +15307,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: CreateAnalisisLubricanteDto,
     options: AnalisisLubricanteSaveOptions = {},
   ) {
+    const selectedOil = await this.resolveAnalisisOilProduct(dto.producto_id);
+    dto = this.applyAnalisisOilSnapshot(dto, selectedOil);
     let resolution = await this.resolveRequestedAnalisisLubricanteCode(
       dto.codigo,
     );
@@ -15271,6 +15369,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           const row = await analisisRepo.save(
             analisisRepo.create({
               codigo: resolution.resolvedCode,
+              producto_id: dto.producto_id,
               cliente: dto.cliente ?? null,
               equipo_id: dto.equipo_id ?? null,
               lubricante: lubricanteIdentity.lubricante,
@@ -15391,6 +15490,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     options: AnalisisLubricanteSaveOptions = {},
   ) {
     await this.findOneOrFail(this.analisisLubricanteRepo, { id, is_deleted: false });
+    const selectedOil = await this.resolveAnalisisOilProduct(dto.producto_id);
+    dto = this.applyAnalisisOilSnapshot(dto, selectedOil);
 
     await this.dataSource.transaction(async (manager) => {
       const analisisRepo = manager.getRepository(AnalisisLubricanteEntity);
@@ -15453,6 +15554,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
       Object.assign(row, {
         codigo: row.codigo,
+        producto_id: dto.producto_id,
         cliente: dto.cliente ?? row.cliente ?? null,
         equipo_id: dto.equipo_id ?? row.equipo_id ?? null,
         lubricante: lubricanteIdentity.lubricante,
@@ -15708,6 +15810,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const existingMap = new Map<string, AnalisisLubricanteEntity>();
     for (const row of existingRows) {
       const identity = this.buildAnalisisImportIdentity({
+        producto_id: row.producto_id ?? null,
         equipo_id: row.equipo_id ?? null,
         equipo_codigo: row.equipo_codigo ?? null,
         compartimento_principal: row.compartimento_principal ?? null,
@@ -15733,6 +15836,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const item = sanitizedItems[index];
       try {
         const identity = this.buildAnalisisImportIdentity({
+          producto_id: item.producto_id ?? null,
           equipo_id: item.equipo_id ?? null,
           equipo_codigo: item.equipo_codigo ?? null,
           compartimento_principal: item.compartimento_principal ?? null,
@@ -15783,6 +15887,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             payload_json?: Record<string, unknown>;
           };
           const createdIdentity = this.buildAnalisisImportIdentity({
+            producto_id: createdRow.producto_id ?? null,
             equipo_id: createdRow.equipo_id ?? null,
             equipo_codigo: createdRow.equipo_codigo ?? null,
             compartimento_principal: createdRow.compartimento_principal ?? null,
@@ -15896,6 +16001,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       size?: number;
     } | null,
     options?: {
+      producto_id?: unknown;
       upsert_existing?: unknown;
       requested_by?: string | null;
     },
@@ -15909,6 +16015,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'El archivo debe tener formato .xlsx o .xls.',
       );
     }
+
+    const selectedOil = await this.resolveAnalisisOilProduct(options?.producto_id);
 
     const jobId = randomUUID();
     const storedFileName = `source${extension || '.xlsx'}`;
@@ -15927,6 +16035,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       current_index: 0,
       total_steps: 0,
       upsert_existing: this.coerceBoolean(options?.upsert_existing, true),
+      producto_id: selectedOil.producto.id,
+      producto_label: selectedOil.productoLabel,
       requested_by: String(options?.requested_by ?? '').trim() || null,
       created_at: new Date().toISOString(),
       started_at: null,
@@ -15957,6 +16067,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       {
         file_name: job.source_file_name,
         size_bytes: job.file_size_bytes,
+        producto_id: job.producto_id,
+        producto_label: job.producto_label,
       },
     );
     await this.writeSecurityLog({
@@ -16002,11 +16114,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         buffer,
         job.source_file_name,
       );
+      const selectedOil = await this.resolveAnalisisOilProduct(job.producto_id);
+      const analyses = parsed.analyses.map((item) =>
+        this.applyAnalisisOilSnapshot(item, selectedOil),
+      );
 
       job.warnings = parsed.warnings;
-      job.total_steps = parsed.analyses.length;
-      job.progress = parsed.analyses.length ? 10 : 100;
-      job.current_step = parsed.analyses.length
+      job.total_steps = analyses.length;
+      job.progress = analyses.length ? 10 : 100;
+      job.current_step = analyses.length
         ? 'Procesando muestras'
         : 'Sin muestras validas';
       await this.persistLubricantImportJob(job);
@@ -16014,7 +16130,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         await this.appendLubricantImportLog(job, 'WARNING', warning);
       }
 
-      if (!parsed.analyses.length) {
+      if (!analyses.length) {
         throw new BadRequestException(
           'El archivo no contiene muestras validas para importar.',
         );
@@ -16023,7 +16139,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       job.status = 'PROCESSING';
       await this.persistLubricantImportJob(job);
 
-      const summary = await this.importAnalisisLubricanteItems(parsed.analyses, {
+      const summary = await this.importAnalisisLubricanteItems(analyses, {
         upsertExisting: job.upsert_existing,
         onProgress: async (payload) => {
           job.current_index = payload.index;

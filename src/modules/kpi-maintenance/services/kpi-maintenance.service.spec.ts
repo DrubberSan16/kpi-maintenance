@@ -609,6 +609,81 @@ describe('KpiMaintenanceService alerts', () => {
   });
 });
 
+describe('KpiMaintenanceService analisis de lubricante', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
+  });
+
+  it('exige seleccionar un aceite para anexar el analisis', async () => {
+    await expect(
+      (service as any).resolveAnalisisOilProduct(null),
+    ).rejects.toThrow('Debes seleccionar el aceite asociado al análisis');
+  });
+
+  it('rechaza un producto que no esta configurado como aceite', async () => {
+    repos.productoRepo.findOne.mockResolvedValue({
+      id: '4fd51a40-5ca3-4ecf-8ff4-2ccbed34f757',
+      codigo: 'MAT-001',
+      nombre: 'Material general',
+      es_aceite: false,
+      is_deleted: false,
+    });
+
+    await expect(
+      (service as any).resolveAnalisisOilProduct(
+        '4fd51a40-5ca3-4ecf-8ff4-2ccbed34f757',
+      ),
+    ).rejects.toThrow('no está configurado como aceite');
+  });
+
+  it('anexa el aceite seleccionado como fuente autoritativa del analisis y del Excel', async () => {
+    const producto = {
+      id: '578f7006-1849-47fb-b9b6-f1e598f42427',
+      codigo: 'ACE-15W40',
+      nombre: 'Aceite 15W40',
+      descripcion: 'Motor diesel',
+      marca_id: 'ae93661d-91a8-4652-b043-b450b44bc454',
+      es_aceite: true,
+      is_deleted: false,
+    };
+    repos.productoRepo.findOne.mockResolvedValue(producto);
+    repos.marcaRepo.findOne.mockResolvedValue({
+      id: producto.marca_id,
+      nombre: 'Mobil',
+      is_deleted: false,
+    });
+
+    const oil = await (service as any).resolveAnalisisOilProduct(producto.id);
+    const normalized = (service as any).applyAnalisisOilSnapshot(
+      {
+        producto_id: producto.id,
+        lubricante: 'Texto proveniente del Excel',
+        marca_lubricante: 'Otra marca',
+        payload_json: { source: 'EXCEL' },
+      },
+      oil,
+    );
+
+    expect(normalized).toMatchObject({
+      producto_id: producto.id,
+      lubricante: 'Aceite 15W40',
+      marca_lubricante: 'Mobil',
+      payload_json: {
+        source: 'EXCEL',
+        producto_id: producto.id,
+        producto_label: 'ACE-15W40-Aceite 15W40 (Motor diesel)',
+        lubricante_codigo: 'ACE-15W40',
+        lubricante_descripcion: 'Motor diesel',
+      },
+    });
+  });
+});
+
 describe('KpiMaintenanceService work orders', () => {
   let repos: RepoBag;
   let service: KpiMaintenanceService;
