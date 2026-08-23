@@ -50,6 +50,7 @@ import {
   CreateReporteOperacionDiariaDto,
   DateRangeDto,
   EquipoQueryDto,
+  UpdateEquipoEstadoFuncionamientoDto,
   IssueMaterialsDto,
   EventoProcesoQueryDto,
   IntelligencePeriodQueryDto,
@@ -320,6 +321,25 @@ export class KpiMaintenanceController {
   @Patch('equipos/:id')
   updateEquipo(@Param('id') id: string, @Body() dto: UpdateEquipoDto) {
     return this.service.updateEquipo(id, dto);
+  }
+  @ApiTags('Equipos')
+  @ApiOperation({
+    summary:
+      'Actualizar el estado de funcionamiento del equipo (independiente del estado operativo)',
+  })
+  @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
+  @ApiBody({ type: UpdateEquipoEstadoFuncionamientoDto, required: true })
+  @Patch('equipos/:id/estado-funcionamiento')
+  updateEquipoEstadoFuncionamiento(
+    @Param('id') id: string,
+    @Body() dto: UpdateEquipoEstadoFuncionamientoDto,
+    @Req() req: any,
+  ) {
+    return this.service.updateEquipoEstadoFuncionamiento(
+      id,
+      dto,
+      getRequestActor(req),
+    );
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Eliminar fisicamente todos los equipos' })

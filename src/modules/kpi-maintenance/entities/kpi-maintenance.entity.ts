@@ -12,6 +12,7 @@ export class EquipoEntity {
   @Column({ type: 'uuid', nullable: true }) location_id?: string | null;
   @Column({ default: 'MEDIA' }) criticidad: string;
   @Column({ default: 'OPERATIVO' }) estado_operativo: string;
+  @Column({ default: 'PARADO' }) estado_funcionamiento: string;
   @Column('numeric', { precision: 18, scale: 2, default: 0 })
   horometro_actual: number;
   @Column({ type: 'timestamp without time zone', nullable: true })

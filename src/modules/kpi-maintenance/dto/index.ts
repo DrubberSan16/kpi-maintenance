@@ -32,6 +32,11 @@ export enum EquipoEstadoOperativoEnum {
   BLOQUEADA = 'BLOQUEADA',
 }
 
+export enum EquipoEstadoFuncionamientoEnum {
+  FUNCIONAMIENTO = 'FUNCIONAMIENTO',
+  PARADO = 'PARADO',
+}
+
 export enum EquipoComponenteCategoriaEnum {
   MOTOR = 'MOTOR',
   GENERACION = 'GENERACION',
@@ -190,6 +195,13 @@ export class CreateEquipoDto {
   @IsOptional()
   @IsString()
   estado_operativo?: string;
+  @ApiPropertyOptional({
+    description: 'Estado de funcionamiento actual (independiente del estado operativo)',
+    enum: EquipoEstadoFuncionamientoEnum,
+  })
+  @IsOptional()
+  @IsString()
+  estado_funcionamiento?: string;
   @ApiPropertyOptional({ description: 'Horómetro actual', type: Number })
   @IsOptional()
   @Type(() => Number)
@@ -251,6 +263,16 @@ export class CreateEquipoDto {
 }
 
 export class UpdateEquipoDto extends CreateEquipoDto {}
+
+export class UpdateEquipoEstadoFuncionamientoDto {
+  @ApiProperty({
+    description: 'Nuevo estado de funcionamiento del equipo',
+    enum: EquipoEstadoFuncionamientoEnum,
+  })
+  @IsEnum(EquipoEstadoFuncionamientoEnum)
+  @IsNotEmpty()
+  estado_funcionamiento: EquipoEstadoFuncionamientoEnum;
+}
 
 export class CreateEquipoTipoDto {
   @ApiPropertyOptional({ description: 'Código único del Tipo de Equipo. Si no se envía, el sistema lo genera automáticamente.' })

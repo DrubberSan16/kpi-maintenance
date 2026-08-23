@@ -121,6 +121,8 @@ import {
   EquipoCriticidadEnum,
   EquipoQueryDto,
   EquipoEstadoOperativoEnum,
+  EquipoEstadoFuncionamientoEnum,
+  UpdateEquipoEstadoFuncionamientoDto,
   EquipoTipoQueryDto,
   EventoProcesoQueryDto,
   IntelligencePeriodQueryDto,
@@ -505,6 +507,9 @@ const DEFAULT_PROGRAMACION_MONTHLY_COLOR_PALETTE = {
 
 const EQUIPO_CRITICIDAD_VALUES = Object.values(EquipoCriticidadEnum);
 const EQUIPO_ESTADO_OPERATIVO_VALUES = Object.values(EquipoEstadoOperativoEnum);
+const EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES = Object.values(
+  EquipoEstadoFuncionamientoEnum,
+);
 
 const LUBRICANT_IMPORT_PARAMETER_ROWS = [
   { row: 22, label: 'Viscosidad a 100ºC, cSt' },
@@ -1713,6 +1718,41 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  private async ensureEquipoEstadoFuncionamientoSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS estado_funcionamiento text NULL
+    `);
+    await this.dataSource.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('kpi_maintenance.tb_equipo') IS NULL THEN
+          RETURN;
+        END IF;
+
+        UPDATE kpi_maintenance.tb_equipo
+        SET estado_funcionamiento = 'PARADO'
+        WHERE estado_funcionamiento IS NULL;
+
+        ALTER TABLE kpi_maintenance.tb_equipo
+          ALTER COLUMN estado_funcionamiento SET DEFAULT 'PARADO';
+
+        ALTER TABLE kpi_maintenance.tb_equipo
+          ALTER COLUMN estado_funcionamiento SET NOT NULL;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'chk_tb_equipo_estado_funcionamiento'
+            AND conrelid = 'kpi_maintenance.tb_equipo'::regclass
+        ) THEN
+          ALTER TABLE kpi_maintenance.tb_equipo
+          ADD CONSTRAINT chk_tb_equipo_estado_funcionamiento
+          CHECK (estado_funcionamiento IN ('FUNCIONAMIENTO', 'PARADO'));
+        END IF;
+      END $$;
+    `);
+  }
+
   private parseOilUsageDate(
     value: unknown,
     options?: { endOfDay?: boolean },
@@ -2792,6 +2832,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.ensureProgramacionScheduleSchema();
     await this.ensureWorkOrderEmergencySchema();
     await this.ensureEquipmentServiceSchema();
+    await this.ensureEquipoEstadoFuncionamientoSchema();
     this.scheduleAlertRecalculation();
     this.triggerAlertRecalculation('startup').catch((e: any) => {
       this.logger.error(
@@ -3031,6 +3072,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     throw new BadRequestException(
       `El estado operativo del equipo no es válido. Valores permitidos: ${EQUIPO_ESTADO_OPERATIVO_VALUES.join(', ')}.`,
+    );
+  }
+
+  private normalizeEquipoEstadoFuncionamiento(
+    value: unknown,
+  ): string | undefined {
+    const raw = String(value ?? '').trim().toUpperCase();
+    if (!raw) return undefined;
+    if (
+      EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES.includes(
+        raw as EquipoEstadoFuncionamientoEnum,
+      )
+    ) {
+      return raw;
+    }
+    throw new BadRequestException(
+      `El estado de funcionamiento del equipo no es válido. Valores permitidos: ${EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES.join(', ')}.`,
     );
   }
 
@@ -12809,6 +12867,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const estado_operativo = this.normalizeEquipoEstadoOperativo(
       dto.estado_operativo ?? EquipoEstadoOperativoEnum.OPERATIVO,
     );
+    const estado_funcionamiento = this.normalizeEquipoEstadoFuncionamiento(
+      dto.estado_funcionamiento ?? EquipoEstadoFuncionamientoEnum.PARADO,
+    );
     const nombre_real = String(dto.nombre_real ?? '').trim() || null;
     const modelo = String(dto.modelo ?? '').trim() || null;
     const codigo_lubricante =
@@ -12830,6 +12891,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             codigo: resolution.resolvedCode,
             criticidad,
             estado_operativo,
+            estado_funcionamiento,
             nombre_real,
             modelo,
             codigo_lubricante,
@@ -12897,6 +12959,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.estado_operativo !== undefined
           ? this.normalizeEquipoEstadoOperativo(dto.estado_operativo)
           : e.estado_operativo,
+      estado_funcionamiento:
+        dto.estado_funcionamiento !== undefined
+          ? this.normalizeEquipoEstadoFuncionamiento(dto.estado_funcionamiento)
+          : e.estado_funcionamiento,
       nombre_real:
         dto.nombre_real !== undefined
           ? String(dto.nombre_real ?? '').trim() || null
@@ -12928,6 +12994,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.syncEquipmentComponents(saved.id, dto.componentes);
     }
     return this.wrap(saved, 'Equipo actualizado');
+  }
+  async updateEquipoEstadoFuncionamiento(
+    id: string,
+    dto: UpdateEquipoEstadoFuncionamientoDto,
+    actor?: {
+      userId?: string | null;
+      username?: string | null;
+      displayName?: string | null;
+    },
+  ) {
+    const e = await this.findEquipoOrFail(id);
+    const estado_funcionamiento = this.normalizeEquipoEstadoFuncionamiento(
+      dto.estado_funcionamiento,
+    );
+    if (!estado_funcionamiento) {
+      throw new BadRequestException(
+        `El estado de funcionamiento del equipo no es válido. Valores permitidos: ${EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES.join(', ')}.`,
+      );
+    }
+    e.estado_funcionamiento = estado_funcionamiento;
+    e.updated_by =
+      String(
+        actor?.displayName || actor?.username || actor?.userId || '',
+      ).trim() || e.updated_by;
+    e.updated_at = new Date();
+    const saved = await this.equipoRepo.save(e);
+    return this.wrap(saved, 'Estado de funcionamiento actualizado');
   }
   async deleteEquipo(id: string) {
     const e = await this.findEquipoOrFail(id);

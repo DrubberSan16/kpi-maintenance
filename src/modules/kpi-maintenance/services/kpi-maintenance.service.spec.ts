@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
@@ -1745,5 +1746,87 @@ describe('KpiMaintenanceService programacion automatica de OT de Cebado', () => 
 
     expect(result).toBe('2026-09-18');
     expect(workOrder.valor_json.fecha_programacion).toBe('2026-09-18');
+  });
+});
+
+describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
+  });
+
+  it('actualiza solo el estado_funcionamiento y conserva el estado_operativo', async () => {
+    const equipo = {
+      id: 'equipo-1',
+      codigo: 'EQ-001',
+      estado_operativo: 'OPERATIVO',
+      estado_funcionamiento: 'PARADO',
+      updated_by: 'anterior',
+      is_deleted: false,
+    };
+    repos.equipoRepo.findOne.mockResolvedValue(equipo);
+    repos.equipoRepo.save.mockImplementation(async (value: any) => value);
+
+    const result = await service.updateEquipoEstadoFuncionamiento(
+      'equipo-1',
+      { estado_funcionamiento: 'FUNCIONAMIENTO' as any },
+      { userId: 'u1', username: 'jdoe', displayName: 'John Doe' },
+    );
+
+    expect(equipo.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+    expect(equipo.estado_operativo).toBe('OPERATIVO');
+    expect(equipo.updated_by).toBe('John Doe');
+    expect(repos.equipoRepo.save).toHaveBeenCalledWith(equipo);
+    expect(result.data.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+  });
+
+  it('rechaza valores distintos de FUNCIONAMIENTO/PARADO', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      estado_operativo: 'OPERATIVO',
+      estado_funcionamiento: 'PARADO',
+      is_deleted: false,
+    });
+
+    await expect(
+      service.updateEquipoEstadoFuncionamiento(
+        'equipo-1',
+        { estado_funcionamiento: 'ENCENDIDO' as any },
+        {},
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repos.equipoRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('devuelve NotFound cuando el equipo no existe', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.updateEquipoEstadoFuncionamiento(
+        'equipo-inexistente',
+        { estado_funcionamiento: 'FUNCIONAMIENTO' as any },
+        {},
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('crea un equipo con estado_funcionamiento por defecto PARADO', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue(null);
+    repos.equipoRepo.save.mockImplementation(async (value: any) => ({
+      id: 'equipo-nuevo',
+      ...value,
+    }));
+    repos.equipoComponenteRepo.find.mockResolvedValue([]);
+
+    const result = await service.createEquipo({
+      nombre: 'Generador',
+      equipo_tipo_id: 'tipo-1',
+    } as any);
+
+    expect(result.data.estado_funcionamiento).toBe('PARADO');
   });
 });
