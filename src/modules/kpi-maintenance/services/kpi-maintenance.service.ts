@@ -395,6 +395,8 @@ type LubricantImportJobState = {
   upsert_existing: boolean;
   producto_id: string;
   producto_label: string;
+  equipo_id: string;
+  equipo_label: string;
   requested_by: string | null;
   created_at: string;
   started_at: string | null;
@@ -1058,6 +1060,39 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         lubricante_descripcion: oil.producto.descripcion ?? null,
         lubricante: oil.lubricante ?? null,
         marca_lubricante: oil.marcaLubricante,
+      },
+    };
+  }
+
+  private applyAnalisisEquipmentSnapshot(
+    dto: CreateAnalisisLubricanteDto,
+    context: {
+      equipo: EquipoEntity;
+      marcaNombre: string | null;
+    },
+  ): CreateAnalisisLubricanteDto {
+    const payload = { ...((dto.payload_json ?? {}) as Record<string, unknown>) };
+    const sampleInfo = {
+      ...((payload.sample_info ?? {}) as Record<string, unknown>),
+      equipo_id: context.equipo.id,
+      equipo_codigo: context.equipo.codigo,
+      equipo_nombre: context.equipo.nombre,
+      equipo_modelo: context.equipo.modelo ?? null,
+      equipo_marca: context.marcaNombre,
+    };
+    return {
+      ...dto,
+      equipo_id: context.equipo.id,
+      equipo_codigo: context.equipo.codigo,
+      equipo_nombre: context.equipo.nombre,
+      payload_json: {
+        ...payload,
+        equipo_id: context.equipo.id,
+        equipo_codigo: context.equipo.codigo,
+        equipo_nombre: context.equipo.nombre,
+        equipo_modelo: context.equipo.modelo ?? null,
+        equipo_marca: context.marcaNombre,
+        sample_info: sampleInfo,
       },
     };
   }
@@ -9562,6 +9597,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private parseLubricantWorkbook(
     buffer: Buffer,
     fileName: string,
+    selectedEquipment?: {
+      equipo: EquipoEntity;
+      marcaNombre: string | null;
+      equipoCodigo: string;
+      equipoNombre: string;
+    },
   ): Promise<ParsedLubricantWorkbook> {
     return (async () => {
       const workbook = XLSX.read(buffer, {
@@ -9587,9 +9628,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         workbook,
         fileName,
       );
-      const workbookEquipment = await this.resolveLubricantImportEquipment(
-        workbookEquipmentHint,
-      );
+      const workbookEquipment =
+        selectedEquipment ??
+        (await this.resolveLubricantImportEquipment(workbookEquipmentHint));
       const analyses: CreateAnalisisLubricanteDto[] = [];
 
       for (const sheetName of validSheets) {
@@ -9626,9 +9667,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             this.getWorkbookCellText(sheet, headerRow + 1, valueColumn) ||
             this.getWorkbookCellText(sheet, headerRow + 1, 20) ||
             workbookEquipmentHint;
-          const equipmentContext = equipmentHint
-            ? await this.resolveLubricantImportEquipment(equipmentHint)
-            : workbookEquipment;
+          const equipmentContext =
+            selectedEquipment ??
+            (equipmentHint
+              ? await this.resolveLubricantImportEquipment(equipmentHint)
+              : workbookEquipment);
           const cliente =
             this.getWorkbookCellText(sheet, headerRow + 2, 3) ||
             this.getWorkbookCellText(sheet, headerRow + 2, valueColumn) ||
@@ -9650,6 +9693,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             this.getWorkbookCellText(sheet, headerRow + 3, 20) ||
             null;
           const modelo =
+            equipmentContext.equipo?.modelo ||
             this.getWorkbookCellText(sheet, headerRow + 4, valueColumn) ||
             this.getWorkbookCellText(sheet, headerRow + 4, 20) ||
             null;
@@ -9695,7 +9739,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               `La hoja ${sheetName}${blockLabel} no contiene valor en la cabecera de Marca del Lubricante.`,
             );
           }
-          if (!equipmentHint) {
+          if (!equipmentHint && !selectedEquipment?.equipo) {
             warnings.push(
               `La hoja ${sheetName}${blockLabel} no contiene valor en la cabecera de Equipo.`,
             );
@@ -15520,6 +15564,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: CreateAnalisisLubricanteDto,
     options: AnalisisLubricanteSaveOptions = {},
   ) {
+    if (!dto.equipo_id) {
+      throw new BadRequestException(
+        'Debes seleccionar el equipo asociado al análisis.',
+      );
+    }
     const selectedOil = await this.resolveAnalisisOilProduct(dto.producto_id);
     dto = this.applyAnalisisOilSnapshot(dto, selectedOil);
     let resolution = await this.resolveRequestedAnalisisLubricanteCode(
@@ -16215,6 +16264,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     } | null,
     options?: {
       producto_id?: unknown;
+      equipo_id?: unknown;
       upsert_existing?: unknown;
       requested_by?: string | null;
     },
@@ -16230,6 +16280,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const selectedOil = await this.resolveAnalisisOilProduct(options?.producto_id);
+    const selectedEquipment = await this.resolveAnalisisEquipmentContext(
+      String(options?.equipo_id ?? '').trim() || null,
+    );
+    if (!selectedEquipment.equipo) {
+      throw new BadRequestException(
+        'Debes seleccionar el equipo asociado a los análisis del Excel.',
+      );
+    }
 
     const jobId = randomUUID();
     const storedFileName = `source${extension || '.xlsx'}`;
@@ -16250,6 +16308,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       upsert_existing: this.coerceBoolean(options?.upsert_existing, true),
       producto_id: selectedOil.producto.id,
       producto_label: selectedOil.productoLabel,
+      equipo_id: selectedEquipment.equipo.id,
+      equipo_label: [
+        selectedEquipment.equipo.codigo,
+        selectedEquipment.equipo.nombre,
+      ].filter(Boolean).join(' - ') +
+        (selectedEquipment.equipo.modelo
+          ? ` (${selectedEquipment.equipo.modelo})`
+          : ''),
       requested_by: String(options?.requested_by ?? '').trim() || null,
       created_at: new Date().toISOString(),
       started_at: null,
@@ -16282,6 +16348,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         size_bytes: job.file_size_bytes,
         producto_id: job.producto_id,
         producto_label: job.producto_label,
+        equipo_id: job.equipo_id,
+        equipo_label: job.equipo_label,
       },
     );
     await this.writeSecurityLog({
@@ -16323,13 +16391,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
 
       const buffer = await readFile(job.stored_file_path);
+      const selectedEquipment = await this.resolveAnalisisEquipmentContext(
+        job.equipo_id,
+      );
+      if (!selectedEquipment.equipo) {
+        throw new BadRequestException(
+          'El equipo seleccionado para la importación ya no está disponible.',
+        );
+      }
+      const equipment = selectedEquipment.equipo;
+      const authoritativeEquipment = {
+        equipo: equipment,
+        marcaNombre: selectedEquipment.marcaNombre,
+        equipoCodigo: equipment.codigo,
+        equipoNombre: equipment.nombre,
+      };
       const parsed = await this.parseLubricantWorkbook(
         buffer,
         job.source_file_name,
+        authoritativeEquipment,
       );
       const selectedOil = await this.resolveAnalisisOilProduct(job.producto_id);
       const analyses = parsed.analyses.map((item) =>
-        this.applyAnalisisOilSnapshot(item, selectedOil),
+        this.applyAnalisisEquipmentSnapshot(
+          this.applyAnalisisOilSnapshot(item, selectedOil),
+          authoritativeEquipment,
+        ),
       );
 
       job.warnings = parsed.warnings;

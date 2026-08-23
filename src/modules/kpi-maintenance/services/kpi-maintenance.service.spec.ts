@@ -625,6 +625,32 @@ describe('KpiMaintenanceService analisis de lubricante', () => {
     ).rejects.toThrow('Debes seleccionar el aceite asociado al análisis');
   });
 
+  it('exige seleccionar un equipo antes de crear o importar un analisis', async () => {
+    await expect(
+      service.createAnalisisLubricante({ producto_id: 'aceite-1' } as any),
+    ).rejects.toThrow('Debes seleccionar el equipo asociado al análisis');
+
+    repos.productoRepo.findOne.mockResolvedValue({
+      id: '578f7006-1849-47fb-b9b6-f1e598f42427',
+      codigo: 'ACE-15W40',
+      nombre: 'Aceite 15W40',
+      es_aceite: true,
+      is_deleted: false,
+    });
+    await expect(
+      service.startAnalisisLubricanteImport(
+        {
+          originalname: 'analisis.xlsx',
+          buffer: Buffer.from('excel'),
+          size: 5,
+        },
+        { producto_id: '578f7006-1849-47fb-b9b6-f1e598f42427' },
+      ),
+    ).rejects.toThrow(
+      'Debes seleccionar el equipo asociado a los análisis del Excel',
+    );
+  });
+
   it('rechaza un producto que no esta configurado como aceite', async () => {
     repos.productoRepo.findOne.mockResolvedValue({
       id: '4fd51a40-5ca3-4ecf-8ff4-2ccbed34f757',
@@ -679,6 +705,55 @@ describe('KpiMaintenanceService analisis de lubricante', () => {
         producto_label: 'ACE-15W40-Aceite 15W40 (Motor diesel)',
         lubricante_codigo: 'ACE-15W40',
         lubricante_descripcion: 'Motor diesel',
+      },
+    });
+  });
+
+  it('reemplaza el equipo escrito en el Excel por el equipo seleccionado', () => {
+    const selectedEquipment = {
+      equipo: {
+        id: 'equipo-seleccionado',
+        codigo: 'EQ-001',
+        nombre: 'Generador principal',
+        modelo: 'CAT 500',
+      },
+      marcaNombre: 'Caterpillar',
+    };
+    const normalized = (service as any).applyAnalisisEquipmentSnapshot(
+      {
+        equipo_id: 'equipo-equivocado',
+        equipo_codigo: 'MAL-999',
+        equipo_nombre: 'Nombre incorrecto del Excel',
+        payload_json: {
+          source: 'EXCEL',
+          equipo_modelo: 'Modelo incorrecto',
+          sample_info: {
+            equipo_marca: 'Marca incorrecta',
+            equipo_modelo: 'Modelo incorrecto',
+          },
+        },
+      },
+      selectedEquipment,
+    );
+
+    expect(normalized).toMatchObject({
+      equipo_id: 'equipo-seleccionado',
+      equipo_codigo: 'EQ-001',
+      equipo_nombre: 'Generador principal',
+      payload_json: {
+        source: 'EXCEL',
+        equipo_id: 'equipo-seleccionado',
+        equipo_codigo: 'EQ-001',
+        equipo_nombre: 'Generador principal',
+        equipo_modelo: 'CAT 500',
+        equipo_marca: 'Caterpillar',
+        sample_info: {
+          equipo_id: 'equipo-seleccionado',
+          equipo_codigo: 'EQ-001',
+          equipo_nombre: 'Generador principal',
+          equipo_modelo: 'CAT 500',
+          equipo_marca: 'Caterpillar',
+        },
       },
     });
   });

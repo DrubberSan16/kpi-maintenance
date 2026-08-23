@@ -1657,8 +1657,9 @@ export class CreateAnalisisLubricanteDto {
   @IsOptional()
   @IsString()
   cliente?: string;
-  @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
-  @IsOptional()
+  @ApiProperty({ description: 'ID del equipo analizado', format: 'uuid' })
+  @IsDefined()
+  @IsNotEmpty()
   @IsUUID()
   equipo_id?: string;
   @ApiPropertyOptional({ description: 'Lubricante' })

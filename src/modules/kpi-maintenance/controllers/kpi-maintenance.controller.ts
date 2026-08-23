@@ -1276,13 +1276,18 @@ export class KpiMaintenanceController {
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['file', 'producto_id'],
+      required: ['file', 'producto_id', 'equipo_id'],
       properties: {
         file: { type: 'string', format: 'binary' },
         producto_id: {
           type: 'string',
           format: 'uuid',
           description: 'Aceite de inventario que se asignará a todas las muestras',
+        },
+        equipo_id: {
+          type: 'string',
+          format: 'uuid',
+          description: 'Equipo que se asignará a todas las muestras',
         },
         upsert_existing: {
           type: 'boolean',
@@ -1301,11 +1306,13 @@ export class KpiMaintenanceController {
   uploadAnalisisLubricanteWorkbook(
     @UploadedFile() file: any,
     @Body('producto_id') productoId?: string,
+    @Body('equipo_id') equipoId?: string,
     @Body('upsert_existing') upsertExisting?: string | boolean,
     @Body('requested_by') requestedBy?: string,
   ) {
     return this.service.startAnalisisLubricanteImport(file, {
       producto_id: productoId,
+      equipo_id: equipoId,
       upsert_existing: upsertExisting,
       requested_by: requestedBy,
     });
