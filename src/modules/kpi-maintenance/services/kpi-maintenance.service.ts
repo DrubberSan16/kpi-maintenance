@@ -315,6 +315,8 @@ type InventoryReservationEmailItem = {
   work_order_id: string;
   work_order_code: string;
   work_order_title: string | null;
+  equipment_label: string;
+  requester_labels: string[];
   producto_id: string;
   producto_label: string;
   bodega_id: string;
@@ -4035,6 +4037,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private assertWorkOrderAllowsMaterialReservation(workOrder: WorkOrderEntity) {
+    if (this.isWorkOrderAnnulled(workOrder)) {
+      throw new ForbiddenException(
+        'No se pueden reservar materiales para una orden de trabajo anulada.',
+      );
+    }
+    const status = this.normalizeWorkflowStatus(workOrder.status_workflow);
+    if (!['PLANNED', 'IN_PROGRESS'].includes(status)) {
+      throw new ForbiddenException(
+        'Solo se pueden reservar materiales cuando la orden de trabajo está en Planificación o En proceso.',
+      );
+    }
+  }
+
   private async getActiveReservedQuantity(
     productoId: string,
     bodegaId: string,
@@ -5112,27 +5128,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       '',
       `Mensaje: ${this.firstNonEmptyString(input.payload.response_message) ?? 'Internal Server Error'}`,
     ].join('\n');
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.5">
-        <h2 style="margin-bottom:12px">Incidente tecnico reportado</h2>
-        <p><strong>Ticket:</strong> ${input.ticket}</p>
-        <p><strong>Modulo:</strong> ${input.moduleName}</p>
-        <p><strong>HTTP:</strong> ${input.method}</p>
-        <p><strong>URL:</strong> ${input.requestUrl}</p>
-        <p><strong>Status:</strong> ${input.statusCode}</p>
-        <p><strong>Usuario:</strong> ${input.createdBy}</p>
-        <p><strong>Ruta frontend:</strong> ${
-          this.firstNonEmptyString(input.payload.frontend_route) ?? 'N/A'
-        }</p>
-        <p><strong>Correo usuario:</strong> ${
-          this.firstNonEmptyString(input.payload.user_email) ?? 'N/A'
-        }</p>
-        <p><strong>Mensaje:</strong> ${
-          this.firstNonEmptyString(input.payload.response_message) ??
-          'Internal Server Error'
-        }</p>
-      </div>
-    `;
+    const incidentMessage =
+      this.firstNonEmptyString(input.payload.response_message) ??
+      'Internal Server Error';
+    const html = this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Soporte técnico',
+      title: 'Incidente técnico reportado',
+      summary:
+        'El sistema registró automáticamente un error que requiere revisión del equipo de soporte.',
+      accent: '#b42318',
+      contentHtml: `
+        <div style="margin-bottom:18px;padding:14px 16px;border-left:4px solid #b42318;background:#fff4f2;border-radius:10px;font-size:14px;line-height:1.55;color:#7a271a;">
+          ${this.escapeHtml(incidentMessage)}
+        </div>
+        ${this.buildEmailInfoTable([
+          { label: 'Ticket', value: input.ticket },
+          { label: 'Módulo', value: input.moduleName },
+          { label: 'Solicitud', value: `${input.method} ${input.requestUrl}` },
+          { label: 'Estado HTTP', value: input.statusCode },
+          { label: 'Usuario', value: input.createdBy },
+          {
+            label: 'Ruta frontend',
+            value:
+              this.firstNonEmptyString(input.payload.frontend_route) ?? 'N/A',
+          },
+          {
+            label: 'Correo usuario',
+            value: this.firstNonEmptyString(input.payload.user_email) ?? 'N/A',
+          },
+        ])}`,
+      footer:
+        'Correo automático del registro de incidentes técnicos de Justice KPI.',
+    });
 
     try {
       await transporter.sendMail({
@@ -5879,6 +5906,68 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .replace(/'/g, '&#39;');
   }
 
+  private buildEnterpriseEmailLayout(options: {
+    moduleLabel: string;
+    title: string;
+    summary: string;
+    contentHtml: string;
+    accent?: string;
+    footer?: string;
+  }) {
+    const accent = /^#[0-9a-f]{6}$/i.test(String(options.accent || ''))
+      ? String(options.accent)
+      : '#245b84';
+    return `<!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>${this.escapeHtml(options.title)}</title>
+        </head>
+        <body style="margin:0;padding:0;background:#eef3f8;font-family:Arial,Helvetica,sans-serif;color:#17324d;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#eef3f8;">
+            <tr>
+              <td align="center" style="padding:28px 12px;">
+                <table role="presentation" width="720" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:720px;background:#ffffff;border:1px solid #dce5ef;border-radius:18px;overflow:hidden;box-shadow:0 12px 32px rgba(20,48,75,.10);">
+                  <tr><td style="height:6px;background:${accent};font-size:0;line-height:0;">&nbsp;</td></tr>
+                  <tr>
+                    <td style="padding:26px 30px 22px;">
+                      <div style="font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:${accent};">${this.escapeHtml(options.moduleLabel)}</div>
+                      <h1 style="margin:9px 0 8px;font-size:26px;line-height:1.22;color:#102a43;">${this.escapeHtml(options.title)}</h1>
+                      <p style="margin:0;font-size:15px;line-height:1.6;color:#526b82;">${this.escapeHtml(options.summary)}</p>
+                    </td>
+                  </tr>
+                  <tr><td style="padding:0 30px 30px;">${options.contentHtml}</td></tr>
+                  <tr>
+                    <td style="padding:18px 30px;background:#f7f9fc;border-top:1px solid #e4ebf3;font-size:12px;line-height:1.55;color:#687d91;">
+                      ${this.escapeHtml(options.footer || 'Mensaje automático de Justice KPI. No es necesario responder este correo.')}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+      </html>`;
+  }
+
+  private buildEmailInfoTable(
+    rows: Array<{ label: string; value: unknown }>,
+  ) {
+    return `
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0;border:1px solid #dce5ef;border-radius:12px;overflow:hidden;">
+        ${rows
+          .map(
+            (row, index) => `
+              <tr>
+                <td style="width:34%;padding:11px 13px;background:#f6f9fc;border-bottom:${index === rows.length - 1 ? '0' : '1px solid #e5ecf3'};font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#60778d;">${this.escapeHtml(row.label)}</td>
+                <td style="padding:11px 13px;border-bottom:${index === rows.length - 1 ? '0' : '1px solid #e5ecf3'};font-size:14px;font-weight:600;color:#17324d;">${this.escapeHtml(row.value || 'No disponible')}</td>
+              </tr>`,
+          )
+          .join('')}
+      </table>`;
+  }
+
   private formatAlertEmailDate(value: unknown) {
     const date = value instanceof Date ? value : new Date(String(value || ''));
     if (Number.isNaN(date.getTime())) return 'No disponible';
@@ -5889,9 +5978,55 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }).format(date);
   }
 
-  private buildAlertConsoleUrl() {
+  private buildAppModuleUrl(path: string) {
     if (!this.publicBaseUrl) return null;
-    return `${this.publicBaseUrl}/alertas`;
+    const base = this.publicBaseUrl.replace(/\/$/, '');
+    const appBase = /\/app$/i.test(base) ? base : `${base}/app`;
+    return `${appBase}/${String(path || '').replace(/^\/+/, '')}`;
+  }
+
+  private resolveAlertEmailDestination(row: AlertaMantenimientoEntity) {
+    const payload = (row.payload_json ?? {}) as Record<string, unknown>;
+    const referenceType = this.normalizeRoleName(row.referencia_tipo);
+    const hasWorkOrderReference = Boolean(
+      row.work_order_id ||
+        this.firstNonEmptyString(
+          payload.work_order_id,
+          payload.work_order_code,
+          payload.orden_trabajo_id,
+          payload.orden_trabajo_codigo,
+        ) ||
+        referenceType.includes('WORK_ORDER') ||
+        referenceType.includes('ORDEN_TRABAJO'),
+    );
+    if (hasWorkOrderReference) {
+      return {
+        label: 'Abrir órdenes de trabajo',
+        textLabel: 'órdenes de trabajo',
+        url: this.buildAppModuleUrl('work-orders'),
+      };
+    }
+
+    const isInventoryAlert =
+      row.origen === 'INVENTARIO' ||
+      row.categoria === 'INVENTARIO' ||
+      this.getInventoryAlertItems(payload).length > 0 ||
+      ['PRODUCTO', 'MATERIAL', 'STOCK', 'INVENTARIO'].some((token) =>
+        referenceType.includes(token),
+      );
+    if (isInventoryAlert) {
+      return {
+        label: 'Abrir materiales',
+        textLabel: 'materiales',
+        url: this.buildAppModuleUrl('productos'),
+      };
+    }
+
+    return {
+      label: 'Abrir alertas',
+      textLabel: 'alertas',
+      url: this.buildAppModuleUrl('alertas'),
+    };
   }
 
   private getInventoryServiceBaseUrl() {
@@ -6048,74 +6183,48 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       row.equipo_id,
       'General',
     );
-    const consoleUrl = this.buildAlertConsoleUrl();
+    const destination = this.resolveAlertEmailDestination(row);
     const reference =
       row.origen === 'INVENTARIO' && this.getInventoryAlertItems(payload).length
         ? 'Resumen general de inventario'
         : this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id);
     const inventoryTableHtml = this.buildInventoryAlertTableHtml(payload);
 
-    return `
-      <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
-        <div style="max-width:760px;margin:0 auto;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(21,49,75,0.12);">
-          <div style="padding:28px 32px;background:${accent};color:#ffffff;">
-            <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.9;">Justice KPI · Alertas operativas</div>
-            <h1 style="margin:10px 0 6px;font-size:26px;line-height:1.2;">${this.escapeHtml(
-              row.categoria,
-            )} · ${this.escapeHtml(this.getAlertEmailLevelLabel(row.nivel))}</h1>
-            <div style="font-size:15px;opacity:0.95;">Se genero una alerta que requiere seguimiento oportuno.</div>
-          </div>
-          <div style="padding:28px 32px;">
-            <p style="margin:0 0 18px;font-size:15px;line-height:1.6;">Hola ${this.escapeHtml(
-              recipientLabel,
-            )}, el sistema detecto una condicion operativa y te comparte el resumen para que puedas actuar con claridad.</p>
-            <div style="border:1px solid #dbe4f0;border-radius:16px;padding:18px 20px;background:#f9fbff;">
-              <div style="font-size:13px;color:#5f7388;text-transform:uppercase;letter-spacing:0.08em;">Detalle principal</div>
-              <div style="margin-top:10px;font-size:20px;font-weight:700;color:#10263c;">${this.escapeHtml(
-                row.detalle || 'Alerta operativa',
-              )}</div>
-            </div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:18px;">
-              ${[
-                ['Estado', row.estado],
-                ['Origen', row.origen],
-                ['Equipo', equipo],
-                ['Tipo', alertType],
-                ['Referencia', reference],
-                ['Generada', this.formatAlertEmailDate(row.fecha_generada)],
-              ]
-                .map(
-                  ([label, value]) => `
-                    <div style="border:1px solid #e4ebf3;border-radius:14px;padding:14px 16px;">
-                      <div style="font-size:12px;color:#71859b;text-transform:uppercase;letter-spacing:0.08em;">${this.escapeHtml(
-                        label,
-                      )}</div>
-                      <div style="margin-top:8px;font-size:15px;font-weight:600;color:#193550;">${this.escapeHtml(
-                        value,
-                      )}</div>
-                    </div>`,
-                )
-                .join('')}
-            </div>
-            ${inventoryTableHtml}
-            ${
-              consoleUrl
-                ? `<div style="margin-top:24px;">
-                    <a href="${this.escapeHtml(
-                      consoleUrl,
-                    )}" style="display:inline-block;padding:13px 22px;border-radius:999px;background:${accent};color:#ffffff;text-decoration:none;font-weight:700;">
-                      Abrir modulo de alertas
-                    </a>
-                  </div>`
-                : ''
-            }
-            <div style="margin-top:24px;padding-top:18px;border-top:1px solid #e7edf5;color:#5f7388;font-size:13px;line-height:1.6;">
-              Este correo se envio automaticamente desde el modulo de alertas de mantenimiento para mantener alineados al usuario transaccionante, gerencia general y administracion.
-            </div>
-          </div>
+    return this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Alertas operativas',
+      title: `${row.categoria} · ${this.getAlertEmailLevelLabel(row.nivel)}`,
+      summary:
+        'Se generó una alerta operativa que requiere seguimiento oportuno.',
+      accent,
+      contentHtml: `
+        <p style="margin:0 0 18px;font-size:15px;line-height:1.65;color:#405a70;">
+          Hola <strong>${this.escapeHtml(recipientLabel)}</strong>, el sistema detectó una condición operativa y comparte la información necesaria para gestionarla.
+        </p>
+        <div style="margin-bottom:18px;padding:15px 17px;border-left:4px solid ${accent};background:#f7f9fc;border-radius:10px;font-size:16px;font-weight:700;line-height:1.5;color:#17324d;">
+          ${this.escapeHtml(row.detalle || 'Alerta operativa')}
         </div>
-      </div>
-    `;
+        ${this.buildEmailInfoTable([
+          { label: 'Estado', value: row.estado },
+          { label: 'Origen', value: row.origen },
+          { label: 'Equipo', value: equipo },
+          { label: 'Tipo', value: alertType },
+          { label: 'Referencia', value: reference },
+          {
+            label: 'Generada',
+            value: this.formatAlertEmailDate(row.fecha_generada),
+          },
+        ])}
+        ${inventoryTableHtml}
+        ${
+          destination.url
+            ? `<div style="margin-top:22px;text-align:center;">
+                <a href="${this.escapeHtml(destination.url)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:${accent};color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">${this.escapeHtml(destination.label)}</a>
+              </div>`
+            : ''
+        }`,
+      footer:
+        'Correo automático del módulo de alertas de mantenimiento de Justice KPI.',
+    });
   }
 
   private buildAlertEmailText(
@@ -6130,6 +6239,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       row.equipo_id,
       'General',
     );
+    const destination = this.resolveAlertEmailDestination(row);
     return [
       `Hola ${recipient.displayName || recipient.username || 'usuario'},`,
       '',
@@ -6151,8 +6261,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       '',
       ...this.buildInventoryAlertTableText(payload),
       ...(this.getInventoryAlertItems(payload).length ? [''] : []),
-      this.buildAlertConsoleUrl()
-        ? `Revisa el modulo de alertas en: ${this.buildAlertConsoleUrl()}`
+      destination.url
+        ? `Revisa el módulo de ${destination.textLabel} en: ${destination.url}`
         : '',
     ]
       .filter(Boolean)
@@ -10869,22 +10979,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       })
       .join('');
 
-    return `
-      <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
-        <div style="max-width:920px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(21,49,75,.12);">
-          <div style="padding:26px 30px;background:#c0392b;color:#fff;">
-            <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Justice KPI · Inventario</div>
-            <h1 style="margin:10px 0 0;font-size:25px;">Alerta de stock minimo</h1>
-          </div>
-          <div style="padding:26px 30px;">
-            <p style="font-size:15px;line-height:1.6;">Hola ${this.escapeHtml(recipientLabel)}, ${this.escapeHtml(intro)}</p>
-            <p style="padding:12px 14px;border-radius:10px;background:#fff4e5;color:#754c00;font-size:13px;line-height:1.5;">
-              El stock disponible para esta alerta es: stock total menos stock critico. El stock critico permanece reservado para emergencias.
-            </p>
-            ${warehouseSections}
-          </div>
+    return this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Inventario',
+      title: 'Alerta de stock mínimo',
+      summary:
+        mode === 'bulk'
+          ? 'Resultado de la carga masiva para las bodegas habilitadas del destinatario.'
+          : 'Un movimiento dejó materiales por debajo del stock mínimo configurado.',
+      accent: '#c0392b',
+      contentHtml: `
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+          Hola <strong>${this.escapeHtml(recipientLabel)}</strong>, ${this.escapeHtml(intro)}
+        </p>
+        <div style="padding:13px 15px;border-radius:10px;background:#fff7e8;border:1px solid #f4d9a6;color:#754c00;font-size:13px;line-height:1.55;">
+          El disponible se calcula como stock total menos reserva crítica. La reserva crítica permanece protegida para emergencias.
         </div>
-      </div>`;
+        ${warehouseSections}`,
+      footer:
+        'Correo automático de inventario. El contenido respeta las sucursales y bodegas habilitadas para el destinatario.',
+    });
   }
 
   private buildScopedInventoryEmailText(
@@ -10977,10 +11090,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (item) => item.producto_id && item.bodega_id && item.cantidad > 0,
     );
     if (!valid.length) return [] as InventoryReservationEmailItem[];
-    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
-      valid.map((item) => item.producto_id),
-      valid.map((item) => String(item.bodega_id)),
-    );
+    const [{ productMap, warehouseMap }, equipment, requesterLabels] =
+      await Promise.all([
+        this.buildInventoryCatalogMaps(
+          valid.map((item) => item.producto_id),
+          valid.map((item) => String(item.bodega_id)),
+        ),
+        workOrder.equipment_id
+          ? this.equipoRepo.findOne({
+              where: { id: workOrder.equipment_id, is_deleted: false },
+            })
+          : Promise.resolve(null),
+        this.resolveWorkOrderRequesterLabels(workOrder),
+      ]);
+    const equipmentLabel = equipment
+      ? this.buildEquipmentReportLabel(equipment)
+      : 'Equipo no disponible';
     return valid.map((item): InventoryReservationEmailItem => {
       const producto = productMap.get(item.producto_id);
       const bodega = warehouseMap.get(String(item.bodega_id));
@@ -10988,6 +11113,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_id: workOrder.id,
         work_order_code: workOrder.code,
         work_order_title: workOrder.title ?? null,
+        equipment_label: equipmentLabel,
+        requester_labels: requesterLabels,
         producto_id: item.producto_id,
         producto_label:
           this.buildProductoLabel(producto) ?? item.producto_id,
@@ -10999,6 +11126,66 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         observacion: this.firstNonEmptyString(item.observacion),
       };
     });
+  }
+
+  private async resolveWorkOrderRequesterLabels(workOrder: WorkOrderEntity) {
+    const payload = (workOrder.valor_json ?? {}) as Record<string, unknown>;
+    const userIds = new Set(
+      [
+        workOrder.requested_by,
+        payload.created_by_user_id,
+        payload.actor_user_id,
+        payload.requested_by_user_id,
+      ]
+        .map((value) => this.firstNonEmptyString(value))
+        .filter((value): value is string => Boolean(value)),
+    );
+    const usernames = new Set(
+      [
+        payload.created_by_username,
+        payload.actor_username,
+        payload.requested_by,
+        workOrder.created_by,
+      ]
+        .map((value) => this.normalizeUsername(value))
+        .filter((value): value is string => Boolean(value)),
+    );
+    const emails = new Set(
+      [payload.created_by_email, payload.actor_email, payload.requested_by_email]
+        .map((value) => this.normalizeEmail(value))
+        .filter((value): value is string => Boolean(value)),
+    );
+    const users = await this.fetchSecurityUsers();
+    const labels = users
+      .filter(
+        (user) =>
+          this.isActiveSecurityUser(user) &&
+          ((user.id && userIds.has(user.id)) ||
+            (this.normalizeUsername(user.nameUser) &&
+              usernames.has(this.normalizeUsername(user.nameUser)!)) ||
+            (this.normalizeEmail(user.email) &&
+              emails.has(this.normalizeEmail(user.email)!))),
+      )
+      .map((user) => this.buildSecurityUserDisplayName(user));
+
+    const fallback = this.firstNonOpaqueUserLabel(
+      payload.created_by_name,
+      payload.created_by_username,
+      payload.actor_name,
+      payload.actor_username,
+      workOrder.created_by,
+    );
+    if (!labels.length && fallback) labels.push(fallback);
+    const uniqueLabels = [
+      ...new Map(
+        labels
+          .filter(Boolean)
+          .map((label) => [this.normalizeUsername(label), label] as const),
+      ).values(),
+    ];
+    return uniqueLabels.length
+      ? uniqueLabels
+      : ['Usuario generador no identificado'];
   }
 
   private groupReservationsByWarehouse(items: InventoryReservationEmailItem[]) {
@@ -11052,24 +11239,46 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       })
       .join('');
     const order = items[0];
-    return `
-      <div style="margin:0;padding:24px;background:#f3f6fb;font-family:Arial,sans-serif;color:#15314b;">
-        <div style="max-width:850px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 12px 36px rgba(21,49,75,.12);">
-          <div style="padding:26px 30px;background:#245b84;color:#fff;">
-            <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;">Justice KPI · Ordenes de trabajo</div>
-            <h1 style="margin:10px 0 0;font-size:25px;">Reserva de materiales</h1>
-          </div>
-          <div style="padding:26px 30px;">
-            <p style="font-size:15px;line-height:1.6;">Hola ${this.escapeHtml(recipient.displayName || recipient.username || 'usuario')}, se registro una reserva de materiales para la orden <strong>${this.escapeHtml(order.work_order_code)}</strong>${order.work_order_title ? ` · ${this.escapeHtml(order.work_order_title)}` : ''}.</p>
-            ${sections}
-          </div>
-        </div>
-      </div>`;
+    const workOrdersUrl = this.buildAppModuleUrl('work-orders');
+    return this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Órdenes de trabajo',
+      title: 'Solicitud y reserva de materiales',
+      summary: `Se registró una necesidad de materiales para la OT ${order.work_order_code}.`,
+      accent: '#245b84',
+      contentHtml: `
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+          Hola <strong>${this.escapeHtml(recipient.displayName || recipient.username || 'usuario')}</strong>. Verifica la disponibilidad en el stock de la bodega indicada y facilita los materiales reservados al personal que generó la orden.
+        </p>
+        ${this.buildEmailInfoTable([
+          {
+            label: 'Orden',
+            value: `${order.work_order_code}${order.work_order_title ? ` - ${order.work_order_title}` : ''}`,
+          },
+          { label: 'Equipo', value: order.equipment_label },
+          {
+            label: 'Solicitado por',
+            value: order.requester_labels.join(', '),
+          },
+        ])}
+        ${sections}
+        ${
+          workOrdersUrl
+            ? `<div style="margin-top:22px;text-align:center;">
+                <a href="${this.escapeHtml(workOrdersUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#245b84;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Abrir órdenes de trabajo</a>
+              </div>`
+            : ''
+        }`,
+      footer:
+        'Correo automático de reserva de materiales. Se envía únicamente a personal de bodega, administradores y superadministradores con acceso a la sucursal y bodega correspondiente.',
+    });
   }
 
   private buildReservationEmailText(items: InventoryReservationEmailItem[]) {
     const lines = [
       `Reserva de materiales para la orden ${items[0].work_order_code}${items[0].work_order_title ? ` - ${items[0].work_order_title}` : ''}`,
+      `Equipo: ${items[0].equipment_label}`,
+      `Solicitado por: ${items[0].requester_labels.join(', ')}`,
+      'Acción: verificar el stock y facilitar los materiales al personal solicitante.',
       '',
     ];
     for (const group of this.groupReservationsByWarehouse(items)) {
@@ -11080,6 +11289,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
       }
       lines.push('');
+    }
+    const workOrdersUrl = this.buildAppModuleUrl('work-orders');
+    if (workOrdersUrl) {
+      lines.push(`Órdenes de trabajo: ${workOrdersUrl}`);
     }
     return lines.join('\n');
   }
@@ -22478,6 +22691,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder: WorkOrderEntity,
     dto: CreateConsumoDto,
   ) {
+    this.assertWorkOrderAllowsMaterialReservation(workOrder);
     if (!dto.bodega_id) {
       throw new BadRequestException(
         'La bodega es obligatoria para registrar el consumo.',
@@ -25962,6 +26176,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: workOrderId,
       is_deleted: false,
     });
+    this.assertWorkOrderAllowsMaterialReservation(workOrder);
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     await this.assertWorkOrderNotBlockedByActiveAnnex(
       workOrder,

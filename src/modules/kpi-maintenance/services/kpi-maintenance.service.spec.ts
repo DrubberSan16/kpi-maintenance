@@ -1078,7 +1078,7 @@ describe('KpiMaintenanceService work orders', () => {
   it('registrar consumo crea o incrementa la reserva de stock para la OT', async () => {
     repos.woRepo.findOne.mockResolvedValue({
       id: 'wo-1',
-      status_workflow: 'IN_PROGRESS',
+      status_workflow: 'PLANNED',
       is_deleted: false,
     });
     repos.productoRepo.findOne.mockResolvedValue({
@@ -1123,6 +1123,116 @@ describe('KpiMaintenanceService work orders', () => {
         estado: 'RESERVADO',
       }),
     );
+  });
+
+  it('rechaza nuevas reservas cuando la OT está cerrada', async () => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-closed',
+      status_workflow: 'CLOSED',
+      status: 'ACTIVE',
+      valor_json: {},
+      is_deleted: false,
+    });
+
+    await expect(
+      service.createConsumo('wo-closed', {
+        producto_id: 'producto-1',
+        bodega_id: 'bodega-1',
+        cantidad: 1,
+      } as any),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(repos.consumoRepo.save).not.toHaveBeenCalled();
+    expect(repos.reservaRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('presenta OT, equipo, solicitante y materiales en el correo de reserva', () => {
+    (service as any).publicBaseUrl = 'https://justicecompany-ec.com';
+    const items = [
+      {
+        work_order_id: 'wo-1',
+        work_order_code: 'OT-A00025',
+        work_order_title: 'Mantenimiento preventivo',
+        equipment_label: 'EQ-001 - Generador (CAT 500)',
+        requester_labels: ['Operador Uno', 'Supervisor Dos'],
+        producto_id: 'producto-1',
+        producto_label: 'MAT-001-Aceite (15W40)',
+        bodega_id: 'bodega-1',
+        bodega_label: 'BOD-001 - Principal',
+        sucursal_id: 'sucursal-1',
+        cantidad_reservada: 5,
+        observacion: 'Entrega para turno nocturno',
+      },
+    ];
+
+    const html = (service as any).buildReservationEmailHtml(
+      {
+        type: 'WAREHOUSE_STAFF',
+        email: 'bodega@example.com',
+        displayName: 'Bodega Uno',
+      },
+      items,
+    );
+    const text = (service as any).buildReservationEmailText(items);
+
+    expect(html).toContain('<!doctype html>');
+    expect(html).toContain('OT-A00025');
+    expect(html).toContain('EQ-001 - Generador (CAT 500)');
+    expect(html).toContain('Operador Uno, Supervisor Dos');
+    expect(html).toContain('MAT-001-Aceite (15W40)');
+    expect(html).toContain(
+      'https://justicecompany-ec.com/app/work-orders',
+    );
+    expect(text).toContain('verificar el stock');
+  });
+
+  it('redirige las alertas al módulo que corresponde', () => {
+    (service as any).publicBaseUrl = 'https://justicecompany-ec.com/app';
+    const workOrderDestination = (service as any).resolveAlertEmailDestination({
+      work_order_id: 'wo-1',
+      origen: 'MANTENIMIENTO',
+      categoria: 'MANTENIMIENTO',
+      referencia_tipo: 'WORK_ORDER',
+      payload_json: {},
+    });
+    const materialDestination = (service as any).resolveAlertEmailDestination({
+      work_order_id: null,
+      origen: 'INVENTARIO',
+      categoria: 'INVENTARIO',
+      referencia_tipo: 'STOCK_BODEGA',
+      payload_json: {},
+    });
+
+    expect(workOrderDestination).toMatchObject({
+      label: 'Abrir órdenes de trabajo',
+      url: 'https://justicecompany-ec.com/app/work-orders',
+    });
+    expect(materialDestination).toMatchObject({
+      label: 'Abrir materiales',
+      url: 'https://justicecompany-ec.com/app/productos',
+    });
+  });
+
+  it('aplica el formato corporativo y escapa datos en incidentes técnicos', async () => {
+    const sendMail = jest.fn().mockResolvedValue(undefined);
+    (service as any).alertAdministratorEmail = 'admin@example.com';
+    jest
+      .spyOn(service as any, 'getAlertMailTransporter')
+      .mockResolvedValue({ sendMail });
+
+    await (service as any).sendTechnicalIncidentEmail({
+      ticket: 'INC-1',
+      moduleName: 'Inventario',
+      method: 'POST',
+      requestUrl: '/productos',
+      statusCode: 500,
+      createdBy: 'Usuario Uno',
+      payload: { response_message: '<script>alert(1)</script>' },
+    });
+
+    const message = sendMail.mock.calls[0][0];
+    expect(message.html).toContain('<!doctype html>');
+    expect(message.html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(message.html).not.toContain('<script>alert(1)</script>');
   });
 
   it('consume stock crítico cuando no existe stock nuevo ni usado', () => {
