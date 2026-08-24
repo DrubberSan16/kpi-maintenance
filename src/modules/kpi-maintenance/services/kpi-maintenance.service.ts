@@ -11411,29 +11411,79 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private resolveEquipmentServiceReminder(daysRemaining: number) {
-    if (daysRemaining === 10) {
-      return { stage: 'D-10', label: 'faltan 10 dias' };
+  private resolveEquipmentServiceReminders(
+    unit: string,
+    daysRemaining: number | null,
+    hoursRemaining: number | null,
+  ): Array<{ stage: string; label: string }> {
+    if (unit === 'HORAS') {
+      if (hoursRemaining === 24) {
+        return [{ stage: 'H-24', label: 'Alerta 1: 24 H antes' }];
+      }
+      if (hoursRemaining === 12) {
+        return [{ stage: 'H-12', label: 'Alerta 2: 12 H antes' }];
+      }
+      if (hoursRemaining === 6) {
+        return [{ stage: 'H-6', label: 'Alerta 3: 6 H antes' }];
+      }
+      if (hoursRemaining === 1) {
+        return [{ stage: 'H-1', label: 'Alerta 4: 1 H antes' }];
+      }
+      return [];
     }
-    if (daysRemaining === 5) {
-      return { stage: 'D-5', label: 'faltan 5 dias' };
+
+    if (daysRemaining == null) return [];
+
+    if (unit === 'SEMANAS') {
+      if (daysRemaining === 7) {
+        return [{ stage: 'S-7', label: 'Alerta 1: 1 semana antes (7 días)' }];
+      }
+      if (daysRemaining === 3) {
+        return [
+          { stage: 'S-3', label: 'Alerta 2: media semana antes (3 días)' },
+        ];
+      }
+      if (daysRemaining === 1) {
+        return [{ stage: 'S-1', label: 'Alerta 3: 1 día antes' }];
+      }
+      if (daysRemaining === 0) {
+        return [{ stage: 'S-0', label: 'Alerta 4: el mismo día' }];
+      }
+      return [];
     }
+
+    if (unit === 'ANIOS') {
+      if (daysRemaining === 30) {
+        return [{ stage: 'A-30', label: 'Alerta 1: 1 mes antes (30 días)' }];
+      }
+      if (daysRemaining === 15) {
+        return [
+          { stage: 'A-15A', label: 'Alerta 2: medio mes antes (15 días)' },
+          { stage: 'A-15B', label: 'Alerta 3: 15 día antes' },
+        ];
+      }
+      if (daysRemaining === 1) {
+        return [{ stage: 'A-1', label: 'Alerta 4: 1 día antes' }];
+      }
+      if (daysRemaining === 0) {
+        return [{ stage: 'A-0', label: 'Alerta 5: el mismo día' }];
+      }
+      return [];
+    }
+
     if (daysRemaining === 3) {
-      return { stage: 'D-3', label: 'faltan 3 dias' };
+      return [{ stage: 'D-3', label: 'Alerta 1: 3 días antes' }];
+    }
+    if (daysRemaining === 2) {
+      return [{ stage: 'D-2', label: 'Alerta 2: 2 días antes' }];
     }
     if (daysRemaining === 1) {
-      return { stage: 'D-1', label: 'falta 1 dia' };
+      return [{ stage: 'D-1', label: 'Alerta 3: 1 día antes' }];
     }
     if (daysRemaining === 0) {
-      return { stage: 'D0', label: 'vence hoy' };
+      return [{ stage: 'D-0', label: 'Alerta 4: el mismo día' }];
     }
-    if (daysRemaining < 0 && daysRemaining >= -5) {
-      return {
-        stage: `OVERDUE-${Math.abs(daysRemaining)}`,
-        label: `vencido hace ${Math.abs(daysRemaining)} dia(s)`,
-      };
-    }
-    return null;
+    return [];
   }
 
   private diffDateOnlyStrings(targetDate: string, baseDate: string) {
@@ -11441,6 +11491,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const base = new Date(`${baseDate}T00:00:00`);
     if (Number.isNaN(target.getTime()) || Number.isNaN(base.getTime())) return null;
     return Math.round((target.getTime() - base.getTime()) / 86400000);
+  }
+
+  /** America/Guayaquil no observa horario de verano: offset fijo UTC-05:00. */
+  private guayaquilMidnightInstant(dateOnly: string): Date {
+    return new Date(`${dateOnly}T05:00:00.000Z`);
   }
 
   private async buildEquipmentServiceAlertCandidates(): Promise<AlertCandidate[]> {
@@ -11452,58 +11507,71 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       order: { proximo_servicio_fecha: 'ASC', codigo: 'ASC' } as any,
     });
     const today = this.currentGuayaquilDateString();
+    const now = new Date();
 
     return rows.flatMap((row) => {
       const nextDate = this.safeDateOnlyString(row.proximo_servicio_fecha);
       if (!nextDate) return [];
 
+      const unit = this.normalizeEquipmentServiceIntervalUnit(
+        row.intervalo_mantenimiento_unidad,
+      );
       const daysRemaining = this.diffDateOnlyStrings(nextDate, today);
-      if (daysRemaining == null) return [];
 
-      const reminder = this.resolveEquipmentServiceReminder(daysRemaining);
-      if (!reminder) return [];
+      let hoursRemaining: number | null = null;
+      if (unit === 'HORAS') {
+        const dueInstant = this.guayaquilMidnightInstant(nextDate);
+        const remainingHoursRaw =
+          (dueInstant.getTime() - now.getTime()) / 3600000;
+        hoursRemaining = remainingHoursRaw > 0 ? Math.ceil(remainingHoursRaw) : null;
+      } else if (daysRemaining == null) {
+        return [];
+      }
+
+      const reminders = this.resolveEquipmentServiceReminders(
+        unit,
+        daysRemaining,
+        hoursRemaining,
+      );
+      if (!reminders.length) return [];
 
       const equipmentLabel =
         row.codigo || row.nombre || row.nombre_real || row.id || 'Equipo';
-      const overdue = daysRemaining < 0;
 
-      return [
-        {
+      return reminders.map((reminder) => ({
+        equipo_id: row.id,
+        tipo_alerta: 'MANTENIMIENTO_PROXIMO',
+        categoria: 'MANTENIMIENTO' as AlertCategory,
+        nivel: 'WARNING' as AlertLevel,
+        origen: 'SYSTEM' as AlertOrigin,
+        referencia_tipo: 'EQUIPO_SERVICIO_TIEMPO',
+        referencia: `EQUIPO_SERVICIO:${row.id}:${reminder.stage}:${nextDate}`,
+        detalle: `${equipmentLabel} · mantenimiento por tiempo · ${reminder.label} · proximo servicio ${nextDate}`,
+        payload_json: {
+          tipo_alerta_publico: 'SERVICIO_EQUIPO_TIEMPO',
+          equipment_service_stage: reminder.stage,
           equipo_id: row.id,
-          tipo_alerta: overdue
-            ? 'MANTENIMIENTO_VENCIDO'
-            : 'MANTENIMIENTO_PROXIMO',
-          categoria: 'MANTENIMIENTO' as AlertCategory,
-          nivel: overdue ? 'CRITICAL' : 'WARNING',
-          origen: 'SYSTEM' as AlertOrigin,
-          referencia_tipo: 'EQUIPO_SERVICIO_TIEMPO',
-          referencia: `EQUIPO_SERVICIO:${row.id}:${reminder.stage}:${nextDate}`,
-          detalle: `${equipmentLabel} · mantenimiento por tiempo · ${reminder.label} · proximo servicio ${nextDate}`,
-          payload_json: {
-            tipo_alerta_publico: 'SERVICIO_EQUIPO_TIEMPO',
-            equipment_service_stage: reminder.stage,
-            equipo_id: row.id,
-            equipo_codigo: row.codigo ?? null,
-            equipo_nombre: row.nombre ?? null,
-            equipo_nombre_real: row.nombre_real ?? null,
-            ultimo_servicio_fecha: row.ultimo_servicio_fecha ?? null,
-            proximo_servicio_fecha: nextDate,
-            dias_restantes: daysRemaining,
-            intervalo_mantenimiento_valor:
-              row.intervalo_mantenimiento_valor ?? null,
-            intervalo_mantenimiento_unidad:
-              row.intervalo_mantenimiento_unidad ?? null,
-            actor_username: this.firstNonEmptyString(
-              row.updated_by,
-              row.created_by,
-            ),
-            actor_email: null,
-            actor_user_id: null,
-            actor_name: null,
-            actor_role: null,
-          },
+          equipo_codigo: row.codigo ?? null,
+          equipo_nombre: row.nombre ?? null,
+          equipo_nombre_real: row.nombre_real ?? null,
+          ultimo_servicio_fecha: row.ultimo_servicio_fecha ?? null,
+          proximo_servicio_fecha: nextDate,
+          dias_restantes: unit === 'HORAS' ? null : daysRemaining,
+          horas_restantes: unit === 'HORAS' ? hoursRemaining : null,
+          intervalo_mantenimiento_valor:
+            row.intervalo_mantenimiento_valor ?? null,
+          intervalo_mantenimiento_unidad:
+            row.intervalo_mantenimiento_unidad ?? null,
+          actor_username: this.firstNonEmptyString(
+            row.updated_by,
+            row.created_by,
+          ),
+          actor_email: null,
+          actor_user_id: null,
+          actor_name: null,
+          actor_role: null,
         },
-      ];
+      }));
     });
   }
 
@@ -13278,6 +13346,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private normalizeEquipmentServiceIntervalUnit(value: unknown) {
     const raw = String(value || '').trim().toUpperCase();
+    if (['HORA', 'HORAS', 'HOUR', 'HOURS'].includes(raw)) return 'HORAS';
     if (['SEMANA', 'SEMANAS', 'WEEK', 'WEEKS'].includes(raw)) return 'SEMANAS';
     if (['ANIO', 'ANIOS', 'AÑO', 'AÑOS', 'YEAR', 'YEARS'].includes(raw)) {
       return 'ANIOS';
@@ -13321,9 +13390,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.safeDateOnlyString(
         source.ultimo_servicio_fecha ?? current?.ultimo_servicio_fecha,
       ) ?? this.currentGuayaquilDateString();
+    // El modelo persistido es solo fecha; una unidad HORAS se redondea hacia
+    // arriba a dias calendario completos para mantener compatible el calculo
+    // sin tocar el tipo de dato ni la zona horaria configurados.
+    const intervaloParaFecha =
+      intervaloUnidad === 'HORAS'
+        ? Math.max(1, Math.ceil(intervaloValor / 24))
+        : intervaloValor;
+    const unidadParaFecha =
+      intervaloUnidad === 'HORAS' ? 'DIAS' : intervaloUnidad;
     const proximoServicioFecha =
       this.toDateOnlyString(
-        this.addInterval(ultimoServicioFecha, intervaloUnidad, intervaloValor),
+        this.addInterval(ultimoServicioFecha, unidadParaFecha, intervaloParaFecha),
       ) ?? ultimoServicioFecha;
 
     return {

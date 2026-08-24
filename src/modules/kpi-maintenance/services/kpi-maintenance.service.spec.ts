@@ -2384,4 +2384,250 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
     expect(qb.orderBy).toHaveBeenCalledWith('h.changed_at', 'DESC');
     expect(result.data).toEqual(rows);
   });
+
+  describe('mantenimiento por tiempo: unidad HORAS y recordatorios por unidad', () => {
+    it.each([
+      ['HORA', 'HORAS'],
+      ['HORAS', 'HORAS'],
+      ['Hora', 'HORAS'],
+      ['hour', 'HORAS'],
+      ['HOURS', 'HORAS'],
+      ['dias', 'DIAS'],
+      ['semanas', 'SEMANAS'],
+      ['anios', 'ANIOS'],
+    ])('normaliza "%s" como unidad canonica %s', (raw, expected) => {
+      expect(
+        (service as any).normalizeEquipmentServiceIntervalUnit(raw),
+      ).toBe(expected);
+    });
+
+    it('redondea un intervalo de 25 horas hacia arriba a 2 dias calendario', () => {
+      const schedule = (service as any).resolveEquipmentServiceSchedule({
+        es_servicio: true,
+        intervalo_mantenimiento_valor: 25,
+        intervalo_mantenimiento_unidad: 'HORAS',
+        ultimo_servicio_fecha: '2026-08-24',
+      });
+
+      expect(schedule.intervalo_mantenimiento_unidad).toBe('HORAS');
+      expect(schedule.proximo_servicio_fecha).toBe('2026-08-26');
+    });
+
+    it('redondea un intervalo de 1 a 24 horas a exactamente 1 dia calendario', () => {
+      const scheduleUnaHora = (service as any).resolveEquipmentServiceSchedule({
+        es_servicio: true,
+        intervalo_mantenimiento_valor: 1,
+        intervalo_mantenimiento_unidad: 'HORAS',
+        ultimo_servicio_fecha: '2026-08-24',
+      });
+      const scheduleVeinticuatroHoras = (
+        service as any
+      ).resolveEquipmentServiceSchedule({
+        es_servicio: true,
+        intervalo_mantenimiento_valor: 24,
+        intervalo_mantenimiento_unidad: 'HORAS',
+        ultimo_servicio_fecha: '2026-08-24',
+      });
+
+      expect(scheduleUnaHora.proximo_servicio_fecha).toBe('2026-08-25');
+      expect(scheduleVeinticuatroHoras.proximo_servicio_fecha).toBe(
+        '2026-08-25',
+      );
+    });
+
+    const buildEquipoServicioRow = (overrides: Record<string, unknown>) => ({
+      id: 'equipo-1',
+      codigo: 'EQ-001',
+      nombre: 'Generador',
+      nombre_real: 'Generador principal',
+      es_servicio: true,
+      is_deleted: false,
+      ultimo_servicio_fecha: '2026-08-01',
+      intervalo_mantenimiento_valor: 1,
+      updated_by: 'tester',
+      created_by: 'tester',
+      ...overrides,
+    });
+
+    async function runCandidatesAt(nowIso: string, row: Record<string, unknown>) {
+      jest.useFakeTimers().setSystemTime(new Date(nowIso));
+      try {
+        repos.equipoRepo.find.mockResolvedValue([row]);
+        return await (service as any).buildEquipmentServiceAlertCandidates();
+      } finally {
+        jest.useRealTimers();
+      }
+    }
+
+    it.each([
+      ['3', '2026-08-27', 'D-3', 'Alerta 1: 3 días antes'],
+      ['2', '2026-08-26', 'D-2', 'Alerta 2: 2 días antes'],
+      ['1', '2026-08-25', 'D-1', 'Alerta 3: 1 día antes'],
+      ['0', '2026-08-24', 'D-0', 'Alerta 4: el mismo día'],
+    ])(
+      'DIAS: genera el recordatorio exacto a %s dia(s) restantes',
+      async (daysLabel, proximoServicioFecha, stage, label) => {
+        const row = buildEquipoServicioRow({
+          intervalo_mantenimiento_unidad: 'DIAS',
+          proximo_servicio_fecha: proximoServicioFecha,
+        });
+        const candidates = await runCandidatesAt(
+          '2026-08-24T15:00:00.000Z',
+          row,
+        );
+
+        expect(candidates).toHaveLength(1);
+        expect(candidates[0].referencia).toBe(
+          `EQUIPO_SERVICIO:equipo-1:${stage}:${proximoServicioFecha}`,
+        );
+        expect(candidates[0].detalle).toContain(label);
+        expect(candidates[0].payload_json.dias_restantes).toBe(
+          Number(daysLabel),
+        );
+        expect(candidates[0].payload_json.horas_restantes).toBeNull();
+      },
+    );
+
+    it.each([
+      ['7', '2026-08-31', 'S-7', 'Alerta 1: 1 semana antes (7 días)'],
+      ['3', '2026-08-27', 'S-3', 'Alerta 2: media semana antes (3 días)'],
+      ['1', '2026-08-25', 'S-1', 'Alerta 3: 1 día antes'],
+      ['0', '2026-08-24', 'S-0', 'Alerta 4: el mismo día'],
+    ])(
+      'SEMANAS: genera el recordatorio exacto a %s dia(s) restantes',
+      async (_label, proximoServicioFecha, stage, label) => {
+        const row = buildEquipoServicioRow({
+          intervalo_mantenimiento_unidad: 'SEMANAS',
+          proximo_servicio_fecha: proximoServicioFecha,
+        });
+        const candidates = await runCandidatesAt(
+          '2026-08-24T15:00:00.000Z',
+          row,
+        );
+
+        expect(candidates).toHaveLength(1);
+        expect(candidates[0].referencia).toBe(
+          `EQUIPO_SERVICIO:equipo-1:${stage}:${proximoServicioFecha}`,
+        );
+        expect(candidates[0].detalle).toContain(label);
+      },
+    );
+
+    it('ANIOS: genera el recordatorio de 30 dias antes', async () => {
+      const row = buildEquipoServicioRow({
+        intervalo_mantenimiento_unidad: 'ANIOS',
+        proximo_servicio_fecha: '2026-09-23',
+      });
+      const candidates = await runCandidatesAt('2026-08-24T15:00:00.000Z', row);
+
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0].referencia).toBe(
+        'EQUIPO_SERVICIO:equipo-1:A-30:2026-09-23',
+      );
+      expect(candidates[0].detalle).toContain(
+        'Alerta 1: 1 mes antes (30 días)',
+      );
+    });
+
+    it('ANIOS: genera dos recordatorios simultaneos y distintos a 15 dias antes', async () => {
+      const row = buildEquipoServicioRow({
+        intervalo_mantenimiento_unidad: 'ANIOS',
+        proximo_servicio_fecha: '2026-09-08',
+      });
+      const candidates = await runCandidatesAt('2026-08-24T15:00:00.000Z', row);
+
+      expect(candidates).toHaveLength(2);
+      expect(candidates.map((c: any) => c.referencia)).toEqual([
+        'EQUIPO_SERVICIO:equipo-1:A-15A:2026-09-08',
+        'EQUIPO_SERVICIO:equipo-1:A-15B:2026-09-08',
+      ]);
+      expect(candidates[0].detalle).toContain(
+        'Alerta 2: medio mes antes (15 días)',
+      );
+      expect(candidates[1].detalle).toContain('Alerta 3: 15 día antes');
+    });
+
+    it.each([
+      ['1', '2026-08-25', 'A-1', 'Alerta 4: 1 día antes'],
+      ['0', '2026-08-24', 'A-0', 'Alerta 5: el mismo día'],
+    ])(
+      'ANIOS: genera el recordatorio exacto a %s dia(s) restantes',
+      async (_label, proximoServicioFecha, stage, label) => {
+        const row = buildEquipoServicioRow({
+          intervalo_mantenimiento_unidad: 'ANIOS',
+          proximo_servicio_fecha: proximoServicioFecha,
+        });
+        const candidates = await runCandidatesAt(
+          '2026-08-24T15:00:00.000Z',
+          row,
+        );
+
+        expect(candidates).toHaveLength(1);
+        expect(candidates[0].referencia).toBe(
+          `EQUIPO_SERVICIO:equipo-1:${stage}:${proximoServicioFecha}`,
+        );
+        expect(candidates[0].detalle).toContain(label);
+      },
+    );
+
+    it.each([
+      ['24', '2026-08-24T05:00:00.000Z', 'H-24', 'Alerta 1: 24 H antes'],
+      ['12', '2026-08-24T17:00:00.000Z', 'H-12', 'Alerta 2: 12 H antes'],
+      ['6', '2026-08-24T23:00:00.000Z', 'H-6', 'Alerta 3: 6 H antes'],
+      ['1', '2026-08-25T04:00:00.000Z', 'H-1', 'Alerta 4: 1 H antes'],
+    ])(
+      'HORAS: genera el recordatorio exacto a %s hora(s) restantes',
+      async (hours, nowIso, stage, label) => {
+        // proximo_servicio_fecha = 2026-08-25 equivale a 2026-08-25T05:00:00.000Z
+        // (medianoche en America/Guayaquil, UTC-05:00 fijo).
+        const row = buildEquipoServicioRow({
+          intervalo_mantenimiento_unidad: 'HORAS',
+          proximo_servicio_fecha: '2026-08-25',
+        });
+        const candidates = await runCandidatesAt(nowIso, row);
+
+        expect(candidates).toHaveLength(1);
+        expect(candidates[0].referencia).toBe(
+          `EQUIPO_SERVICIO:equipo-1:${stage}:2026-08-25`,
+        );
+        expect(candidates[0].detalle).toContain(label);
+        expect(candidates[0].payload_json.horas_restantes).toBe(
+          Number(hours),
+        );
+        expect(candidates[0].payload_json.dias_restantes).toBeNull();
+      },
+    );
+
+    it('no genera recordatorios fuera de los umbrales solicitados (legado 10/5/vencido eliminado)', async () => {
+      const rowDiasFueraDeUmbral = buildEquipoServicioRow({
+        intervalo_mantenimiento_unidad: 'DIAS',
+        proximo_servicio_fecha: '2026-08-19', // -5 dias: antes era "vencido"
+      });
+      const candidatesVencido = await runCandidatesAt(
+        '2026-08-24T15:00:00.000Z',
+        rowDiasFueraDeUmbral,
+      );
+      expect(candidatesVencido).toHaveLength(0);
+
+      const rowDiezDias = buildEquipoServicioRow({
+        intervalo_mantenimiento_unidad: 'DIAS',
+        proximo_servicio_fecha: '2026-09-03', // +10 dias: antes disparaba D-10
+      });
+      const candidatesDiez = await runCandidatesAt(
+        '2026-08-24T15:00:00.000Z',
+        rowDiezDias,
+      );
+      expect(candidatesDiez).toHaveLength(0);
+
+      const rowHorasFueraDeUmbral = buildEquipoServicioRow({
+        intervalo_mantenimiento_unidad: 'HORAS',
+        proximo_servicio_fecha: '2026-08-25',
+      });
+      const candidatesHoras = await runCandidatesAt(
+        '2026-08-24T09:00:00.000Z', // faltan 20h, ningun umbral de HORAS
+        rowHorasFueraDeUmbral,
+      );
+      expect(candidatesHoras).toHaveLength(0);
+    });
+  });
 });
