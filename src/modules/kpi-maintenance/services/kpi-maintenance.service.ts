@@ -154,6 +154,7 @@ import {
   UploadWorkOrderAdjuntoDto,
   WorkOrderAdjuntoQueryDto,
   WorkOrderQueryDto,
+  WorkOrderReservationsQueryDto,
 } from '../dto';
 import {
   CreateWorkOrderTareaDto,
@@ -2921,6 +2922,106 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private async calculateMaterialShortfallForWorkOrder(
+    workOrderId: string,
+    manager?: EntityManager,
+  ) {
+    const consumoRepo =
+      manager?.getRepository(ConsumoRepuestoEntity) ?? this.consumoRepo;
+    const entregaRepo =
+      manager?.getRepository(EntregaMaterialEntity) ??
+      this.dataSource.getRepository(EntregaMaterialEntity);
+    const entregaDetRepo =
+      manager?.getRepository(EntregaMaterialDetEntity) ??
+      this.dataSource.getRepository(EntregaMaterialDetEntity);
+    const reservaRepo =
+      manager?.getRepository(ReservaStockEntity) ?? this.reservaRepo;
+
+    const [consumos, entregas, reservas] = await Promise.all([
+      consumoRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+      }),
+      entregaRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+      }),
+      reservaRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+      }),
+    ]);
+
+    const reservedPairs = new Set<string>();
+    for (const row of reservas) {
+      const bodegaId = String(row.bodega_id || '').trim();
+      if (!bodegaId) continue;
+      reservedPairs.add(`${row.producto_id}|${bodegaId}`);
+    }
+
+    const plannedMap = new Map<string, number>();
+    for (const row of consumos) {
+      const bodegaId = String(row.bodega_id || '').trim();
+      if (!bodegaId) continue;
+      const key = `${row.producto_id}|${bodegaId}`;
+      if (!reservedPairs.has(key)) continue;
+      plannedMap.set(key, (plannedMap.get(key) ?? 0) + this.toNumeric(row.cantidad, 0));
+    }
+
+    const entregaIds = entregas.map((row) => row.id);
+    const detalles = entregaIds.length
+      ? await entregaDetRepo.find({
+          where: { entrega_id: In(entregaIds) },
+        })
+      : [];
+    const issuedMap = new Map<string, number>();
+    for (const row of detalles) {
+      const key = `${row.producto_id}|${row.bodega_id}`;
+      issuedMap.set(key, (issuedMap.get(key) ?? 0) + this.toNumeric(row.cantidad, 0));
+    }
+
+    const EPSILON = 0.0001;
+    const shortfalls: Array<{
+      productoId: string;
+      bodegaId: string;
+      plannedQty: number;
+      issuedQty: number;
+      shortfallQty: number;
+    }> = [];
+    for (const [key, plannedQty] of plannedMap.entries()) {
+      const [productoId, bodegaId] = key.split('|');
+      const issuedQty = issuedMap.get(key) ?? 0;
+      const shortfallQty = plannedQty - issuedQty;
+      if (shortfallQty > EPSILON) {
+        shortfalls.push({ productoId, bodegaId, plannedQty, issuedQty, shortfallQty });
+      }
+    }
+    return shortfalls;
+  }
+
+  private async assertMaterialShortfallAcknowledged(
+    manager: EntityManager | undefined,
+    workOrderId: string,
+    valorJson?: Record<string, unknown> | null,
+  ) {
+    const shortfalls = await this.calculateMaterialShortfallForWorkOrder(
+      workOrderId,
+      manager,
+    );
+    if (!shortfalls.length) return;
+
+    const reason = String(
+      (valorJson as Record<string, unknown> | null)?.observacion_menor_uso_reserva ?? '',
+    ).trim();
+    if (!reason) {
+      throw new BadRequestException(
+        'Debe registrar el motivo del menor uso de material reservado antes de finalizar la orden de trabajo.',
+      );
+    }
+    if (reason.length > 500) {
+      throw new BadRequestException(
+        'El motivo del menor uso de material reservado no puede superar 500 caracteres.',
+      );
+    }
+  }
+
   private async upsertReservedMaterial(
     workOrderId: string,
     productoId: string,
@@ -4379,6 +4480,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const productMap = new Map(productos.map((row) => [row.id, row]));
     const warehouseMap = new Map(bodegas.map((row) => [row.id, row]));
     const historyRows: WorkOrderStatusHistoryEntity[] = [];
+    const woRepo = manager?.getRepository(WorkOrderEntity) ?? this.woRepo;
+    const workOrder = await woRepo.findOne({ where: { id: workOrderId } as any });
+    const shortfallReason = this.firstNonEmptyString(
+      (workOrder?.valor_json as Record<string, unknown> | null | undefined)
+        ?.observacion_menor_uso_reserva as string | undefined,
+    );
 
     for (const reserva of reservas) {
       const releasedQuantity = this.toNumeric(reserva.cantidad, 0);
@@ -4396,7 +4503,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       const requestedQuantity =
         totals.plannedQty > 0 ? totals.plannedQty : releasedQuantity;
-      reserva.cantidad = 0;
       reserva.estado = 'LIBERADO';
       historyRows.push(
         historyRepo.create({
@@ -4408,9 +4514,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             2,
           )} de ${productLabel} en ${warehouseLabel}, se uso ${totals.issuedQty.toFixed(
             2,
-          )}, no se uso ${releasedQuantity.toFixed(
-            2,
-          )} y esa reserva quedo liberada.`,
+          )}, no se uso ${releasedQuantity.toFixed(2)} y esa reserva quedo liberada.${
+            shortfallReason ? ` Motivo del menor uso: ${shortfallReason}` : ''
+          }`,
         }),
       );
     }
@@ -24022,6 +24128,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.normalizeWorkflowStatus(headerResult.workOrder.status_workflow) ===
           'CLOSED'
         ) {
+          currentPhase = 'validar remanente de materiales reservados';
+          await this.assertMaterialShortfallAcknowledged(
+            manager,
+            headerResult.workOrder.id,
+            headerResult.workOrder.valor_json as Record<string, unknown> | null,
+          );
           currentPhase = 'liberar reservas pendientes de la OT';
           await this.releaseOpenReservationsForWorkOrder(
             headerResult.workOrder.id,
@@ -24667,6 +24779,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }
         : ((wo.valor_json as Record<string, unknown> | null) ?? {});
     this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+    if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
+      await this.assertMaterialShortfallAcknowledged(
+        this.dataSource.manager,
+        wo.id,
+        nextHeaderPayload,
+      );
+    }
     const nextMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
       dto.maintenance_kind,
       wo.maintenance_kind,
@@ -26418,6 +26537,295 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         items,
       },
       'Reservas de material listadas',
+    );
+  }
+
+  async listWorkOrderReservations(
+    query: WorkOrderReservationsQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const normalizedBodegaId = this.firstNonEmptyString(query?.bodega_id) ?? null;
+    const normalizedWorkOrderId =
+      this.firstNonEmptyString(query?.work_order_id) ?? null;
+    const normalizedEstado =
+      this.firstNonEmptyString(query?.estado)?.trim().toUpperCase() ?? null;
+    const normalizedSearch =
+      this.firstNonEmptyString(query?.search)?.trim().toLowerCase() ?? null;
+
+    if (normalizedBodegaId) {
+      await this.assertWarehouseVisibleForSucursal(normalizedBodegaId, sucursalId);
+    }
+
+    let reservas: ReservaStockEntity[] = [];
+    if (!scope || normalizedBodegaId || scope.warehouseIds.size > 0) {
+      const where: Record<string, unknown> = { is_deleted: false };
+      if (normalizedBodegaId) {
+        where.bodega_id = normalizedBodegaId;
+      } else if (scope) {
+        where.bodega_id = In([...scope.warehouseIds]);
+      }
+      if (normalizedWorkOrderId) {
+        where.work_order_id = normalizedWorkOrderId;
+      }
+      reservas = await this.reservaRepo.find({
+        where: where as any,
+        order: { id: 'DESC' },
+      });
+    }
+
+    const workOrderIds = [
+      ...new Set(
+        reservas.map((row) => String(row.work_order_id || '').trim()).filter(Boolean),
+      ),
+    ];
+    const productoIds = [
+      ...new Set(
+        reservas.map((row) => String(row.producto_id || '').trim()).filter(Boolean),
+      ),
+    ];
+    const bodegaIds = [
+      ...new Set(
+        reservas.map((row) => String(row.bodega_id || '').trim()).filter(Boolean),
+      ),
+    ];
+
+    const [workOrders, productos, bodegas, consumos, entregas] = await Promise.all([
+      workOrderIds.length
+        ? this.woRepo.find({ where: { id: In(workOrderIds) } as any })
+        : Promise.resolve([] as WorkOrderEntity[]),
+      productoIds.length
+        ? this.productoRepo.find({ where: { id: In(productoIds) } as any })
+        : Promise.resolve([] as ProductoEntity[]),
+      bodegaIds.length
+        ? this.bodegaRepo.find({ where: { id: In(bodegaIds) } as any })
+        : Promise.resolve([] as BodegaEntity[]),
+      workOrderIds.length
+        ? this.consumoRepo.find({
+            where: { work_order_id: In(workOrderIds), is_deleted: false } as any,
+          })
+        : Promise.resolve([] as ConsumoRepuestoEntity[]),
+      workOrderIds.length
+        ? this.dataSource.getRepository(EntregaMaterialEntity).find({
+            where: { work_order_id: In(workOrderIds), is_deleted: false } as any,
+          })
+        : Promise.resolve([] as EntregaMaterialEntity[]),
+    ]);
+
+    const workOrderMap = new Map(workOrders.map((row) => [row.id, row]));
+    const productMap = new Map(productos.map((row) => [row.id, row]));
+    const warehouseMap = new Map(bodegas.map((row) => [row.id, row]));
+
+    const equipmentIds = [
+      ...new Set(
+        workOrders
+          .map((row) => String(row.equipment_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const equipments = equipmentIds.length
+      ? await this.equipoRepo.find({
+          where: { id: In(equipmentIds), is_deleted: false } as any,
+        })
+      : [];
+    const equipmentMap = new Map(equipments.map((row) => [row.id, row]));
+
+    const entregaIds = entregas.map((row) => row.id);
+    const entregaDetalles = entregaIds.length
+      ? await this.dataSource.getRepository(EntregaMaterialDetEntity).find({
+          where: { entrega_id: In(entregaIds) } as any,
+        })
+      : [];
+    const entregaWorkOrderMap = new Map(
+      entregas.map((row) => [
+        String(row.id || '').trim(),
+        String(row.work_order_id || '').trim(),
+      ]),
+    );
+
+    const plannedMap = new Map<string, number>();
+    const consumoObservationMap = new Map<string, string>();
+    for (const row of consumos) {
+      const bodegaId = String(row.bodega_id || '').trim();
+      if (!bodegaId) continue;
+      const key = `${row.work_order_id}|${row.producto_id}|${bodegaId}`;
+      plannedMap.set(key, (plannedMap.get(key) ?? 0) + this.toNumeric(row.cantidad, 0));
+      const observacion = this.firstNonEmptyString(row.observacion);
+      if (observacion && !consumoObservationMap.has(key)) {
+        consumoObservationMap.set(key, observacion);
+      }
+    }
+
+    const issuedMap = new Map<string, number>();
+    for (const row of entregaDetalles) {
+      const workOrderId = entregaWorkOrderMap.get(String(row.entrega_id || '').trim());
+      if (!workOrderId) continue;
+      const key = `${workOrderId}|${row.producto_id}|${row.bodega_id}`;
+      issuedMap.set(key, (issuedMap.get(key) ?? 0) + this.toNumeric(row.cantidad, 0));
+    }
+
+    const EPSILON = 0.0001;
+    const reservationGroups = new Map<string, ReservaStockEntity[]>();
+    for (const row of reservas) {
+      const key = `${row.work_order_id}|${row.producto_id}|${row.bodega_id}`;
+      const group = reservationGroups.get(key);
+      if (group) {
+        group.push(row);
+      } else {
+        reservationGroups.set(key, [row]);
+      }
+    }
+
+    let items = [...reservationGroups.entries()].map(([key, group]) => {
+      const [groupWorkOrderId, groupProductoId, groupBodegaId] = key.split('|');
+      const workOrder = workOrderMap.get(groupWorkOrderId);
+      const producto = productMap.get(groupProductoId);
+      const bodega = warehouseMap.get(groupBodegaId);
+      const equipment = workOrder?.equipment_id
+        ? equipmentMap.get(workOrder.equipment_id)
+        : null;
+      const plannedQty = plannedMap.get(key) ?? 0;
+      const issuedQty = issuedMap.get(key) ?? 0;
+
+      const reservaIds = group.map((row) => row.id);
+      const normalizedRows = group.map((row) => ({
+        estado: String(row.estado || 'RESERVADO').trim().toUpperCase(),
+        cantidad: this.toNumeric(row.cantidad, 0),
+      }));
+      const activeQty = normalizedRows
+        .filter((row) => row.estado === 'RESERVADO')
+        .reduce((acc, row) => acc + row.cantidad, 0);
+      const storedReleasedQty = normalizedRows
+        .filter((row) => row.estado === 'LIBERADO')
+        .reduce((acc, row) => acc + row.cantidad, 0);
+      const hasActiveReservation = normalizedRows.some(
+        (row) => row.estado === 'RESERVADO',
+      );
+      const hasReleasedReservation = normalizedRows.some(
+        (row) => row.estado === 'LIBERADO',
+      );
+      const estadoNormalizado = hasActiveReservation
+        ? 'RESERVADO'
+        : hasReleasedReservation
+        ? 'LIBERADO'
+        : normalizedRows[0]?.estado ?? 'RESERVADO';
+      const releasedQty =
+        storedReleasedQty > EPSILON
+          ? storedReleasedQty
+          : estadoNormalizado === 'LIBERADO'
+          ? Math.max(plannedQty - issuedQty, 0)
+          : 0;
+      const pendingQty = Math.max(plannedQty - issuedQty, 0);
+      const reservationActive =
+        estadoNormalizado === 'RESERVADO' && workOrder
+          ? this.isWorkOrderReservationActive(workOrder.status_workflow)
+          : false;
+      const workOrderValorJson = (workOrder?.valor_json ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const closeShortfallObservation =
+        this.firstNonEmptyString(
+          workOrderValorJson.observacion_menor_uso_reserva as string | undefined,
+        ) ?? null;
+      const workOrderLabel = workOrder
+        ? [workOrder.code, workOrder.title].filter(Boolean).join(' - ')
+        : `OT ${groupWorkOrderId}`;
+      const equipmentLabel =
+        [equipment?.codigo, equipment?.nombre].filter(Boolean).join(' - ') || null;
+
+      return {
+        tipo_registro: 'RESERVA DE MATERIAL',
+        reserva_id: reservaIds[0],
+        reserva_ids: reservaIds,
+        work_order_id: groupWorkOrderId,
+        producto_id: groupProductoId,
+        bodega_id: groupBodegaId,
+        bodega_codigo: bodega?.codigo ?? null,
+        bodega_nombre: bodega?.nombre ?? null,
+        bodega_label: this.buildBodegaLabel(bodega) ?? groupBodegaId,
+        producto_codigo: producto?.codigo ?? null,
+        producto_nombre: producto?.nombre ?? null,
+        producto_label: this.buildProductoLabel(producto) ?? groupProductoId,
+        work_order_code: workOrder?.code ?? null,
+        work_order_title: workOrder?.title ?? null,
+        work_order_status: workOrder
+          ? this.normalizeWorkflowStatus(workOrder.status_workflow)
+          : null,
+        work_order_label: workOrderLabel,
+        equipment_id: workOrder?.equipment_id ?? null,
+        equipment_label: equipmentLabel,
+        cantidad_solicitada: plannedQty,
+        cantidad_entregada: issuedQty,
+        cantidad_reservada_activa: activeQty,
+        cantidad_liberada: releasedQty,
+        cantidad_pendiente: pendingQty,
+        estado: estadoNormalizado,
+        reserva_activa: reservationActive,
+        observacion_reserva: consumoObservationMap.get(key) ?? null,
+        observacion_menor_uso_reserva: closeShortfallObservation,
+      };
+    });
+
+    if (normalizedEstado) {
+      items = items.filter((item) => item.estado === normalizedEstado);
+    }
+    if (normalizedSearch) {
+      items = items.filter((item) =>
+        [
+          item.producto_label,
+          item.bodega_label,
+          item.work_order_label,
+          item.equipment_label,
+          item.producto_codigo,
+          item.bodega_codigo,
+          item.work_order_code,
+        ]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(normalizedSearch)),
+      );
+    }
+
+    const resumen = {
+      total_registros: items.length,
+      total_reservados: items.filter((item) => item.estado === 'RESERVADO').length,
+      total_consumidos: items.filter((item) => item.estado === 'CONSUMIDO').length,
+      total_liberados: items.filter((item) => item.estado === 'LIBERADO').length,
+      total_cantidad_solicitada: items.reduce(
+        (acc, item) => acc + item.cantidad_solicitada,
+        0,
+      ),
+      total_cantidad_entregada: items.reduce(
+        (acc, item) => acc + item.cantidad_entregada,
+        0,
+      ),
+      total_cantidad_reservada_activa: items.reduce(
+        (acc, item) => acc + item.cantidad_reservada_activa,
+        0,
+      ),
+      total_cantidad_liberada: items.reduce(
+        (acc, item) => acc + item.cantidad_liberada,
+        0,
+      ),
+      total_cantidad_pendiente: items.reduce(
+        (acc, item) => acc + item.cantidad_pendiente,
+        0,
+      ),
+    };
+
+    return this.wrap(
+      {
+        tipo_registro: 'RESERVA DE MATERIAL',
+        filtros_aplicados: {
+          bodega_id: normalizedBodegaId,
+          work_order_id: normalizedWorkOrderId,
+          estado: normalizedEstado,
+          search: this.firstNonEmptyString(query?.search) ?? null,
+        },
+        resumen,
+        items,
+      },
+      'Reservas de bodega listadas',
     );
   }
 

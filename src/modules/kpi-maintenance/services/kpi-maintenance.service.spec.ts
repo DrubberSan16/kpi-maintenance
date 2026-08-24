@@ -9,6 +9,8 @@ import { KpiMaintenanceService } from './kpi-maintenance.service';
 import {
   EquipoEntity,
   EquipoFuncionamientoHistorialEntity,
+  EntregaMaterialEntity,
+  EntregaMaterialDetEntity,
 } from '../entities/kpi-maintenance.entity';
 
 const createRepo = () => ({
@@ -2824,6 +2826,351 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
         rowHorasFueraDeUmbral,
       );
       expect(candidatesHoras).toHaveLength(0);
+    });
+  });
+});
+
+describe('KpiMaintenanceService reservas de bodega', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+  let entregaRepo: ReturnType<typeof createRepo>;
+  let entregaDetRepo: ReturnType<typeof createRepo>;
+
+  const createReservationsDataSourceMock = () => {
+    const repoMap = new Map<any, any>([
+      [EntregaMaterialEntity, entregaRepo],
+      [EntregaMaterialDetEntity, entregaDetRepo],
+    ]);
+    return {
+      query: jest.fn().mockResolvedValue([]),
+      getRepository: (entity: any) => repoMap.get(entity),
+      manager: { getRepository: (entity: any) => repoMap.get(entity) },
+    } as unknown as DataSource;
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    repos = createRepos();
+    entregaRepo = createRepo();
+    entregaDetRepo = createRepo();
+    service = createService(repos, createReservationsDataSourceMock());
+  });
+
+  describe('listWorkOrderReservations', () => {
+    it('lista reservas consolidadas y aplica filtros de estado y busqueda', async () => {
+      repos.reservaRepo.find.mockResolvedValue([
+        {
+          id: 'reserva-1',
+          work_order_id: 'wo-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 5,
+          estado: 'RESERVADO',
+          is_deleted: false,
+        },
+        {
+          id: 'reserva-2',
+          work_order_id: 'wo-2',
+          producto_id: 'producto-2',
+          bodega_id: 'bodega-2',
+          cantidad: 0,
+          estado: 'CONSUMIDO',
+          is_deleted: false,
+        },
+      ]);
+      repos.woRepo.find.mockResolvedValue([
+        {
+          id: 'wo-1',
+          code: 'OT-A00001',
+          title: 'Cambio de filtro',
+          status_workflow: 'IN_PROGRESS',
+          equipment_id: 'equipo-1',
+          valor_json: null,
+        },
+        {
+          id: 'wo-2',
+          code: 'OT-A00002',
+          title: 'Cambio de aceite',
+          status_workflow: 'CLOSED',
+          equipment_id: null,
+          valor_json: null,
+        },
+      ]);
+      repos.productoRepo.find.mockResolvedValue([
+        { id: 'producto-1', codigo: 'MAT-1', nombre: 'Filtro' },
+        { id: 'producto-2', codigo: 'MAT-2', nombre: 'Aceite' },
+      ]);
+      repos.bodegaRepo.find.mockResolvedValue([
+        { id: 'bodega-1', codigo: 'BOD-1', nombre: 'Bodega principal' },
+        { id: 'bodega-2', codigo: 'BOD-2', nombre: 'Bodega secundaria' },
+      ]);
+      repos.equipoRepo.find.mockResolvedValue([
+        { id: 'equipo-1', codigo: 'EQ-1', nombre: 'Excavadora' },
+      ]);
+      repos.consumoRepo.find.mockResolvedValue([
+        {
+          work_order_id: 'wo-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 8,
+          is_deleted: false,
+          observacion: 'Consumo planificado',
+        },
+        {
+          work_order_id: 'wo-2',
+          producto_id: 'producto-2',
+          bodega_id: 'bodega-2',
+          cantidad: 4,
+          is_deleted: false,
+          observacion: null,
+        },
+      ]);
+      entregaRepo.find.mockResolvedValue([
+        { id: 'entrega-1', work_order_id: 'wo-1', is_deleted: false },
+        { id: 'entrega-2', work_order_id: 'wo-2', is_deleted: false },
+      ]);
+      entregaDetRepo.find.mockResolvedValue([
+        { entrega_id: 'entrega-1', producto_id: 'producto-1', bodega_id: 'bodega-1', cantidad: 3 },
+        { entrega_id: 'entrega-2', producto_id: 'producto-2', bodega_id: 'bodega-2', cantidad: 4 },
+      ]);
+
+      const result = await service.listWorkOrderReservations({} as any, null);
+
+      expect(result.data.items).toHaveLength(2);
+      const reservado = result.data.items.find(
+        (item: any) => item.reserva_id === 'reserva-1',
+      );
+      expect(reservado).toMatchObject({
+        tipo_registro: 'RESERVA DE MATERIAL',
+        estado: 'RESERVADO',
+        cantidad_solicitada: 8,
+        cantidad_entregada: 3,
+        cantidad_pendiente: 5,
+        cantidad_reservada_activa: 5,
+        reserva_activa: true,
+        observacion_reserva: 'Consumo planificado',
+      });
+      expect(result.data.resumen.total_registros).toBe(2);
+      expect(result.data.resumen.total_reservados).toBe(1);
+      expect(result.data.resumen.total_consumidos).toBe(1);
+
+      const searchResult = await service.listWorkOrderReservations(
+        { search: 'excavadora' } as any,
+        null,
+      );
+      expect(searchResult.data.items).toHaveLength(1);
+      expect(searchResult.data.items[0].reserva_id).toBe('reserva-1');
+
+      const estadoResult = await service.listWorkOrderReservations(
+        { estado: 'consumido' } as any,
+        null,
+      );
+      expect(estadoResult.data.items).toHaveLength(1);
+      expect(estadoResult.data.items[0].reserva_id).toBe('reserva-2');
+    });
+
+    it('deriva la cantidad liberada de legado (LIBERADO con cantidad en cero) desde lo solicitado menos lo entregado', async () => {
+      repos.reservaRepo.find.mockResolvedValue([
+        {
+          id: 'reserva-legado',
+          work_order_id: 'wo-3',
+          producto_id: 'producto-3',
+          bodega_id: 'bodega-3',
+          cantidad: 0,
+          estado: 'LIBERADO',
+          is_deleted: false,
+        },
+      ]);
+      repos.woRepo.find.mockResolvedValue([
+        {
+          id: 'wo-3',
+          code: 'OT-A00003',
+          title: 'OT legado',
+          status_workflow: 'CLOSED',
+          equipment_id: null,
+          valor_json: null,
+        },
+      ]);
+      repos.productoRepo.find.mockResolvedValue([
+        { id: 'producto-3', codigo: 'MAT-3', nombre: 'Manguera' },
+      ]);
+      repos.bodegaRepo.find.mockResolvedValue([
+        { id: 'bodega-3', codigo: 'BOD-3', nombre: 'Bodega 3' },
+      ]);
+      repos.consumoRepo.find.mockResolvedValue([
+        {
+          work_order_id: 'wo-3',
+          producto_id: 'producto-3',
+          bodega_id: 'bodega-3',
+          cantidad: 10,
+          is_deleted: false,
+          observacion: null,
+        },
+      ]);
+      entregaRepo.find.mockResolvedValue([
+        { id: 'entrega-3', work_order_id: 'wo-3', is_deleted: false },
+      ]);
+      entregaDetRepo.find.mockResolvedValue([
+        { entrega_id: 'entrega-3', producto_id: 'producto-3', bodega_id: 'bodega-3', cantidad: 6 },
+      ]);
+
+      const result = await service.listWorkOrderReservations({} as any, null);
+
+      expect(result.data.items[0]).toMatchObject({
+        estado: 'LIBERADO',
+        cantidad_solicitada: 10,
+        cantidad_entregada: 6,
+        cantidad_liberada: 4,
+        reserva_activa: false,
+      });
+    });
+  });
+
+  describe('assertMaterialShortfallAcknowledged', () => {
+    it('exige un motivo solo cuando existe un remanente real entre lo solicitado y lo entregado', async () => {
+      repos.consumoRepo.find.mockResolvedValue([
+        {
+          work_order_id: 'wo-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 10,
+          is_deleted: false,
+        },
+      ]);
+      repos.reservaRepo.find.mockResolvedValue([
+        {
+          id: 'reserva-1',
+          work_order_id: 'wo-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 4,
+          estado: 'RESERVADO',
+          is_deleted: false,
+        },
+      ]);
+      entregaRepo.find.mockResolvedValue([
+        { id: 'entrega-1', work_order_id: 'wo-1', is_deleted: false },
+      ]);
+      entregaDetRepo.find.mockResolvedValue([
+        { entrega_id: 'entrega-1', producto_id: 'producto-1', bodega_id: 'bodega-1', cantidad: 6 },
+      ]);
+
+      await expect(
+        (service as any).assertMaterialShortfallAcknowledged(undefined, 'wo-1', {}),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      await expect(
+        (service as any).assertMaterialShortfallAcknowledged(undefined, 'wo-1', {
+          observacion_menor_uso_reserva: '   ',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      await expect(
+        (service as any).assertMaterialShortfallAcknowledged(undefined, 'wo-1', {
+          observacion_menor_uso_reserva: 'a'.repeat(501),
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      await expect(
+        (service as any).assertMaterialShortfallAcknowledged(undefined, 'wo-1', {
+          observacion_menor_uso_reserva:
+            'Se uso menos porque el filtro estaba en buen estado',
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('no exige motivo cuando lo entregado iguala o supera lo solicitado', async () => {
+      repos.consumoRepo.find.mockResolvedValue([
+        {
+          work_order_id: 'wo-2',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 5,
+          is_deleted: false,
+        },
+      ]);
+      entregaRepo.find.mockResolvedValue([
+        { id: 'entrega-2', work_order_id: 'wo-2', is_deleted: false },
+      ]);
+      entregaDetRepo.find.mockResolvedValue([
+        { entrega_id: 'entrega-2', producto_id: 'producto-1', bodega_id: 'bodega-1', cantidad: 5 },
+      ]);
+
+      await expect(
+        (service as any).assertMaterialShortfallAcknowledged(undefined, 'wo-2', {}),
+      ).resolves.toBeUndefined();
+    });
+
+    it('no exige motivo cuando no hubo material reservado para la OT', async () => {
+      repos.consumoRepo.find.mockResolvedValue([]);
+      entregaRepo.find.mockResolvedValue([]);
+      entregaDetRepo.find.mockResolvedValue([]);
+
+      await expect(
+        (service as any).assertMaterialShortfallAcknowledged(undefined, 'wo-3', null),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('releaseOpenReservationsForWorkOrder', () => {
+    it('libera reservas activas conservando el remanente y marcando LIBERADO', async () => {
+      const reservationRow = {
+        id: 'reserva-1',
+        work_order_id: 'wo-1',
+        producto_id: 'producto-1',
+        bodega_id: 'bodega-1',
+        cantidad: 4,
+        estado: 'RESERVADO',
+        is_deleted: false,
+      };
+      repos.reservaRepo.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([reservationRow]),
+      });
+      repos.reservaRepo.save.mockImplementation(async (value: any) => value);
+      repos.productoRepo.find.mockResolvedValue([
+        { id: 'producto-1', codigo: 'MAT-1', nombre: 'Filtro' },
+      ]);
+      repos.bodegaRepo.find.mockResolvedValue([
+        { id: 'bodega-1', codigo: 'BOD-1', nombre: 'Bodega principal' },
+      ]);
+      repos.woHistoryRepo.create.mockImplementation((value: any) => value);
+      repos.woHistoryRepo.save.mockImplementation(async (value: any) => value);
+      repos.consumoRepo.find.mockResolvedValue([
+        {
+          work_order_id: 'wo-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 10,
+          is_deleted: false,
+        },
+      ]);
+      entregaRepo.find.mockResolvedValue([
+        { id: 'entrega-1', work_order_id: 'wo-1', is_deleted: false },
+      ]);
+      entregaDetRepo.find.mockResolvedValue([
+        { entrega_id: 'entrega-1', producto_id: 'producto-1', bodega_id: 'bodega-1', cantidad: 6 },
+      ]);
+
+      const releasedCount = await (service as any).releaseOpenReservationsForWorkOrder(
+        'wo-1',
+        undefined,
+        null,
+      );
+
+      expect(releasedCount).toBe(1);
+      expect(reservationRow.estado).toBe('LIBERADO');
+      expect(reservationRow.cantidad).toBe(4);
+      expect(repos.reservaRepo.save).toHaveBeenCalledWith([reservationRow]);
+    });
+  });
+
+  describe('reservas cerradas o liberadas no se consideran activas', () => {
+    it('una reserva de una OT cerrada o anulada no se considera activa', () => {
+      expect((service as any).isWorkOrderReservationActive('CLOSED')).toBe(false);
+      expect((service as any).isWorkOrderReservationActive('CERRADA')).toBe(false);
+      expect((service as any).isWorkOrderReservationActive('IN_PROGRESS')).toBe(true);
     });
   });
 });

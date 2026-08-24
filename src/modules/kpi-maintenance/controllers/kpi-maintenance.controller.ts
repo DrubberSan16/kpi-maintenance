@@ -70,6 +70,7 @@ import {
   UpdateProgramacionDto,
   UpdateCronogramaSemanalDto,
   WorkOrderQueryDto,
+  WorkOrderReservationsQueryDto,
   CreateEquipoTipoDto,
   AnnulWorkOrderDto,
   CreateWorkOrderDto,
@@ -1619,6 +1620,34 @@ export class KpiMaintenanceController {
     return this.service.listMaterialReservations(
       productoId,
       bodegaId,
+      getSucursalScopeId(req),
+    );
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary:
+      'Listado consolidado y de solo lectura de reservas de material por bodega, con OT y equipo asociados',
+  })
+  @ApiQuery({ name: 'bodega_id', required: false, description: 'ID de la bodega' })
+  @ApiQuery({
+    name: 'work_order_id',
+    required: false,
+    description: 'ID de la orden de trabajo',
+  })
+  @ApiQuery({
+    name: 'estado',
+    required: false,
+    description: 'Estado calculado de la reserva (RESERVADO, CONSUMIDO, LIBERADO)',
+  })
+  @ApiQuery({ name: 'search', required: false, description: 'Texto de búsqueda libre' })
+  @Get('work-orders/reservations')
+  listWorkOrderReservations(
+    @Query() query: WorkOrderReservationsQueryDto,
+    @Req() req: any,
+  ) {
+    return this.service.listWorkOrderReservations(
+      query,
       getSucursalScopeId(req),
     );
   }

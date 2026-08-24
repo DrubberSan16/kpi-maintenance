@@ -1031,6 +1031,29 @@ export class AlertaQueryDto {
   limit?: number;
 }
 
+export class WorkOrderReservationsQueryDto {
+  @ApiPropertyOptional({ description: 'ID de la bodega', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  bodega_id?: string;
+  @ApiPropertyOptional({ description: 'ID de la orden de trabajo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  work_order_id?: string;
+  @ApiPropertyOptional({
+    description: 'Estado calculado de la reserva (RESERVADO, CONSUMIDO, LIBERADO)',
+  })
+  @IsOptional()
+  @IsString()
+  estado?: string;
+  @ApiPropertyOptional({
+    description: 'Texto de búsqueda libre (material, bodega, OT, equipo)',
+  })
+  @IsOptional()
+  @IsString()
+  search?: string;
+}
+
 export class WorkOrderQueryDto {
   @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
   @IsOptional()
