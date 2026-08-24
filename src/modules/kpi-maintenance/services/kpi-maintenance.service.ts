@@ -22147,6 +22147,108 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async executeAlertManually(
+    alertId: string,
+    actor?: RequestActorContext | null,
+    source?: string,
+  ) {
+    if (!this.isSuperAdministratorRoleName(actor?.roleName ?? undefined)) {
+      throw new ForbiddenException(
+        'Solo el Super Administrador puede ejecutar el envio manual de alertas.',
+      );
+    }
+
+    const alert = await this.alertaRepo.findOne({
+      where: { id: alertId, is_deleted: false },
+    });
+    if (!alert) {
+      throw new NotFoundException('Alerta no encontrada');
+    }
+
+    if (!alert.equipo_id) {
+      throw new BadRequestException(
+        'Solo se pueden ejecutar manualmente alertas asociadas a un equipo.',
+      );
+    }
+
+    const estado = this.normalizeAlertState(alert.estado);
+    if (estado !== 'ABIERTA' && estado !== 'EN_PROCESO') {
+      throw new BadRequestException(
+        'Solo se pueden ejecutar manualmente alertas activas (ABIERTA o EN_PROCESO).',
+      );
+    }
+
+    const normalizedSource =
+      String(source || 'dashboard-super-admin').trim() ||
+      'dashboard-super-admin';
+    const executedAt = new Date();
+
+    const emailResult = await this.sendAlertTriggerEmails(alert);
+
+    const historyEntry = {
+      executed_at: executedAt.toISOString(),
+      actor_user_id: actor?.userId ?? null,
+      actor_username: actor?.username ?? null,
+      actor_name: actor?.displayName ?? null,
+      actor_email: actor?.email ?? null,
+      source: normalizedSource,
+      recipients: emailResult.recipients.map((item) => ({
+        type: item.type,
+        email: item.email,
+        user_id: item.userId ?? null,
+        username: item.username ?? null,
+      })),
+      email_sent: emailResult.sent,
+      email_failed: emailResult.failed,
+      skipped_reason: emailResult.skippedReason,
+    };
+
+    const currentPayload = (alert.payload_json ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const previousHistory = Array.isArray(
+      currentPayload.manual_alert_notifications,
+    )
+      ? [
+          ...(currentPayload.manual_alert_notifications as Record<
+            string,
+            unknown
+          >[]),
+        ]
+      : [];
+    alert.payload_json = {
+      ...currentPayload,
+      manual_alert_notifications: [...previousHistory, historyEntry].slice(
+        -20,
+      ),
+    };
+    await this.alertaRepo.save(alert);
+
+    await this.writeSecurityLog({
+      typeLog: 'ALERTA_EJECUCION_MANUAL',
+      description: `[ALERTA:${alert.id}] Ejecucion manual por ${actor?.displayName || actor?.username || actor?.userId || 'usuario desconocido'}. Equipo=${alert.equipo_id}. Exitosas=${emailResult.sent.length}, fallidas=${emailResult.failed.length}`,
+      createdBy:
+        actor?.displayName || actor?.username || actor?.userId || null,
+    });
+
+    return this.wrap(
+      {
+        alert_id: alert.id,
+        equipo_id: alert.equipo_id,
+        sent_count: emailResult.sent.length,
+        failed_count: emailResult.failed.length,
+        email_sent: emailResult.sent,
+        email_failed: emailResult.failed,
+        skipped_reason: emailResult.skippedReason,
+        executed_at: executedAt.toISOString(),
+      },
+      emailResult.sent.length > 0
+        ? 'Alerta ejecutada manualmente y correo enviado'
+        : 'Alerta ejecutada manualmente sin envios de correo',
+    );
+  }
+
   private async dispatchInventoryRecalculationEmails(
     candidates: AlertCandidate[],
     source: string,

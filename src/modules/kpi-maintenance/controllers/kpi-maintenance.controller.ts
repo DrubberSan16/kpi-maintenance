@@ -948,6 +948,25 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Alertas')
+  @ApiOperation({
+    summary:
+      'Ejecutar manualmente el envio de correo de una alerta (solo Super Administrador)',
+  })
+  @ApiParam({ name: 'id', description: 'ID de la alerta', required: true })
+  @Post('alertas/:id/ejecutar-manual')
+  executeAlertManually(
+    @Param('id') id: string,
+    @Body() payload: Record<string, unknown> | undefined,
+    @Req() req: any,
+  ) {
+    return this.service.executeAlertManually(
+      id,
+      getRequestActor(req),
+      payload?.source != null ? String(payload.source) : undefined,
+    );
+  }
+
+  @ApiTags('Alertas')
   @ApiOperation({ summary: 'Eliminar fisicamente todas las alertas' })
   @Delete('alertas/purge-all')
   purgeAlertas(@Headers('x-role-name') roleName?: string) {

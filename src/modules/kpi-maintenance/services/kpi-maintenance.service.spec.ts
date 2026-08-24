@@ -607,6 +607,202 @@ describe('KpiMaintenanceService alerts', () => {
       }),
     );
   });
+
+  describe('executeAlertManually', () => {
+    it('rechaza la ejecucion manual antes de tocar el repositorio o el correo cuando el actor no es Super Administrador', async () => {
+      await expect(
+        service.executeAlertManually('alert-1', {
+          roleName: 'SUPERVISOR',
+        } as any),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(repos.alertaRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('lanza NotFound cuando la alerta no existe', async () => {
+      repos.alertaRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.executeAlertManually('alert-missing', {
+          roleName: 'SUPER ADMINISTRADOR',
+        } as any),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rechaza alertas sin equipo asociado', async () => {
+      repos.alertaRepo.findOne.mockResolvedValue({
+        id: 'alert-1',
+        equipo_id: null,
+        estado: 'ABIERTA',
+        payload_json: {},
+        is_deleted: false,
+      });
+
+      await expect(
+        service.executeAlertManually('alert-1', {
+          roleName: 'SUPER ADMINISTRADOR',
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rechaza alertas cerradas o resueltas', async () => {
+      repos.alertaRepo.findOne.mockResolvedValue({
+        id: 'alert-1',
+        equipo_id: 'equipo-1',
+        estado: 'CERRADA',
+        payload_json: {},
+        is_deleted: false,
+      });
+
+      await expect(
+        service.executeAlertManually('alert-1', {
+          roleName: 'SUPER ADMINISTRADOR',
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('ejecuta la alerta activa de un equipo para un alias de Super Administrador, preserva el payload existente, anexa metadata acotada y audita el resultado', async () => {
+      const alert = {
+        id: 'alert-1',
+        equipo_id: 'equipo-1',
+        estado: 'EN_PROCESO',
+        payload_json: { existing_key: 'valor-previo' },
+        is_deleted: false,
+      };
+      repos.alertaRepo.findOne.mockResolvedValue(alert);
+      repos.alertaRepo.save.mockImplementation(async (value: any) => value);
+      const sendSpy = jest
+        .spyOn(service as any, 'sendAlertTriggerEmails')
+        .mockResolvedValue({
+          recipients: [
+            {
+              type: 'TRANSACTION_OWNER',
+              email: 'operador@example.com',
+              userId: 'u-1',
+              username: 'operador',
+            },
+          ],
+          userIds: ['u-1'],
+          recipientTokens: ['u-1'],
+          sent: ['operador@example.com'],
+          failed: [],
+          skippedReason: null,
+        });
+      const auditSpy = jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      const result = await service.executeAlertManually(
+        'alert-1',
+        {
+          userId: 'super-1',
+          username: 'super',
+          displayName: 'Super Administrador',
+          roleName: 'SUPERADMINISTRADOR',
+        } as any,
+        'dashboard-super-admin',
+      );
+
+      expect(sendSpy).toHaveBeenCalledWith(alert);
+      expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'alert-1',
+          payload_json: expect.objectContaining({
+            existing_key: 'valor-previo',
+            manual_alert_notifications: expect.arrayContaining([
+              expect.objectContaining({
+                source: 'dashboard-super-admin',
+                actor_user_id: 'super-1',
+                email_sent: ['operador@example.com'],
+                email_failed: [],
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(
+        (alert.payload_json as any).manual_alert_notifications,
+      ).toHaveLength(1);
+      expect(auditSpy).toHaveBeenCalled();
+      expect(result.data).toMatchObject({
+        alert_id: 'alert-1',
+        equipo_id: 'equipo-1',
+        sent_count: 1,
+        failed_count: 0,
+        email_sent: ['operador@example.com'],
+        email_failed: [],
+      });
+    });
+
+    it('acota el historial de ejecuciones manuales a las 20 mas recientes', async () => {
+      const existingHistory = Array.from({ length: 20 }, (_, index) => ({
+        executed_at: `2026-01-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`,
+        source: 'dashboard-super-admin',
+      }));
+      const alert = {
+        id: 'alert-1',
+        equipo_id: 'equipo-1',
+        estado: 'ABIERTA',
+        payload_json: { manual_alert_notifications: existingHistory },
+        is_deleted: false,
+      };
+      repos.alertaRepo.findOne.mockResolvedValue(alert);
+      repos.alertaRepo.save.mockImplementation(async (value: any) => value);
+      jest.spyOn(service as any, 'sendAlertTriggerEmails').mockResolvedValue({
+        recipients: [],
+        userIds: [],
+        recipientTokens: [],
+        sent: [],
+        failed: [],
+        skippedReason: 'No se encontraron destinatarios para la alerta.',
+      });
+      jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      await service.executeAlertManually('alert-1', {
+        roleName: 'SUPER ADMIN',
+      } as any);
+
+      const savedPayload = (
+        repos.alertaRepo.save as jest.Mock
+      ).mock.calls[0][0].payload_json;
+      expect(savedPayload.manual_alert_notifications).toHaveLength(20);
+    });
+
+    it('devuelve una respuesta explicita de cero envios cuando el SMTP esta omitido o no hay destinatarios, sin declarar un falso exito', async () => {
+      const alert = {
+        id: 'alert-1',
+        equipo_id: 'equipo-1',
+        estado: 'ABIERTA',
+        payload_json: {},
+        is_deleted: false,
+      };
+      repos.alertaRepo.findOne.mockResolvedValue(alert);
+      repos.alertaRepo.save.mockImplementation(async (value: any) => value);
+      jest.spyOn(service as any, 'sendAlertTriggerEmails').mockResolvedValue({
+        recipients: [],
+        userIds: [],
+        recipientTokens: [],
+        sent: [],
+        failed: [],
+        skippedReason: 'SMTP no configurado para envio de alertas.',
+      });
+      jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      const result = await service.executeAlertManually('alert-1', {
+        roleName: 'SUPER ADMINISTRADOR',
+      } as any);
+
+      expect(result.data.sent_count).toBe(0);
+      expect(result.data.skipped_reason).toBe(
+        'SMTP no configurado para envio de alertas.',
+      );
+      expect(result.message).not.toMatch(/correo enviado/);
+    });
+  });
 });
 
 describe('KpiMaintenanceService analisis de lubricante', () => {
