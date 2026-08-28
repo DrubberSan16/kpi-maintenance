@@ -1862,6 +1862,56 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  private async ensureEquipoEstadoOperativoSchema() {
+    await this.dataSource.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('kpi_maintenance.tb_equipo') IS NULL THEN
+          RETURN;
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'kpi_maintenance'
+            AND table_name = 'tb_equipo'
+            AND column_name = 'estado_operativo'
+        ) THEN
+          RETURN;
+        END IF;
+
+        ALTER TABLE kpi_maintenance.tb_equipo
+          DROP CONSTRAINT IF EXISTS ck_tb_equipo_estado_operativo;
+
+        ALTER TABLE kpi_maintenance.tb_equipo
+          DROP CONSTRAINT IF EXISTS chk_tb_equipo_estado_operativo;
+
+        UPDATE kpi_maintenance.tb_equipo
+        SET estado_operativo = CASE
+          WHEN estado_operativo = 'BLOQUEADO' THEN 'BLOQUEADA'
+          WHEN estado_operativo = 'FUERA_SERVICIO' THEN 'BLOQUEADA'
+          ELSE estado_operativo
+        END
+        WHERE estado_operativo IN ('BLOQUEADO', 'FUERA_SERVICIO');
+
+        ALTER TABLE kpi_maintenance.tb_equipo
+          ALTER COLUMN estado_operativo SET DEFAULT 'OPERATIVO';
+
+        ALTER TABLE kpi_maintenance.tb_equipo
+          ADD CONSTRAINT ck_tb_equipo_estado_operativo
+          CHECK (
+            estado_operativo IN (
+              'OPERATIVO',
+              'RESERVA',
+              'MPG',
+              'CORRECTIVO',
+              'BLOQUEADA'
+            )
+          );
+      END $$;
+    `);
+  }
+
   private async ensureEquipoEstadoFuncionamientoSchema() {
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
@@ -3148,6 +3198,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.ensureProgramacionScheduleSchema();
     await this.ensureWorkOrderEmergencySchema();
     await this.ensureEquipmentServiceSchema();
+    await this.ensureEquipoEstadoOperativoSchema();
     await this.ensureEquipoEstadoFuncionamientoSchema();
     await this.ensureEquipoHorometroSchema();
     this.scheduleAlertRecalculation();
@@ -4367,6 +4418,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     process.env.SECURITY_SERVICE_URL || process.env.KPI_SECURITY_URL || ''
   ).replace(/\/$/, '');
 
+  private readonly internalServiceToken = String(
+    process.env.INTERNAL_SERVICE_TOKEN || '',
+  ).trim();
+
   private readonly publicBaseUrl = (
     process.env.PUBLIC_BASE_URL || process.env.APP_PUBLIC_URL || ''
   ).replace(/\/$/, '');
@@ -5429,10 +5484,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private buildServiceRequestHeaders(url: string, includeJson = false) {
+    const headers: Record<string, string> = {};
+    if (includeJson) headers['Content-Type'] = 'application/json';
+    if (
+      this.internalServiceToken &&
+      this.securityServiceUrl &&
+      (url === this.securityServiceUrl ||
+        url.startsWith(`${this.securityServiceUrl}/`))
+    ) {
+      headers['X-Internal-Service-Token'] = this.internalServiceToken;
+    }
+    return headers;
+  }
+
   private async postJson(url: string, payload: Record<string, unknown>) {
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.buildServiceRequestHeaders(url, true),
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
@@ -5641,7 +5710,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async getJson(url: string) {
-    const response = await fetch(url, { method: 'GET' });
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: this.buildServiceRequestHeaders(url),
+    });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);

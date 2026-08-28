@@ -150,6 +150,27 @@ describe('KpiMaintenanceService alerts', () => {
     service = createService(repos, dataSource);
   });
 
+  it('envía el token interno solo hacia el servicio de seguridad', () => {
+    (service as any).securityServiceUrl = 'http://security.local/kpi_security';
+    (service as any).internalServiceToken = 'token-interno';
+
+    expect(
+      (service as any).buildServiceRequestHeaders(
+        'http://security.local/kpi_security/log-transacts',
+        true,
+      ),
+    ).toEqual({
+      'Content-Type': 'application/json',
+      'X-Internal-Service-Token': 'token-interno',
+    });
+    expect(
+      (service as any).buildServiceRequestHeaders(
+        'http://notification.local/notifications/in-app',
+        true,
+      ),
+    ).toEqual({ 'Content-Type': 'application/json' });
+  });
+
   it('envia correos cuando se dispara una alerta nueva', async () => {
     const sendMail = jest.fn().mockResolvedValue(undefined);
     jest
@@ -3397,6 +3418,29 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
     jest.clearAllMocks();
     repos = createRepos();
     service = createService(repos, createTransactionalDataSourceMock(repos));
+  });
+
+  it('sincroniza el constraint de estado operativo con el catálogo vigente', async () => {
+    const dataSource = createTransactionalDataSourceMock(repos);
+    const schemaService = createService(repos, dataSource);
+
+    await (schemaService as any).ensureEquipoEstadoOperativoSchema();
+
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('DROP CONSTRAINT IF EXISTS ck_tb_equipo_estado_operativo'),
+    );
+    const migrationSql = (dataSource.query as jest.Mock).mock.calls[0][0];
+    expect(migrationSql).toContain("WHEN estado_operativo = 'BLOQUEADO' THEN 'BLOQUEADA'");
+    expect(migrationSql).toContain("WHEN estado_operativo = 'FUERA_SERVICIO' THEN 'BLOQUEADA'");
+    for (const value of [
+      'OPERATIVO',
+      'RESERVA',
+      'MPG',
+      'CORRECTIVO',
+      'BLOQUEADA',
+    ]) {
+      expect(migrationSql).toContain(`'${value}'`);
+    }
   });
 
   it('actualiza el estado_funcionamiento, conserva el estado_operativo y registra el historial', async () => {
