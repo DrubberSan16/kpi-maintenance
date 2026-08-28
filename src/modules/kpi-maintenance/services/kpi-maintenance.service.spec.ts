@@ -769,6 +769,136 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 
+  it('mantiene abierta una alerta con OT planificada y la pasa a en proceso solo cuando la OT inicia', () => {
+    expect(
+      (service as any).resolveAlertStateFromLinkedWorkOrders(
+        [{ status_workflow: 'PLANNED' }],
+        'ABIERTA',
+      ),
+    ).toBe('ABIERTA');
+    expect(
+      (service as any).resolveAlertStateFromLinkedWorkOrders(
+        [{ status_workflow: 'IN_PROGRESS' }],
+        'ABIERTA',
+      ),
+    ).toBe('EN_PROCESO');
+    expect(
+      (service as any).resolveAlertStateFromLinkedWorkOrders(
+        [{ status_workflow: 'CLOSED' }],
+        'ABIERTA',
+      ),
+    ).toBe('CERRADA');
+  });
+
+  it('consolida materiales consecutivos de una OT en un solo correo tabular', async () => {
+    jest.useFakeTimers();
+    const sendSpy = jest
+      .spyOn(service as any, 'sendInventoryReservationEmails')
+      .mockResolvedValue({ sent: 1, failed: 0, recipients: 1 });
+    const workOrder = { id: 'wo-1', code: 'OT-A00037' } as any;
+
+    (service as any).queueInventoryReservationEmail(
+      workOrder,
+      [{ producto_id: 'p-1', bodega_id: 'b-1', cantidad: 2 }],
+      { username: 'supervisor' },
+    );
+    (service as any).queueInventoryReservationEmail(
+      workOrder,
+      [
+        { producto_id: 'p-1', bodega_id: 'b-1', cantidad: 3 },
+        { producto_id: 'p-2', bodega_id: 'b-1', cantidad: 1 },
+      ],
+      { username: 'supervisor' },
+    );
+
+    jest.advanceTimersByTime(45_000);
+    await Promise.resolve();
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledWith(
+      workOrder,
+      expect.arrayContaining([
+        expect.objectContaining({ producto_id: 'p-1', cantidad: 5 }),
+        expect.objectContaining({ producto_id: 'p-2', cantidad: 1 }),
+      ]),
+      expect.objectContaining({ username: 'supervisor' }),
+    );
+    service.onModuleDestroy();
+    jest.useRealTimers();
+  });
+
+  it('excluye programaciones de Cebado de las alertas de mantenimiento', async () => {
+    repos.programacionRepo.find.mockResolvedValue([{ id: 'prog-cebado' }]);
+    jest
+      .spyOn(service as any, 'recalculateProgramacionFields')
+      .mockResolvedValue({
+        id: 'prog-cebado',
+        equipo_id: 'equipo-1',
+        plan_tipo: 'CEBADO',
+        estado_programacion: 'VENCIDA',
+        payload_json: {},
+      });
+
+    await expect(
+      (service as any).buildProgramacionAlertCandidates(),
+    ).resolves.toEqual([]);
+  });
+
+  it('enlaza una alerta crítica con la OT activa del equipo y baja su nivel', async () => {
+    repos.alertaRepo.find.mockResolvedValue([]);
+    repos.woRepo.find.mockResolvedValue([
+      {
+        id: 'wo-1',
+        code: 'OT-A00037',
+        title: 'Mantenimiento preventivo',
+        equipment_id: 'equipo-1',
+        maintenance_kind: 'PREVENTIVO',
+        status_workflow: 'PLANNED',
+        created_at: new Date('2026-08-28T08:00:00Z'),
+        updated_at: new Date('2026-08-28T08:00:00Z'),
+        is_deleted: false,
+      },
+    ]);
+    repos.alertaRepo.create.mockImplementation((value) => value);
+    repos.alertaRepo.save.mockImplementation(async (value) => ({
+      id: 'alert-1',
+      ...value,
+    }));
+    jest
+      .spyOn(service as any, 'dispatchAlertTriggeredNotifications')
+      .mockResolvedValue(undefined);
+
+    await (service as any).syncAlertCandidates([
+      {
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'MANTENIMIENTO_PROXIMO',
+        categoria: 'MANTENIMIENTO',
+        nivel: 'CRITICAL',
+        origen: 'PROGRAMACION',
+        referencia_tipo: 'PROGRAMACION',
+        referencia: 'PROGRAMACION:prog-1',
+        detalle: 'Mantenimiento próximo',
+        payload_json: { programacion_id: 'prog-1' },
+      },
+    ]);
+
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nivel: 'WARNING',
+        estado: 'ABIERTA',
+        work_order_id: 'wo-1',
+        payload_json: expect.objectContaining({
+          work_orders: [
+            expect.objectContaining({
+              id: 'wo-1',
+              status_workflow: 'PLANNED',
+            }),
+          ],
+        }),
+      }),
+    );
+  });
+
   describe('executeAlertManually', () => {
     it('rechaza la ejecucion manual antes de tocar el repositorio o el correo cuando el actor no es Super Administrador', async () => {
       await expect(
@@ -2038,6 +2168,117 @@ describe('KpiMaintenanceService work orders', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(repos.consumoRepo.save).not.toHaveBeenCalled();
     expect(repos.reservaRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('impide eliminar un consumo cuando ya existe una salida de material', async () => {
+    jest
+      .spyOn(service as any, 'assertWorkOrderAnnulmentAllowed')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'calculatePlannedAndIssuedMaterialTotals')
+      .mockResolvedValue({ plannedQty: 5, issuedQty: 2, pendingQty: 3 });
+    const manager = {
+      findOne: jest
+        .fn()
+        .mockResolvedValueOnce({
+          id: 'wo-1',
+          status_workflow: 'IN_PROGRESS',
+          valor_json: {},
+          is_deleted: false,
+        })
+        .mockResolvedValueOnce({
+          id: 'consumo-1',
+          work_order_id: 'wo-1',
+          producto_id: 'producto-1',
+          bodega_id: 'bodega-1',
+          cantidad: 5,
+          is_deleted: false,
+        }),
+      save: jest.fn(),
+    };
+    const rollbackTransaction = jest.fn();
+    (service as any).dataSource = {
+      createQueryRunner: () => ({
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction,
+        release: jest.fn(),
+        manager,
+      }),
+    };
+
+    await expect(
+      service.deleteConsumo('wo-1', 'consumo-1', {
+        roleName: 'ADMINISTRADOR',
+      } as any),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(manager.save).not.toHaveBeenCalled();
+    expect(rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('solo permite reducir la cantidad pendiente y conserva lo ya emitido', async () => {
+    jest
+      .spyOn(service as any, 'assertWorkOrderAnnulmentAllowed')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'calculatePlannedAndIssuedMaterialTotals')
+      .mockResolvedValue({ plannedQty: 5, issuedQty: 2, pendingQty: 3 });
+    const rebuildSpy = jest
+      .spyOn(service as any, 'rebuildPendingReservaFromConsumos')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'appendWorkOrderHistory')
+      .mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'writeSecurityLog').mockResolvedValue(undefined);
+    const workOrder = {
+      id: 'wo-1',
+      status_workflow: 'IN_PROGRESS',
+      valor_json: {},
+      is_deleted: false,
+    };
+    const consumo = {
+      id: 'consumo-1',
+      work_order_id: 'wo-1',
+      producto_id: 'producto-1',
+      bodega_id: 'bodega-1',
+      cantidad: 5,
+      costo_unitario: 2,
+      subtotal: 10,
+      is_deleted: false,
+    };
+    const manager = {
+      findOne: jest
+        .fn()
+        .mockResolvedValueOnce(workOrder)
+        .mockResolvedValueOnce(consumo),
+      save: jest.fn(async (_entity, value) => value),
+    };
+    (service as any).dataSource = {
+      createQueryRunner: () => ({
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction: jest.fn(),
+        release: jest.fn(),
+        manager,
+      }),
+    };
+
+    await service.reduceConsumo(
+      'wo-1',
+      'consumo-1',
+      { cantidad_restar: 3 },
+      { username: 'admin', roleName: 'ADMINISTRADOR' } as any,
+    );
+
+    expect(consumo).toMatchObject({ cantidad: 2, subtotal: 4, is_deleted: false });
+    expect(rebuildSpy).toHaveBeenCalledWith(
+      'wo-1',
+      'producto-1',
+      'bodega-1',
+      manager,
+    );
   });
 
   it('presenta OT, equipo, solicitante y materiales en el correo de reserva', () => {

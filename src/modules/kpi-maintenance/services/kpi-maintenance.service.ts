@@ -118,6 +118,7 @@ import {
   ReprogramProgramacionMensualDetalleDto,
   ScrapMaterialsDto,
   CreateWorkOrderDto,
+  ReduceConsumoDto,
   DailyOperationsReportQueryDto,
   DateRangeDto,
   EquipoCriticidadEnum,
@@ -871,6 +872,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ] as const;
   private recalculationInterval: NodeJS.Timeout | null = null;
   private horometerReminderTimeout: NodeJS.Timeout | null = null;
+  private readonly reservationEmailBatches = new Map<
+    string,
+    {
+      workOrder: WorkOrderEntity;
+      reservations: Array<{
+        producto_id: string;
+        bodega_id?: string | null;
+        cantidad: number;
+        observacion?: string | null;
+      }>;
+      actor?: RequestActorContext | null;
+      timer: NodeJS.Timeout;
+    }
+  >();
   private recalculationRunning = false;
   private horometerReminderRunning = false;
   private inventoryImportSuppressed = false;
@@ -3072,10 +3087,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       manager,
     );
 
-    if (totals.pendingQty <= 0) {
-      return null;
-    }
-
     const where = {
       work_order_id: workOrderId,
       producto_id: productoId,
@@ -3087,6 +3098,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const existing = manager
       ? await manager.findOne(ReservaStockEntity, { where })
       : await this.reservaRepo.findOne({ where });
+
+    if (totals.pendingQty <= 0) {
+      if (existing) {
+        existing.cantidad = 0;
+        existing.estado = 'LIBERADO';
+        existing.is_deleted = true;
+        await (manager
+          ? manager.save(ReservaStockEntity, existing)
+          : this.reservaRepo.save(existing));
+      }
+      return null;
+    }
 
     if (existing) {
       existing.cantidad = totals.pendingQty;
@@ -3150,6 +3173,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(this.horometerReminderTimeout);
       this.horometerReminderTimeout = null;
     }
+    for (const batch of this.reservationEmailBatches.values()) {
+      clearTimeout(batch.timer);
+    }
+    this.reservationEmailBatches.clear();
   }
 
   private scheduleAlertRecalculation() {
@@ -3747,10 +3774,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const normalizedStatuses = snapshots.map((item) =>
       this.normalizeWorkflowStatus(item.status_workflow),
     );
-    if (normalizedStatuses.some((status) => status !== 'CLOSED')) {
+    if (normalizedStatuses.some((status) => status === 'IN_PROGRESS')) {
       return 'EN_PROCESO';
     }
-    return 'CERRADA';
+    if (normalizedStatuses.every((status) => status === 'CLOSED')) {
+      return 'CERRADA';
+    }
+    return 'ABIERTA';
   }
 
   private resolveAlertReferenceDisplay(
@@ -4128,8 +4158,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       new Date().toISOString();
     const closedAt = new Date(String(closedAtRaw));
     const executionDate = Number.isNaN(closedAt.getTime())
-      ? new Date().toISOString().slice(0, 10)
-      : closedAt.toISOString().slice(0, 10);
+      ? this.currentGuayaquilDateString()
+      : this.currentGuayaquilDateString(closedAt);
 
     programacion.ultima_ejecucion_fecha = executionDate;
 
@@ -4164,8 +4194,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       new Date().toISOString();
     const closedAt = new Date(String(closedAtRaw));
     const executionDate = Number.isNaN(closedAt.getTime())
-      ? new Date().toISOString().slice(0, 10)
-      : closedAt.toISOString().slice(0, 10);
+      ? this.currentGuayaquilDateString()
+      : this.currentGuayaquilDateString(closedAt);
 
     programacion.ultima_ejecucion_fecha = executionDate;
 
@@ -4255,6 +4285,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     alerta.estado = resolvedState;
     if (resolvedState === 'CERRADA') {
       await this.applyClosedWorkOrderAlertOutcome(alerta, workOrder, snapshots);
+    } else if (this.normalizeAlertLevel(alerta.nivel) === 'CRITICAL') {
+      alerta.nivel = 'WARNING';
     }
     return this.alertaRepo.save(alerta);
   }
@@ -4290,6 +4322,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       alerta.estado = resolvedState;
       if (resolvedState === 'CERRADA') {
         await this.applyClosedWorkOrderAlertOutcome(alerta, workOrder, snapshots);
+      } else if (this.normalizeAlertLevel(alerta.nivel) === 'CRITICAL') {
+        alerta.nivel = 'WARNING';
       }
       await this.alertaRepo.save(alerta);
     }
@@ -10823,6 +10857,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return programaciones.flatMap((row: any) => {
       const sourcePayload = (row.payload_json ?? {}) as Record<string, unknown>;
       const estado = String(row.estado_programacion || '').toUpperCase();
+      if (
+        this.normalizeMaintenanceKind(
+          row.plan_tipo ??
+            sourcePayload.maintenance_kind ??
+            sourcePayload.tipo_mantenimiento,
+        ) === 'CEBADO'
+      ) {
+        return [];
+      }
       if (!['VENCIDA', 'PROXIMA'].includes(estado)) return [];
 
       const hoursRemaining =
@@ -10862,7 +10905,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               ? 'MANTENIMIENTO_VENCIDO'
               : 'MANTENIMIENTO_PROXIMO',
           categoria: 'MANTENIMIENTO' as AlertCategory,
-          nivel: estado === 'VENCIDA' ? 'CRITICAL' : 'WARNING',
+          nivel: 'CRITICAL',
           origen: 'PROGRAMACION' as AlertOrigin,
           referencia_tipo: 'PROGRAMACION',
           referencia: `PROGRAMACION:${row.id}`,
@@ -10871,6 +10914,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }`,
           payload_json: {
             programacion_id: row.id,
+            work_order_id: row.work_order_id ?? null,
             programacion_codigo: row.codigo ?? null,
             plan_id: row.plan_id,
             plan_codigo: row.plan_codigo ?? null,
@@ -11757,6 +11801,68 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return { sent, failed, recipients: scopedRecipients.length };
   }
 
+  /**
+   * Agrupa durante una ventana corta las reservas registradas consecutivamente
+   * en la misma OT. Así cada destinatario recibe un solo informe tabular, no un
+   * correo independiente por cada material agregado desde la pantalla.
+   */
+  private queueInventoryReservationEmail(
+    workOrder: WorkOrderEntity,
+    reservations: Array<{
+      producto_id: string;
+      bodega_id?: string | null;
+      cantidad: number;
+      observacion?: string | null;
+    }>,
+    actor?: RequestActorContext | null,
+  ) {
+    if (!reservations.length) return;
+    const key = workOrder.id;
+    const previous = this.reservationEmailBatches.get(key);
+    if (previous) clearTimeout(previous.timer);
+
+    const grouped = new Map<
+      string,
+      {
+        producto_id: string;
+        bodega_id?: string | null;
+        cantidad: number;
+        observacion?: string | null;
+      }
+    >();
+    for (const item of [...(previous?.reservations ?? []), ...reservations]) {
+      const itemKey = `${item.bodega_id ?? ''}|${item.producto_id}|${item.observacion ?? ''}`;
+      const current = grouped.get(itemKey);
+      if (current) {
+        current.cantidad += this.toNumeric(item.cantidad, 0);
+      } else {
+        grouped.set(itemKey, { ...item, cantidad: this.toNumeric(item.cantidad, 0) });
+      }
+    }
+
+    const timer = setTimeout(() => {
+      const batch = this.reservationEmailBatches.get(key);
+      if (!batch) return;
+      this.reservationEmailBatches.delete(key);
+      void this.sendInventoryReservationEmails(
+        batch.workOrder,
+        batch.reservations,
+        batch.actor,
+      ).catch((error: any) => {
+        this.logger.warn(
+          `No se pudo notificar la reserva consolidada de la OT ${batch.workOrder.code}: ${error?.message ?? 'desconocido'}`,
+        );
+      });
+    }, 45_000);
+    timer.unref?.();
+    this.reservationEmailBatches.set(key, {
+      workOrder,
+      reservations: [...grouped.values()],
+      actor: actor ?? previous?.actor,
+      timer,
+    });
+  }
+
   private async notifyInventoryDecreaseForPairs(
     pairs: Array<{ producto_id: string; bodega_id: string }>,
   ) {
@@ -11908,7 +12014,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipo_id: row.id,
         tipo_alerta: 'MANTENIMIENTO_PROXIMO',
         categoria: 'MANTENIMIENTO' as AlertCategory,
-        nivel: 'WARNING' as AlertLevel,
+        nivel: 'CRITICAL' as AlertLevel,
         origen: 'SYSTEM' as AlertOrigin,
         referencia_tipo: 'EQUIPO_SERVICIO_TIEMPO',
         referencia: `EQUIPO_SERVICIO:${row.id}:${reminder.stage}:${nextDate}`,
@@ -11963,7 +12069,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         this.buildEquipmentServiceAlertCandidates(),
       ]);
 
-    return [
+    const candidates = [
       ...programaciones,
       ...reportesDiarios,
       ...lubricantes,
@@ -11971,6 +12077,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...inventario,
       ...equipmentServices,
     ];
+    return candidates.map((candidate) => {
+      const isCriticalMaintenanceCondition =
+        candidate.origen === 'PROGRAMACION' ||
+        candidate.referencia_tipo === 'EQUIPO_SERVICIO_TIEMPO';
+      if (!isCriticalMaintenanceCondition && candidate.nivel === 'CRITICAL') {
+        return { ...candidate, nivel: 'WARNING' as AlertLevel };
+      }
+      return candidate;
+    });
   }
 
   private async syncAlertCandidates(
@@ -11998,6 +12113,40 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       },
       order: { fecha_generada: 'DESC', id: 'DESC' },
     });
+    const candidateEquipmentIds = [
+      ...new Set(
+        candidates
+          .map((candidate) => String(candidate.equipo_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const candidateWorkOrders = candidateEquipmentIds.length
+      ? await this.woRepo.find({
+          where: {
+            equipment_id: In(candidateEquipmentIds),
+            is_deleted: false,
+          },
+          order: { updated_at: 'DESC', created_at: 'DESC' },
+        })
+      : [];
+    const candidateWorkOrderMap = new Map(
+      candidateWorkOrders.map((workOrder) => [workOrder.id, workOrder]),
+    );
+    const resolveCandidateWorkOrder = (candidate: AlertCandidate) => {
+      const payload = (candidate.payload_json ?? {}) as Record<string, unknown>;
+      const explicitId = this.firstNonEmptyString(payload.work_order_id);
+      if (explicitId && candidateWorkOrderMap.has(explicitId)) {
+        return candidateWorkOrderMap.get(explicitId) ?? null;
+      }
+      return (
+        candidateWorkOrders.find(
+          (workOrder) =>
+            workOrder.equipment_id === candidate.equipo_id &&
+            this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'CLOSED' &&
+            this.normalizeMaintenanceKind(workOrder.maintenance_kind) !== 'CEBADO',
+        ) ?? null
+      );
+    };
 
     const activeMap = new Map<string, AlertaMantenimientoEntity>();
     const duplicateRows: AlertaMantenimientoEntity[] = [];
@@ -12020,19 +12169,40 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const key = this.buildAlertIdentity(candidate);
       seen.add(key);
       const existing = activeMap.get(key);
+      const matchedWorkOrder = resolveCandidateWorkOrder(candidate);
+      const existingSnapshots = existing
+        ? this.extractAlertWorkOrderSnapshots(existing)
+        : [];
+      const linkedSnapshots = existingSnapshots.length
+        ? existingSnapshots.map((snapshot) => {
+            const currentWorkOrder = candidateWorkOrderMap.get(snapshot.id);
+            return currentWorkOrder
+              ? this.buildAlertWorkOrderSnapshot(currentWorkOrder)
+              : snapshot;
+          })
+        : matchedWorkOrder
+          ? [this.buildAlertWorkOrderSnapshot(matchedWorkOrder)]
+          : [];
+      const linkedState = linkedSnapshots.length
+        ? this.resolveAlertStateFromLinkedWorkOrders(linkedSnapshots, 'ABIERTA')
+        : 'ABIERTA';
+      const linkedLevel: AlertLevel =
+        linkedSnapshots.length && candidate.nivel === 'CRITICAL'
+          ? 'WARNING'
+          : candidate.nivel;
       if (existing) {
         const nextDetalle = String(candidate.detalle || '').trim() || null;
-        const preservedWorkOrders = this.extractAlertWorkOrderSnapshots(existing);
         const nextPayload = {
           ...((existing.payload_json ?? {}) as Record<string, unknown>),
           ...(candidate.payload_json ?? {}),
-          ...(preservedWorkOrders.length
-            ? { work_orders: preservedWorkOrders }
+          ...(linkedSnapshots.length
+            ? { work_orders: linkedSnapshots }
             : {}),
         };
         const changed =
           existing.categoria !== candidate.categoria ||
-          existing.nivel !== candidate.nivel ||
+          existing.nivel !== linkedLevel ||
+          existing.estado !== linkedState ||
           existing.origen !== candidate.origen ||
           (existing.referencia_tipo ?? null) !==
             (candidate.referencia_tipo ?? null) ||
@@ -12042,14 +12212,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             JSON.stringify(nextPayload);
 
         existing.categoria = candidate.categoria;
-        existing.nivel = candidate.nivel;
+        existing.nivel = linkedLevel;
+        existing.estado = linkedState;
         existing.origen = candidate.origen;
         existing.referencia_tipo = candidate.referencia_tipo ?? null;
         existing.referencia = candidate.referencia ?? null;
         existing.detalle = nextDetalle;
         existing.payload_json = nextPayload;
+        existing.work_order_id =
+          linkedSnapshots[linkedSnapshots.length - 1]?.id ?? null;
         existing.ultima_evaluacion_at = now;
-        existing.resolved_at = null;
+        existing.resolved_at = linkedState === 'CERRADA' ? now : null;
         if (changed) {
           await this.alertaRepo.save(existing);
           updated += 1;
@@ -12062,16 +12235,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           equipo_id: candidate.equipo_id ?? null,
           tipo_alerta: candidate.tipo_alerta,
           categoria: candidate.categoria,
-          nivel: candidate.nivel,
+          nivel: linkedLevel,
           origen: candidate.origen,
           referencia_tipo: candidate.referencia_tipo ?? null,
           referencia: candidate.referencia ?? null,
           detalle: candidate.detalle,
-          payload_json: candidate.payload_json ?? {},
+          payload_json: {
+            ...(candidate.payload_json ?? {}),
+            ...(linkedSnapshots.length
+              ? { work_orders: linkedSnapshots }
+              : {}),
+          },
+          work_order_id:
+            linkedSnapshots[linkedSnapshots.length - 1]?.id ?? null,
           fecha_generada: now,
           ultima_evaluacion_at: now,
           resolved_at: null,
-          estado: 'ABIERTA',
+          estado: linkedState,
         }),
       );
       if (options?.shouldNotifyCandidate?.(candidate) !== false) {
@@ -13321,7 +13501,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       } else {
         const baseDate =
           programacion.ultima_ejecucion_fecha ||
-          new Date().toISOString().slice(0, 10);
+          this.currentGuayaquilDateString();
         patch.proxima_fecha = this
           .addInterval(baseDate, freqType, freqValue)
           .toISOString()
@@ -13397,6 +13577,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipo_codigo: equipo.codigo,
       plan_nombre: plan.nombre,
       plan_codigo: plan.codigo,
+      plan_tipo: plan.tipo,
       codigo: programacion.codigo ?? null,
       modo_programacion: scheduleMode,
       origen_programacion:
@@ -13759,13 +13940,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(equipo, 'Equipo obtenido');
   }
 
-  private currentGuayaquilDateString() {
+  private currentGuayaquilDateString(value = new Date()) {
     const parts = new Intl.DateTimeFormat('en-GB', {
       timeZone: 'America/Guayaquil',
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
-    }).formatToParts(new Date());
+    }).formatToParts(value);
     const year = parts.find((item) => item.type === 'year')?.value ?? '';
     const month = parts.find((item) => item.type === 'month')?.value ?? '';
     const day = parts.find((item) => item.type === 'day')?.value ?? '';
@@ -24547,7 +24728,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const explicitAlertId = this.firstNonEmptyString(header.alerta_id) ?? null;
-    const automaticAlert = explicitAlertId
+    const automaticAlert =
+      explicitAlertId ||
+      this.normalizeMaintenanceKind(saved.maintenance_kind) === 'CEBADO'
       ? null
       : await this.ensureAutomaticWorkOrderAlertWithManager(
           manager,
@@ -24872,7 +25055,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         this.syncAlertWorkOrderLink(
           transactionResult.alertaId!,
           saved,
-          normalizedSavedStatus === 'CLOSED' ? 'CERRADA' : 'EN_PROCESO',
         ),
       );
       await safePostCommit('la vinculacion de programacion desde alerta', () =>
@@ -24915,12 +25097,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.syncAlertsForWorkOrder(saved),
     );
     if (dto.consumo_pendiente) {
-      await safePostCommit('la notificacion de reserva de materiales', () =>
-        this.sendInventoryReservationEmails(
-          saved,
-          [dto.consumo_pendiente!],
-          actor,
-        ),
+      this.queueInventoryReservationEmail(
+        saved,
+        [dto.consumo_pendiente],
+        actor,
       );
     }
     if (dto.salida_materiales_pendiente?.items?.length) {
@@ -25203,7 +25383,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         { changedBy: this.resolveActorHistoryUserId(actor) },
       );
     }
-    const generatedWorkOrderAlert = dto.alerta_id
+    const generatedWorkOrderAlert =
+      dto.alerta_id ||
+      this.normalizeMaintenanceKind(created.maintenance_kind) === 'CEBADO'
       ? null
       : await this.ensureAutomaticWorkOrderAlertWithManager(
           this.dataSource.manager,
@@ -25218,9 +25400,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.syncAlertWorkOrderLink(
         linkedAlertId,
         created,
-        this.normalizeWorkflowStatus(created.status_workflow) === 'CLOSED'
-          ? 'CERRADA'
-          : 'EN_PROCESO',
       );
       await this.syncProgramacionWorkOrderLinkFromAlert(linkedAlertId, created);
     }
@@ -25453,13 +25632,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         previousPayload,
         actor,
       );
-    const generatedWorkOrderAlert = await this.ensureAutomaticWorkOrderAlertWithManager(
-      this.dataSource.manager,
-      saved,
-      actor,
-    );
+    const generatedWorkOrderAlert =
+      this.normalizeMaintenanceKind(saved.maintenance_kind) === 'CEBADO'
+        ? null
+        : await this.ensureAutomaticWorkOrderAlertWithManager(
+            this.dataSource.manager,
+            saved,
+            actor,
+          );
     if (
-      generatedWorkOrderAlert.created &&
+      generatedWorkOrderAlert?.created &&
       this.normalizeWorkflowStatus(saved.status_workflow) !== 'CLOSED'
     ) {
       await this.dispatchAlertTriggeredNotifications(
@@ -27475,13 +27657,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
     });
-    try {
-      await this.sendInventoryReservationEmails(workOrder, [dto], actor);
-    } catch (error: any) {
-      this.logger.warn(
-        `No se pudo notificar la reserva de materiales de la OT ${workOrder.code}: ${error?.message ?? 'desconocido'}`,
-      );
-    }
+    this.queueInventoryReservationEmail(workOrder, [dto], actor);
     return this.wrap(
       {
         ...this.mapConsumoWithCatalogs(
@@ -27499,6 +27675,165 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         stock_critico: this.getStockCriticoAmount(reservableStock.stock),
       },
       'Consumo registrado',
+    );
+  }
+
+  async deleteConsumo(
+    workOrderId: string,
+    consumoId: string,
+    actor?: RequestActorContext | null,
+  ) {
+    await this.assertWorkOrderAnnulmentAllowed(actor);
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    let workOrder: WorkOrderEntity | null = null;
+    let consumo: ConsumoRepuestoEntity | null = null;
+    try {
+      workOrder = await qr.manager.findOne(WorkOrderEntity, {
+        where: { id: workOrderId, is_deleted: false },
+      });
+      if (!workOrder) throw new NotFoundException('Orden de trabajo no encontrada');
+      consumo = await qr.manager.findOne(ConsumoRepuestoEntity, {
+        where: { id: consumoId, work_order_id: workOrderId, is_deleted: false },
+      });
+      if (!consumo) throw new NotFoundException('Consumo no encontrado');
+      if (!consumo.bodega_id) {
+        throw new ConflictException('El consumo no tiene una bodega válida.');
+      }
+      const totals = await this.calculatePlannedAndIssuedMaterialTotals(
+        workOrderId,
+        consumo.producto_id,
+        consumo.bodega_id,
+        qr.manager,
+      );
+      if (totals.issuedQty > 0) {
+        throw new ConflictException(
+          'El consumo ya tiene salida de material. Solo puedes restar la cantidad que todavía está pendiente.',
+        );
+      }
+
+      consumo.is_deleted = true;
+      await qr.manager.save(ConsumoRepuestoEntity, consumo);
+      await this.rebuildPendingReservaFromConsumos(
+        workOrderId,
+        consumo.producto_id,
+        consumo.bodega_id,
+        qr.manager,
+      );
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+      workOrder.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+      await qr.manager.save(WorkOrderEntity, workOrder);
+      await qr.commitTransaction();
+    } catch (error) {
+      await qr.rollbackTransaction();
+      throw error;
+    } finally {
+      await qr.release();
+    }
+
+    await this.appendWorkOrderHistory(
+      workOrderId,
+      this.normalizeWorkflowStatus(workOrder!.status_workflow),
+      `Consumo eliminado para producto ${consumo!.producto_id} por ${this.toNumeric(consumo!.cantidad, 0)}`,
+      {
+        fromStatus: workOrder!.status_workflow,
+        changedBy: this.resolveActorHistoryUserId(actor),
+      },
+    );
+    await this.writeSecurityLog({
+      description: `[WO:${workOrderId}] Consumo eliminado ${consumoId} producto ${consumo!.producto_id} cantidad ${this.toNumeric(consumo!.cantidad, 0)}`,
+      typeLog: 'CONSUMO',
+    });
+    return this.wrap(true, 'Consumo eliminado y reserva liberada');
+  }
+
+  async reduceConsumo(
+    workOrderId: string,
+    consumoId: string,
+    dto: ReduceConsumoDto,
+    actor?: RequestActorContext | null,
+  ) {
+    await this.assertWorkOrderAnnulmentAllowed(actor);
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    let workOrder: WorkOrderEntity | null = null;
+    let consumo: ConsumoRepuestoEntity | null = null;
+    const reduction = this.toNumeric(dto.cantidad_restar, 0);
+    try {
+      workOrder = await qr.manager.findOne(WorkOrderEntity, {
+        where: { id: workOrderId, is_deleted: false },
+      });
+      if (!workOrder) throw new NotFoundException('Orden de trabajo no encontrada');
+      consumo = await qr.manager.findOne(ConsumoRepuestoEntity, {
+        where: { id: consumoId, work_order_id: workOrderId, is_deleted: false },
+      });
+      if (!consumo) throw new NotFoundException('Consumo no encontrado');
+      if (!consumo.bodega_id) {
+        throw new ConflictException('El consumo no tiene una bodega válida.');
+      }
+      const totals = await this.calculatePlannedAndIssuedMaterialTotals(
+        workOrderId,
+        consumo.producto_id,
+        consumo.bodega_id,
+        qr.manager,
+      );
+      const rowQuantity = this.toNumeric(consumo.cantidad, 0);
+      const maximumReduction = Math.min(rowQuantity, totals.pendingQty);
+      if (reduction <= 0 || reduction - maximumReduction > 0.000001) {
+        throw new ConflictException(
+          `Solo puedes restar hasta ${maximumReduction.toFixed(2)}, que corresponde a la cantidad aún no emitida.`,
+        );
+      }
+
+      const nextQuantity = Number((rowQuantity - reduction).toFixed(6));
+      if (nextQuantity <= 0) {
+        consumo.is_deleted = true;
+        consumo.cantidad = 0;
+        consumo.subtotal = 0;
+      } else {
+        consumo.cantidad = nextQuantity;
+        consumo.subtotal = Number(
+          (nextQuantity * this.toNumeric(consumo.costo_unitario, 0)).toFixed(4),
+        );
+      }
+      await qr.manager.save(ConsumoRepuestoEntity, consumo);
+      await this.rebuildPendingReservaFromConsumos(
+        workOrderId,
+        consumo.producto_id,
+        consumo.bodega_id,
+        qr.manager,
+      );
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+      workOrder.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+      await qr.manager.save(WorkOrderEntity, workOrder);
+      await qr.commitTransaction();
+    } catch (error) {
+      await qr.rollbackTransaction();
+      throw error;
+    } finally {
+      await qr.release();
+    }
+
+    await this.appendWorkOrderHistory(
+      workOrderId,
+      this.normalizeWorkflowStatus(workOrder!.status_workflow),
+      `Cantidad solicitada reducida para producto ${consumo!.producto_id} en ${reduction}`,
+      {
+        fromStatus: workOrder!.status_workflow,
+        changedBy: this.resolveActorHistoryUserId(actor),
+      },
+    );
+    await this.writeSecurityLog({
+      description: `[WO:${workOrderId}] Consumo ${consumoId} reducido producto ${consumo!.producto_id} cantidad ${reduction}`,
+      typeLog: 'CONSUMO',
+    });
+    return this.wrap(
+      { consumo_id: consumoId, cantidad_reducida: reduction },
+      'Cantidad pendiente restada correctamente',
     );
   }
 

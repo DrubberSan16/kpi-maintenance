@@ -1347,6 +1347,19 @@ export class CreateConsumoDto {
   observacion?: string;
 }
 
+export class ReduceConsumoDto {
+  @ApiProperty({
+    description:
+      'Cantidad pendiente que se resta de la solicitud. Nunca puede afectar una cantidad que ya tuvo salida.',
+    type: Number,
+    minimum: 0.000001,
+  })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.000001)
+  cantidad_restar: number;
+}
+
 export class IssueMaterialItemDto {
   @ApiProperty({ description: 'ID del producto a descontar', format: 'uuid' })
   @IsUUID()

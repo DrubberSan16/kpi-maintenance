@@ -75,6 +75,7 @@ import {
   CreateEquipoTipoDto,
   AnnulWorkOrderDto,
   CreateWorkOrderDto,
+  ReduceConsumoDto,
   UpdateEquipoTipoDto,
   UpdateComponenteDto,
   UpdateFallaCatalogoDto,
@@ -2118,6 +2119,33 @@ export class KpiMaintenanceController {
     @Req() req: any,
   ) {
     return this.service.createConsumo(id, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Eliminar un consumo que no tiene salida de material',
+  })
+  @Delete('work-orders/:id/consumos/:consumoId')
+  deleteConsumo(
+    @Param('id') id: string,
+    @Param('consumoId') consumoId: string,
+    @Req() req: any,
+  ) {
+    return this.service.deleteConsumo(id, consumoId, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Restar la cantidad pendiente de un consumo con salida parcial',
+  })
+  @Patch('work-orders/:id/consumos/:consumoId/reduce')
+  reduceConsumo(
+    @Param('id') id: string,
+    @Param('consumoId') consumoId: string,
+    @Body() dto: ReduceConsumoDto,
+    @Req() req: any,
+  ) {
+    return this.service.reduceConsumo(id, consumoId, dto, getRequestActor(req));
   }
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar salidas de materiales de una orden de trabajo' })
