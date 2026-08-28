@@ -68,6 +68,7 @@ const createRepos = () => ({
   woTareaRepo: createRepo(),
   woAdjuntoRepo: createRepo(),
   equipoFuncionamientoHistorialRepo: createRepo(),
+  equipoHorometroHistorialRepo: createRepo(),
 });
 
 type RepoBag = ReturnType<typeof createRepos>;
@@ -133,17 +134,20 @@ const createService = (repos: RepoBag, ds: DataSource) =>
     repos.woTareaRepo as any,
     repos.woAdjuntoRepo as any,
     repos.equipoFuncionamientoHistorialRepo as any,
+    repos.equipoHorometroHistorialRepo as any,
     ds,
   );
 
 describe('KpiMaintenanceService alerts', () => {
   let repos: RepoBag;
   let service: KpiMaintenanceService;
+  let dataSource: DataSource;
 
   beforeEach(() => {
     jest.clearAllMocks();
     repos = createRepos();
-    service = createService(repos, createDataSourceMock());
+    dataSource = createDataSourceMock();
+    service = createService(repos, dataSource);
   });
 
   it('envia correos cuando se dispara una alerta nueva', async () => {
@@ -531,6 +535,142 @@ describe('KpiMaintenanceService alerts', () => {
         id: 'alert-1',
         tipo_alerta: 'ANOMALIA_HOROMETRO',
       }),
+    );
+  });
+
+  it('la bitácora conserva su registro pero no sobrescribe el horómetro del equipo', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      horometro_actual: 100,
+      is_deleted: false,
+    });
+    repos.bitacoraRepo.findOne.mockResolvedValue({ horometro: 100 });
+
+    await service.createBitacora('equipo-1', {
+      fecha: '2026-08-28',
+      horometro: 110,
+    } as any);
+
+    expect(repos.bitacoraRepo.save).toHaveBeenCalled();
+    expect(repos.equipoRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('una lectura genérica no sobrescribe el horómetro manual del equipo', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      horometro_actual: 100,
+      is_deleted: false,
+    });
+
+    await service.createLectura({
+      equipo_id: 'equipo-1',
+      tipo: 'HOROMETRO',
+      valor: 120,
+    } as any);
+
+    expect(repos.lecturaRepo.save).toHaveBeenCalled();
+    expect(repos.equipoRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('la OT toma el horómetro vigente del equipo e ignora valores editables del payload', () => {
+    const result = (service as any).buildWorkOrderHorometerPayload(
+      { horometro_actual: 999, horas_a_realizar: 25 },
+      { horometro_actual: 150 },
+      null,
+    );
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        horometro_actual: 150,
+        horometro_equipo_referencia: 150,
+        horometro_proyectado: 175,
+      }),
+    );
+  });
+
+  it('la actualización manual del equipo registra historial interno', async () => {
+    const current = {
+      id: 'equipo-1',
+      codigo: 'EQ-1',
+      horometro_actual: 100,
+      es_servicio: false,
+      is_deleted: false,
+    };
+    repos.equipoRepo.findOne.mockResolvedValue(current);
+    const equipmentTxRepo = createRepo();
+    equipmentTxRepo.findOne.mockResolvedValue({ ...current });
+    const historyTxRepo = createRepo();
+    (dataSource as any).transaction = jest.fn(async (callback: any) =>
+      callback({
+        getRepository: (entity: unknown) =>
+          entity === EquipoEntity ? equipmentTxRepo : historyTxRepo,
+      }),
+    );
+    jest
+      .spyOn(service, 'triggerAlertRecalculation')
+      .mockResolvedValue({ data: { accepted: true }, message: 'OK' } as any);
+
+    await service.updateEquipo(
+      'equipo-1',
+      { horometro_actual: 125 } as any,
+      { userId: 'a5de5046-606a-4ea4-b934-6ac4e28db551', username: 'supervisor' } as any,
+    );
+
+    expect(equipmentTxRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ horometro_actual: 125 }),
+    );
+    expect(historyTxRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_id: 'equipo-1',
+        horometro_anterior: 100,
+        horometro_nuevo: 125,
+        fuente: 'MANUAL_EQUIPOS',
+      }),
+    );
+  });
+
+  it('el recordatorio diario se envía únicamente a usuarios supervisores activos', async () => {
+    const sendMail = jest.fn().mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'fetchSecurityUsers').mockResolvedValue([
+      {
+        id: 'u-1',
+        nameUser: 'supervisor',
+        email: 'supervisor@example.com',
+        roleName: 'Supervisor',
+        roleNames: ['Supervisor'],
+        status: 'ACTIVE',
+        isDeleted: false,
+        sucursalIds: [],
+        allSucursales: true,
+      },
+      {
+        id: 'u-2',
+        nameUser: 'operador',
+        email: 'operador@example.com',
+        roleName: 'Operador',
+        roleNames: ['Operador'],
+        status: 'ACTIVE',
+        isDeleted: false,
+        sucursalIds: [],
+        allSucursales: true,
+      },
+    ]);
+    jest
+      .spyOn(service as any, 'getAlertMailTransporter')
+      .mockResolvedValue({ sendMail });
+    (dataSource.query as jest.Mock).mockResolvedValue([
+      { total_equipment: 23, updated_today: 2 },
+    ]);
+    repos.eventoProcesoRepo.findOne.mockResolvedValue(null);
+
+    await (service as any).sendDailyHorometerReminder(
+      '2026-08-28',
+      'test',
+    );
+
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: 'supervisor@example.com' }),
     );
   });
   it('marca la alerta de programación como informativa cuando la OT vinculada culmina', async () => {

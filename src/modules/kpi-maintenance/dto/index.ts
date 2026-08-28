@@ -203,11 +203,17 @@ export class CreateEquipoDto {
   @IsOptional()
   @IsString()
   estado_funcionamiento?: string;
-  @ApiPropertyOptional({ description: 'Horómetro actual', type: Number })
-  @IsOptional()
+  @ApiProperty({
+    description:
+      'Horómetro manual vigente del equipo. Es la fuente exclusiva para órdenes y programaciones.',
+    type: Number,
+    minimum: 0,
+  })
+  @IsDefined()
   @Type(() => Number)
   @IsNumber()
-  horometro_actual?: number;
+  @Min(0)
+  horometro_actual: number;
   @ApiPropertyOptional({
     description: 'Indica si el equipo requiere mantenimiento por tiempo',
   })
@@ -601,7 +607,8 @@ export class CreateProgramacionDto {
   @IsObject()
   payload_json?: Record<string, unknown>;
   @ApiPropertyOptional({
-    description: 'Horometro actual registrado durante una reprogramacion vinculada a OT',
+    description:
+      'Campo legado. El servidor ignora este valor y toma el horometro manual vigente del equipo.',
     type: Number,
   })
   @IsOptional()
@@ -724,7 +731,8 @@ export class UpdateProgramacionMensualDetalleDto {
   horas_mantenimiento?: number;
 
   @ApiPropertyOptional({
-    description: 'Horometro actual del equipo para sincronizarlo con la OT vinculada',
+    description:
+      'Campo legado. La OT vinculada recibe automaticamente el horometro manual vigente del equipo.',
     type: Number,
   })
   @IsOptional()
@@ -793,7 +801,8 @@ export class ReprogramProgramacionMensualDetalleDto {
   payload_json?: Record<string, unknown>;
 
   @ApiPropertyOptional({
-    description: 'Horometro actual del equipo al reprogramar la orden',
+    description:
+      'Campo legado. Al reprogramar se usa automaticamente el horometro manual vigente del equipo.',
     type: Number,
   })
   @IsOptional()

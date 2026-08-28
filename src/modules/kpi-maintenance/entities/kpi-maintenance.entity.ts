@@ -89,6 +89,21 @@ export class EquipoFuncionamientoHistorialEntity {
   @Column({ type: 'text', nullable: true }) changed_by?: string | null;
 }
 
+@Entity({ schema: 'kpi_maintenance', name: 'tb_equipo_horometro_historial' })
+export class EquipoHorometroHistorialEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) equipo_id: string;
+  @Column('numeric', { precision: 18, scale: 2, nullable: true })
+  horometro_anterior?: number | null;
+  @Column('numeric', { precision: 18, scale: 2 }) horometro_nuevo: number;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  changed_at: Date;
+  @Column({ type: 'uuid', nullable: true }) changed_by_id?: string | null;
+  @Column({ type: 'text', nullable: true }) changed_by?: string | null;
+  @Column({ type: 'text', default: 'MANUAL_EQUIPOS' }) fuente: string;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+}
+
 @Entity({ schema: 'kpi_inventory', name: 'tb_marca' })
 export class MarcaEntity {
   @PrimaryGeneratedColumn('uuid') id: string;

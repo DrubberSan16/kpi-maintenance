@@ -308,8 +308,8 @@ export class KpiMaintenanceController {
     examples: { ejemplo: { value: bodyExamples.createEquipo } },
   })
   @Post('equipos')
-  createEquipo(@Body() dto: CreateEquipoDto) {
-    return this.service.createEquipo(dto);
+  createEquipo(@Body() dto: CreateEquipoDto, @Req() req: any) {
+    return this.service.createEquipo(dto, getRequestActor(req));
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Actualizar un equipo por ID' })
@@ -320,8 +320,12 @@ export class KpiMaintenanceController {
     examples: { ejemplo: { value: bodyExamples.createEquipo } },
   })
   @Patch('equipos/:id')
-  updateEquipo(@Param('id') id: string, @Body() dto: UpdateEquipoDto) {
-    return this.service.updateEquipo(id, dto);
+  updateEquipo(
+    @Param('id') id: string,
+    @Body() dto: UpdateEquipoDto,
+    @Req() req: any,
+  ) {
+    return this.service.updateEquipo(id, dto, getRequestActor(req));
   }
   @ApiTags('Equipos')
   @ApiOperation({
