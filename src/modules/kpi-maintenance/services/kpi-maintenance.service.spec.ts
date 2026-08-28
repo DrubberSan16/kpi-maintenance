@@ -501,6 +501,7 @@ describe('KpiMaintenanceService alerts', () => {
       expect.objectContaining({
         id: 'alert-1',
         estado: 'CERRADA',
+        nivel: 'INFO',
       }),
     );
   });
@@ -844,6 +845,84 @@ describe('KpiMaintenanceService alerts', () => {
     ).resolves.toEqual([]);
   });
 
+  it('cierra como informativa una alerta vinculada a una OT de Cebado', async () => {
+    repos.alertaRepo.findOne.mockResolvedValue({
+      id: 'alert-cebado',
+      equipo_id: 'equipo-1',
+      nivel: 'CRITICAL',
+      estado: 'ABIERTA',
+      payload_json: {},
+      is_deleted: false,
+    });
+
+    await (service as any).syncAlertWorkOrderLink('alert-cebado', {
+      id: 'wo-cebado',
+      code: 'OT-CEBADO',
+      title: 'Cebado',
+      equipment_id: 'equipo-1',
+      maintenance_kind: 'CEBADO',
+      status_workflow: 'PLANNED',
+    });
+
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'alert-cebado',
+        estado: 'CERRADA',
+        nivel: 'INFO',
+        resolved_at: expect.any(Date),
+        payload_json: expect.objectContaining({
+          exclusion_reason: 'CEBADO_NO_GENERA_ALERTA',
+        }),
+      }),
+    );
+  });
+
+  it('no reabre una alerta histórica duplicada cuando cambia su OT', async () => {
+    repos.alertaRepo.find.mockResolvedValue([
+      {
+        id: 'alert-duplicada',
+        equipo_id: 'equipo-1',
+        nivel: 'INFO',
+        estado: 'CERRADA',
+        origen: 'WORK_ORDER',
+        work_order_id: 'wo-1',
+        payload_json: {
+          logic_migration: {
+            duplicate_of_alert_id: 'alert-programacion',
+          },
+          work_orders: [
+            {
+              id: 'wo-1',
+              code: 'OT-A00040',
+              status_workflow: 'PLANNED',
+            },
+          ],
+        },
+        is_deleted: false,
+      },
+    ]);
+
+    await (service as any).syncAlertsForWorkOrder({
+      id: 'wo-1',
+      code: 'OT-A00040',
+      title: 'Mantenimiento preventivo',
+      equipment_id: 'equipo-1',
+      maintenance_kind: 'PREVENTIVO',
+      status_workflow: 'IN_PROGRESS',
+    });
+
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'alert-duplicada',
+        estado: 'CERRADA',
+        nivel: 'INFO',
+        payload_json: expect.objectContaining({
+          exclusion_reason: 'DUPLICADO_ALERTA_PROGRAMACION',
+        }),
+      }),
+    );
+  });
+
   it('enlaza una alerta crítica con la OT activa del equipo y baja su nivel', async () => {
     repos.alertaRepo.find.mockResolvedValue([]);
     repos.woRepo.find.mockResolvedValue([
@@ -895,6 +974,78 @@ describe('KpiMaintenanceService alerts', () => {
             }),
           ],
         }),
+      }),
+    );
+  });
+
+  it('cierra la alerta de OT duplicada al generar la alerta de programación', async () => {
+    repos.alertaRepo.find.mockResolvedValue([
+      {
+        id: 'alert-work-order',
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'MANTENIMIENTO_PROXIMO',
+        categoria: 'MANTENIMIENTO',
+        nivel: 'CRITICAL',
+        origen: 'WORK_ORDER',
+        referencia_tipo: 'WORK_ORDER',
+        referencia: 'WORK_ORDER:wo-1',
+        estado: 'ABIERTA',
+        work_order_id: 'wo-1',
+        payload_json: {},
+        is_deleted: false,
+      },
+    ]);
+    repos.woRepo.find.mockResolvedValue([
+      {
+        id: 'wo-1',
+        code: 'OT-A00040',
+        title: 'Mantenimiento preventivo',
+        equipment_id: 'equipo-1',
+        maintenance_kind: 'PREVENTIVO',
+        status_workflow: 'IN_PROGRESS',
+        created_at: new Date('2026-08-28T08:00:00Z'),
+        updated_at: new Date('2026-08-28T09:00:00Z'),
+        is_deleted: false,
+      },
+    ]);
+    repos.alertaRepo.create.mockImplementation((value) => value);
+    repos.alertaRepo.save.mockImplementation(async (value) => value);
+    jest
+      .spyOn(service as any, 'dispatchAlertTriggeredNotifications')
+      .mockResolvedValue(undefined);
+
+    const stats = await (service as any).syncAlertCandidates([
+      {
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'MANTENIMIENTO_PROXIMO',
+        categoria: 'MANTENIMIENTO',
+        nivel: 'CRITICAL',
+        origen: 'PROGRAMACION',
+        referencia_tipo: 'PROGRAMACION',
+        referencia: 'PROGRAMACION:prog-1',
+        detalle: 'Mantenimiento próximo',
+        payload_json: { programacion_id: 'prog-1' },
+      },
+    ]);
+
+    expect(stats).toEqual(expect.objectContaining({ created: 1, resolved: 1 }));
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'alert-work-order',
+        estado: 'CERRADA',
+        nivel: 'INFO',
+        payload_json: expect.objectContaining({
+          exclusion_reason: 'DUPLICADO_ALERTA_PROGRAMACION',
+          duplicate_of_alert_id: 'PROGRAMACION:prog-1',
+        }),
+      }),
+    );
+    expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        origen: 'PROGRAMACION',
+        estado: 'EN_PROCESO',
+        nivel: 'WARNING',
+        work_order_id: 'wo-1',
       }),
     );
   });

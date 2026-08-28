@@ -4279,6 +4279,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     payload.work_orders = snapshots;
     alerta.payload_json = payload;
     alerta.work_order_id = workOrder.id;
+    if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO') {
+      payload.exclusion_reason = 'CEBADO_NO_GENERA_ALERTA';
+      alerta.payload_json = payload;
+      alerta.estado = 'CERRADA';
+      alerta.nivel = 'INFO';
+      alerta.ultima_evaluacion_at = new Date();
+      alerta.resolved_at = alerta.resolved_at ?? new Date();
+      return this.alertaRepo.save(alerta);
+    }
     const resolvedState =
       nextAlertState ??
       this.resolveAlertStateFromLinkedWorkOrders(snapshots, alerta.estado);
@@ -4315,6 +4324,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       payload.work_orders = snapshots;
       alerta.payload_json = payload;
       alerta.work_order_id = snapshots[snapshots.length - 1]?.id ?? null;
+      const duplicateOfAlertId = this.firstNonEmptyString(
+        payload.duplicate_of_alert_id,
+        (payload.logic_migration as Record<string, unknown> | null | undefined)
+          ?.duplicate_of_alert_id,
+      );
+      if (
+        this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO' ||
+        duplicateOfAlertId
+      ) {
+        payload.exclusion_reason = duplicateOfAlertId
+          ? 'DUPLICADO_ALERTA_PROGRAMACION'
+          : 'CEBADO_NO_GENERA_ALERTA';
+        alerta.payload_json = payload;
+        alerta.estado = 'CERRADA';
+        alerta.nivel = 'INFO';
+        alerta.ultima_evaluacion_at = new Date();
+        alerta.resolved_at = alerta.resolved_at ?? new Date();
+        await this.alertaRepo.save(alerta);
+        continue;
+      }
       const resolvedState = this.resolveAlertStateFromLinkedWorkOrders(
         snapshots,
         alerta.estado,
@@ -12105,14 +12134,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           'COMBUSTIBLE',
           'INVENTARIO',
         ];
-    const activeRows = await this.alertaRepo.find({
+    const allActiveRows = await this.alertaRepo.find({
       where: {
         is_deleted: false,
         estado: In(['ABIERTA', 'EN_PROCESO']),
-        origen: In(managedOrigins),
       },
       order: { fecha_generada: 'DESC', id: 'DESC' },
     });
+    const activeRows = allActiveRows.filter((row) =>
+      managedOrigins.includes(row.origen as AlertOrigin),
+    );
+    const activeWorkOrderRows = allActiveRows.filter(
+      (row) => row.origen === 'WORK_ORDER',
+    );
     const candidateEquipmentIds = [
       ...new Set(
         candidates
@@ -12190,6 +12224,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         linkedSnapshots.length && candidate.nivel === 'CRITICAL'
           ? 'WARNING'
           : candidate.nivel;
+      const linkedWorkOrderId =
+        linkedSnapshots[linkedSnapshots.length - 1]?.id ?? null;
+      if (candidate.origen === 'PROGRAMACION' && linkedWorkOrderId) {
+        const duplicateWorkOrderAlert = activeWorkOrderRows.find(
+          (row) =>
+            row.id !== existing?.id &&
+            row.origen === 'WORK_ORDER' &&
+            row.work_order_id === linkedWorkOrderId &&
+            ['ABIERTA', 'EN_PROCESO'].includes(
+              this.normalizeAlertState(row.estado),
+            ),
+        );
+        if (duplicateWorkOrderAlert) {
+          const duplicatePayload = {
+            ...((duplicateWorkOrderAlert.payload_json ?? {}) as Record<
+              string,
+              unknown
+            >),
+            duplicate_of_alert_id:
+              existing?.id ?? candidate.referencia ?? 'PROGRAMACION',
+            exclusion_reason: 'DUPLICADO_ALERTA_PROGRAMACION',
+          };
+          duplicateWorkOrderAlert.payload_json = duplicatePayload;
+          duplicateWorkOrderAlert.estado = 'CERRADA';
+          duplicateWorkOrderAlert.nivel = 'INFO';
+          duplicateWorkOrderAlert.ultima_evaluacion_at = now;
+          duplicateWorkOrderAlert.resolved_at = now;
+          await this.alertaRepo.save(duplicateWorkOrderAlert);
+          resolved += 1;
+        }
+      }
       if (existing) {
         const nextDetalle = String(candidate.detalle || '').trim() || null;
         const nextPayload = {
@@ -12272,6 +12337,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       // This keeps compatibility with older DB constraints that only accept
       // open/in-process/closed values and matches the inventory use case.
       row.estado = 'CERRADA';
+      row.nivel = 'INFO';
       row.resolved_at = now;
       row.ultima_evaluacion_at = now;
       await this.alertaRepo.save(row);
