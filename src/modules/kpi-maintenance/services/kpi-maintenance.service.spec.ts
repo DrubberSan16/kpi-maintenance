@@ -629,6 +629,25 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 
+  it('el endpoint dedicado de horómetro reutiliza la actualización manual auditada', async () => {
+    const updateSpy = jest
+      .spyOn(service, 'updateEquipo')
+      .mockResolvedValue({ data: { horometro_actual: 140 }, message: 'OK' } as any);
+    const actor = { userId: 'u-1', username: 'supervisor' } as any;
+
+    await service.updateEquipoHorometro(
+      'equipo-1',
+      { horometro_actual: 140 },
+      actor,
+    );
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      'equipo-1',
+      { horometro_actual: 140 },
+      actor,
+    );
+  });
+
   it('el recordatorio diario se envía únicamente a usuarios supervisores activos', async () => {
     const sendMail = jest.fn().mockResolvedValue(undefined);
     jest.spyOn(service as any, 'fetchSecurityUsers').mockResolvedValue([

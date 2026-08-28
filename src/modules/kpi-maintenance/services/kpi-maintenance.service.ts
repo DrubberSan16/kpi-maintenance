@@ -14082,6 +14082,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     return this.wrap(saved, 'Equipo actualizado');
   }
+  async updateEquipoHorometro(
+    id: string,
+    dto: { horometro_actual: number },
+    actor?: RequestActorContext | null,
+  ) {
+    return this.updateEquipo(
+      id,
+      { horometro_actual: dto.horometro_actual } as UpdateEquipoDto,
+      actor,
+    );
+  }
   async updateEquipoEstadoFuncionamiento(
     id: string,
     dto: UpdateEquipoEstadoFuncionamientoDto,

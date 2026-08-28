@@ -51,6 +51,7 @@ import {
   DateRangeDto,
   EquipoQueryDto,
   UpdateEquipoEstadoFuncionamientoDto,
+  UpdateEquipoHorometroDto,
   IssueMaterialsDto,
   EventoProcesoQueryDto,
   IntelligencePeriodQueryDto,
@@ -345,6 +346,20 @@ export class KpiMaintenanceController {
       dto,
       getRequestActor(req),
     );
+  }
+  @ApiTags('Equipos')
+  @ApiOperation({
+    summary: 'Actualizar manualmente el horómetro vigente del equipo',
+  })
+  @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
+  @ApiBody({ type: UpdateEquipoHorometroDto, required: true })
+  @Patch('equipos/:id/horometro')
+  updateEquipoHorometro(
+    @Param('id') id: string,
+    @Body() dto: UpdateEquipoHorometroDto,
+    @Req() req: any,
+  ) {
+    return this.service.updateEquipoHorometro(id, dto, getRequestActor(req));
   }
   @ApiTags('Equipos')
   @ApiOperation({

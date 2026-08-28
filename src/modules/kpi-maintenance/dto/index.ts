@@ -281,6 +281,19 @@ export class UpdateEquipoEstadoFuncionamientoDto {
   estado_funcionamiento: EquipoEstadoFuncionamientoEnum;
 }
 
+export class UpdateEquipoHorometroDto {
+  @ApiProperty({
+    description: 'Nueva lectura manual vigente del horómetro del equipo',
+    type: Number,
+    minimum: 0,
+  })
+  @IsDefined()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  horometro_actual: number;
+}
+
 export class CreateEquipoTipoDto {
   @ApiPropertyOptional({ description: 'Código único del Tipo de Equipo. Si no se envía, el sistema lo genera automáticamente.' })
   @IsOptional()
