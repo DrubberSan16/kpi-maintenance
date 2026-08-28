@@ -1107,6 +1107,14 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsUUID()
   equipo_componente_id?: string;
+  @ApiPropertyOptional({
+    description: 'IDs de los compartimientos o partes del equipo (multiple)',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  equipo_componente_ids?: string[];
   @ApiPropertyOptional({ description: 'ID del plan', format: 'uuid' })
   @IsOptional()
   @IsUUID()
@@ -1260,6 +1268,14 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsUUID()
   equipo_componente_id?: string;
+  @ApiPropertyOptional({
+    description: 'IDs de los compartimientos o partes del equipo (multiple)',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  equipo_componente_ids?: string[];
   @ApiPropertyOptional({ description: 'ID de la plantilla MPG', format: 'uuid' })
   @IsOptional()
   @IsUUID()

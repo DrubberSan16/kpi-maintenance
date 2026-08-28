@@ -53,6 +53,15 @@ export class SaveWorkOrderHeaderDto {
   @IsUUID()
   equipo_componente_id?: string | null;
 
+  @ApiPropertyOptional({
+    description: 'IDs de los compartimientos del equipo (multiple)',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  equipo_componente_ids?: string[];
+
   @ApiPropertyOptional({ description: 'Estado workflow de la OT' })
   @IsOptional()
   @IsString()

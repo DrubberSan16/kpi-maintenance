@@ -196,6 +196,14 @@ type CodeResolution = {
   reassignmentReason: string | null;
 };
 
+type WorkOrderComponentSnapshot = {
+  id: string;
+  codigo: string | null;
+  nombre: string | null;
+  nombre_oficial: string | null;
+  label: string | null;
+};
+
 type SystemReportGroupBy =
   | 'OT'
   | 'BODEGA'
@@ -13249,6 +13257,63 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const horometerSnapshot =
       this.extractWorkOrderHorometerSnapshot(auditPayload);
 
+    const storedComponentSnapshots = this.readStoredComponentSnapshots(
+      auditPayload,
+    );
+    const storedComponentIds = storedComponentSnapshots.map(
+      (snapshot) => snapshot.id,
+    );
+    const liveComponentsForSnapshots = storedComponentIds.length
+      ? await this.equipoComponenteRepo.find({
+          where: { id: In(storedComponentIds), is_deleted: false },
+        })
+      : [];
+    const liveComponentsByIdForSnapshots = new Map(
+      liveComponentsForSnapshots.map((component) => [component.id, component]),
+    );
+    const componentSnapshots: WorkOrderComponentSnapshot[] =
+      storedComponentSnapshots.length
+        ? storedComponentSnapshots.map((snapshot) => {
+            const live = liveComponentsByIdForSnapshots.get(snapshot.id);
+            const codigo = snapshot.codigo ?? live?.codigo ?? null;
+            const nombre = snapshot.nombre ?? live?.nombre ?? null;
+            const nombreOficial =
+              snapshot.nombre_oficial ??
+              live?.nombre_oficial ??
+              live?.nombre ??
+              null;
+            const label = snapshot.label ?? nombreOficial ?? nombre ?? null;
+            return {
+              id: snapshot.id,
+              codigo,
+              nombre,
+              nombre_oficial: nombreOficial,
+              label,
+            };
+          })
+        : workOrder.equipo_componente_id
+          ? [
+              {
+                id: workOrder.equipo_componente_id,
+                codigo: componente?.codigo ?? null,
+                nombre:
+                  workOrder.equipo_componente_nombre ??
+                  componente?.nombre ??
+                  null,
+                nombre_oficial:
+                  workOrder.equipo_componente_nombre_oficial ??
+                  componente?.nombre_oficial ??
+                  null,
+                label:
+                  workOrder.equipo_componente_nombre_oficial ??
+                  workOrder.equipo_componente_nombre ??
+                  componente?.nombre_oficial ??
+                  componente?.nombre ??
+                  null,
+              },
+            ]
+          : [];
+
     return {
       ...workOrder,
       valor_json: auditPayload,
@@ -13271,6 +13336,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         componente?.nombre_oficial ??
         workOrder.equipo_componente_nombre_oficial ??
         null,
+      equipo_componente_ids: componentSnapshots.map((snapshot) => snapshot.id),
+      equipo_componentes: componentSnapshots,
+      equipment_component_labels: componentSnapshots
+        .map((snapshot) => snapshot.label)
+        .filter((label): label is string => !!label),
       blocked_by_work_order_id:
         blockingWorkOrder?.id ?? workOrder.blocked_by_work_order_id ?? null,
       blocked_by_work_order_code: blockingWorkOrder?.code ?? null,
@@ -22576,32 +22646,170 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
 
-  private async resolveWorkOrderComponentContext(
-    equipmentId?: string | null,
-    componentId?: string | null,
-  ) {
-    if (!componentId) {
+  private readStoredComponentSnapshots(
+    valorJson: unknown,
+  ): WorkOrderComponentSnapshot[] {
+    const payload = (valorJson as Record<string, unknown> | null) ?? null;
+    const raw = payload?.equipo_componentes;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter(
+        (item): item is Record<string, unknown> =>
+          !!item && typeof item === 'object',
+      )
+      .map((item) => ({
+        id: String(item.id ?? '').trim(),
+        codigo: item.codigo != null ? String(item.codigo) : null,
+        nombre: item.nombre != null ? String(item.nombre) : null,
+        nombre_oficial:
+          item.nombre_oficial != null ? String(item.nombre_oficial) : null,
+        label: item.label != null ? String(item.label) : null,
+      }))
+      .filter((item) => !!item.id);
+  }
+
+  /**
+   * Single point of resolution/validation for a work order's compartimiento
+   * selection, shared by createWorkOrder, updateWorkOrder and
+   * saveWorkOrderHeaderWithManager. An explicit `explicitIds` array (including
+   * an empty array) is authoritative; otherwise falls back to the legacy
+   * scalar id. When neither is provided, whatever was already stored is
+   * preserved as-is (no catalog re-validation), so historical labels stay
+   * stable even if the catalog component is later renamed or deleted.
+   */
+  private async resolveWorkOrderComponentContexts(params: {
+    equipmentId?: string | null;
+    explicitIds?: string[];
+    legacyId?: string | null;
+    existingSnapshots?: WorkOrderComponentSnapshot[];
+    existingLegacyId?: string | null;
+    existingLegacyName?: string | null;
+    existingLegacyOfficialName?: string | null;
+  }): Promise<{
+    ids: string[];
+    snapshots: WorkOrderComponentSnapshot[];
+    legacyComponentId: string | null;
+    legacyComponentName: string | null;
+    legacyComponentOfficialName: string | null;
+  }> {
+    const {
+      equipmentId = null,
+      explicitIds,
+      legacyId,
+      existingSnapshots = [],
+      existingLegacyId = null,
+      existingLegacyName = null,
+      existingLegacyOfficialName = null,
+    } = params;
+
+    const isPreserving = explicitIds === undefined && !legacyId;
+
+    if (isPreserving) {
+      if (existingSnapshots.length) {
+        return {
+          ids: existingSnapshots.map((snapshot) => snapshot.id),
+          snapshots: existingSnapshots,
+          legacyComponentId: existingSnapshots[0].id,
+          legacyComponentName: existingSnapshots[0].nombre,
+          legacyComponentOfficialName: existingSnapshots[0].nombre_oficial,
+        };
+      }
+      if (existingLegacyId) {
+        const label = existingLegacyOfficialName ?? existingLegacyName ?? null;
+        return {
+          ids: [existingLegacyId],
+          snapshots: [
+            {
+              id: existingLegacyId,
+              codigo: null,
+              nombre: existingLegacyName,
+              nombre_oficial: existingLegacyOfficialName,
+              label,
+            },
+          ],
+          legacyComponentId: existingLegacyId,
+          legacyComponentName: existingLegacyName,
+          legacyComponentOfficialName: existingLegacyOfficialName,
+        };
+      }
       return {
-        component: null,
-        componentId: null,
-        componentName: null,
-        componentOfficialName: null,
+        ids: [],
+        snapshots: [],
+        legacyComponentId: null,
+        legacyComponentName: null,
+        legacyComponentOfficialName: null,
       };
     }
-    const component = await this.findOneOrFail(this.equipoComponenteRepo, {
-      id: componentId,
-      is_deleted: false,
+
+    const candidateIds = explicitIds !== undefined ? explicitIds : [legacyId as string];
+
+    const dedupedIds = Array.from(
+      new Set(
+        candidateIds
+          .map((candidateId) => String(candidateId ?? '').trim())
+          .filter((candidateId) => !!candidateId),
+      ),
+    );
+
+    if (!dedupedIds.length) {
+      return {
+        ids: [],
+        snapshots: [],
+        legacyComponentId: null,
+        legacyComponentName: null,
+        legacyComponentOfficialName: null,
+      };
+    }
+
+    const components = await this.equipoComponenteRepo.find({
+      where: { id: In(dedupedIds), is_deleted: false },
     });
-    if (equipmentId && component.equipo_id !== equipmentId) {
+    const componentsById = new Map(
+      components.map((component) => [component.id, component]),
+    );
+
+    const missingIds = dedupedIds.filter((id) => !componentsById.has(id));
+    if (missingIds.length) {
       throw new BadRequestException(
-        'El compartimiento seleccionado no pertenece al equipo de la orden.',
+        `Compartimiento(s) no encontrado(s) o eliminado(s): ${missingIds.join(', ')}`,
       );
     }
+
+    if (equipmentId) {
+      const foreignIds = dedupedIds.filter(
+        (id) => componentsById.get(id)?.equipo_id !== equipmentId,
+      );
+      if (foreignIds.length) {
+        throw new BadRequestException(
+          'El compartimiento seleccionado no pertenece al equipo de la orden.',
+        );
+      }
+    }
+
+    const existingSnapshotsById = new Map(
+      existingSnapshots.map((snapshot) => [snapshot.id, snapshot]),
+    );
+
+    const snapshots: WorkOrderComponentSnapshot[] = dedupedIds.map((id) => {
+      const component = componentsById.get(id)!;
+      const previous = existingSnapshotsById.get(id);
+      const codigo = previous?.codigo ?? component.codigo ?? null;
+      const nombre = previous?.nombre ?? component.nombre ?? null;
+      const nombreOficial =
+        previous?.nombre_oficial ??
+        component.nombre_oficial ??
+        component.nombre ??
+        null;
+      const label = previous?.label ?? nombreOficial ?? nombre ?? null;
+      return { id, codigo, nombre, nombre_oficial: nombreOficial, label };
+    });
+
     return {
-      component,
-      componentId: component.id,
-      componentName: component.nombre ?? null,
-      componentOfficialName: component.nombre_oficial ?? component.nombre ?? null,
+      ids: dedupedIds,
+      snapshots,
+      legacyComponentId: dedupedIds[0] ?? null,
+      legacyComponentName: snapshots[0]?.nombre ?? null,
+      legacyComponentOfficialName: snapshots[0]?.nombre_oficial ?? null,
     };
   }
 
@@ -23746,10 +23954,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         })
       : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
-    const componentContext = await this.resolveWorkOrderComponentContext(
+    const componentContext = await this.resolveWorkOrderComponentContexts({
       equipmentId,
-      header.equipo_componente_id ?? workOrder?.equipo_componente_id ?? null,
-    );
+      explicitIds: header.equipo_componente_ids,
+      legacyId: header.equipo_componente_id ?? null,
+      existingSnapshots: this.readStoredComponentSnapshots(
+        workOrder?.valor_json ?? null,
+      ),
+      existingLegacyId: workOrder?.equipo_componente_id ?? null,
+      existingLegacyName: workOrder?.equipo_componente_nombre ?? null,
+      existingLegacyOfficialName:
+        workOrder?.equipo_componente_nombre_oficial ?? null,
+    });
     const nextWorkflowStatus = this.normalizeWorkflowStatus(
       header.status_workflow ?? workOrder?.status_workflow ?? 'PLANNED',
     );
@@ -23819,15 +24035,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             created_by: ownerUsername,
           });
       const nextHeaderPayload = this.buildWorkOrderHorometerPayload(
-        header.valor_json || header.procedimiento_id
-          ? {
-              ...((entity.valor_json as Record<string, unknown> | null) ?? {}),
-              ...((header.valor_json ?? {}) as Record<string, unknown>),
-              ...(header.procedimiento_id
-                ? { procedimiento_id: header.procedimiento_id }
-                : {}),
-            }
-          : ((entity.valor_json as Record<string, unknown> | null) ?? {}),
+        {
+          ...((entity.valor_json as Record<string, unknown> | null) ?? {}),
+          ...((header.valor_json ?? {}) as Record<string, unknown>),
+          ...(header.procedimiento_id
+            ? { procedimiento_id: header.procedimiento_id }
+            : {}),
+          equipo_componentes: componentContext.snapshots,
+        },
         equipment,
         resolvedProcedure,
       );
@@ -23847,10 +24062,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             ? this.trimNullableText(header.description)
             : entity.description ?? null,
         equipment_id: equipmentId,
-        equipo_componente_id: componentContext.componentId,
-        equipo_componente_nombre: componentContext.componentName,
+        equipo_componente_id: componentContext.legacyComponentId,
+        equipo_componente_nombre: componentContext.legacyComponentName,
         equipo_componente_nombre_oficial:
-          componentContext.componentOfficialName,
+          componentContext.legacyComponentOfficialName,
         plan_id: resolvedPlanId,
         blocked_reason:
           header.blocked_reason !== undefined
@@ -24433,10 +24648,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const equipment = dto.equipment_id
       ? await this.findEquipoOrFail(dto.equipment_id)
       : null;
-    const componentContext = await this.resolveWorkOrderComponentContext(
-      dto.equipment_id ?? null,
-      dto.equipo_componente_id ?? null,
-    );
+    const componentContext = await this.resolveWorkOrderComponentContexts({
+      equipmentId: dto.equipment_id ?? null,
+      explicitIds: dto.equipo_componente_ids,
+      legacyId: dto.equipo_componente_id ?? null,
+    });
     let resolvedPlanId = dto.plan_id ?? null;
     if (dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
@@ -24492,6 +24708,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ...(dto.procedimiento_id
           ? { procedimiento_id: dto.procedimiento_id }
           : {}),
+        equipo_componentes: componentContext.snapshots,
       };
       this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
       cebadoProgramacionDate = this.applyCebadoProgramacionDate(
@@ -24502,9 +24719,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         code: resolution.resolvedCode,
         type: dto.type,
         equipment_id: dto.equipment_id ?? null,
-        equipo_componente_id: componentContext.componentId,
-        equipo_componente_nombre: componentContext.componentName,
-        equipo_componente_nombre_oficial: componentContext.componentOfficialName,
+        equipo_componente_id: componentContext.legacyComponentId,
+        equipo_componente_nombre: componentContext.legacyComponentName,
+        equipo_componente_nombre_oficial:
+          componentContext.legacyComponentOfficialName,
         plan_id: resolvedPlanId,
         valor_json: nextHeaderPayload,
         title: dto.title,
@@ -24742,10 +24960,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { id: dto.procedimiento_id, is_deleted: false },
         })
       : await this.resolveProcedimientoFromPlan(resolvedPlan);
-    const componentContext = await this.resolveWorkOrderComponentContext(
-      wo.equipment_id ?? null,
-      dto.equipo_componente_id ?? wo.equipo_componente_id ?? null,
-    );
+    const componentContext = await this.resolveWorkOrderComponentContexts({
+      equipmentId: wo.equipment_id ?? null,
+      explicitIds: dto.equipo_componente_ids,
+      legacyId: dto.equipo_componente_id ?? null,
+      existingSnapshots: this.readStoredComponentSnapshots(wo.valor_json),
+      existingLegacyId: wo.equipo_componente_id ?? null,
+      existingLegacyName: wo.equipo_componente_nombre ?? null,
+      existingLegacyOfficialName: wo.equipo_componente_nombre_oficial ?? null,
+    });
     const nextWorkflowStatus = this.normalizeWorkflowStatus(
       dto.status_workflow ?? wo.status_workflow,
     );
@@ -24768,16 +24991,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.is_emergency,
       wo.emergency_reason,
     );
-    const nextHeaderPayload =
-      dto.valor_json || dto.procedimiento_id
-        ? {
-            ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
-            ...(dto.valor_json ?? {}),
-            ...(dto.procedimiento_id
-              ? { procedimiento_id: dto.procedimiento_id }
-              : {}),
-          }
-        : ((wo.valor_json as Record<string, unknown> | null) ?? {});
+    const nextHeaderPayload = {
+      ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
+      ...(dto.valor_json ?? {}),
+      ...(dto.procedimiento_id
+        ? { procedimiento_id: dto.procedimiento_id }
+        : {}),
+      equipo_componentes: componentContext.snapshots,
+    };
     this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
     if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertMaterialShortfallAcknowledged(
@@ -24803,9 +25024,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     Object.assign(wo, {
       ...dto,
       plan_id: resolvedPlanId,
-      equipo_componente_id: componentContext.componentId,
-      equipo_componente_nombre: componentContext.componentName,
-      equipo_componente_nombre_oficial: componentContext.componentOfficialName,
+      equipo_componente_id: componentContext.legacyComponentId,
+      equipo_componente_nombre: componentContext.legacyComponentName,
+      equipo_componente_nombre_oficial:
+        componentContext.legacyComponentOfficialName,
       is_emergency: emergencyState.is_emergency,
       emergency_reason: emergencyState.emergency_reason,
       blocked_reason:

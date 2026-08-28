@@ -1170,6 +1170,469 @@ describe('KpiMaintenanceService work orders', () => {
     );
   });
 
+  it('crea la OT con multiples compartimientos, deduplicando y preservando el orden de entrada', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    repos.equipoComponenteRepo.find.mockResolvedValue([
+      {
+        id: 'comp-2',
+        equipo_id: 'equipo-1',
+        codigo: 'C2',
+        nombre: 'Generador',
+        nombre_oficial: 'Generador principal',
+        is_deleted: false,
+      },
+      {
+        id: 'comp-1',
+        equipo_id: 'equipo-1',
+        codigo: 'C1',
+        nombre: 'Motor',
+        nombre_oficial: 'Motor principal',
+        is_deleted: false,
+      },
+    ]);
+    repos.woRepo.save.mockImplementation(async (value) => ({
+      id: 'wo-1',
+      ...value,
+    }));
+
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-1' } });
+    jest.spyOn(service as any, 'enrichWorkOrder').mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00010',
+      title: 'Orden',
+      status_workflow: 'PLANNED',
+    });
+
+    await service.createWorkOrder({
+      code: 'OT-A00010',
+      type: 'MANTENIMIENTO',
+      title: 'Orden',
+      equipment_id: 'equipo-1',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      equipo_componente_ids: ['comp-1', 'comp-2', 'comp-1'],
+      valor_json: {
+        causa: 'Fuga detectada',
+        accion: 'Cambio de componente',
+        prevencion: 'Revisión semanal',
+      },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_componente_id: 'comp-1',
+        equipo_componente_nombre: 'Motor',
+        equipo_componente_nombre_oficial: 'Motor principal',
+        valor_json: expect.objectContaining({
+          equipo_componentes: [
+            {
+              id: 'comp-1',
+              codigo: 'C1',
+              nombre: 'Motor',
+              nombre_oficial: 'Motor principal',
+              label: 'Motor principal',
+            },
+            {
+              id: 'comp-2',
+              codigo: 'C2',
+              nombre: 'Generador',
+              nombre_oficial: 'Generador principal',
+              label: 'Generador principal',
+            },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('rechaza crear una OT si un compartimiento no existe o fue eliminado', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.equipoComponenteRepo.find.mockResolvedValue([]);
+
+    await expect(
+      service.createWorkOrder({
+        code: 'OT-A00011',
+        type: 'MANTENIMIENTO',
+        title: 'Orden',
+        equipment_id: 'equipo-1',
+        maintenance_kind: 'CORRECTIVO',
+        status_workflow: 'PLANNED',
+        equipo_componente_ids: ['comp-missing'],
+        valor_json: {
+          causa: 'Fuga detectada',
+          accion: 'Cambio de componente',
+          prevencion: 'Revisión semanal',
+        },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rechaza crear una OT si el compartimiento pertenece a otro equipo', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.equipoComponenteRepo.find.mockResolvedValue([
+      {
+        id: 'comp-ajeno',
+        equipo_id: 'equipo-99',
+        codigo: 'C9',
+        nombre: 'Ajeno',
+        nombre_oficial: null,
+        is_deleted: false,
+      },
+    ]);
+
+    await expect(
+      service.createWorkOrder({
+        code: 'OT-A00012',
+        type: 'MANTENIMIENTO',
+        title: 'Orden',
+        equipment_id: 'equipo-1',
+        maintenance_kind: 'CORRECTIVO',
+        status_workflow: 'PLANNED',
+        equipo_componente_ids: ['comp-ajeno'],
+        valor_json: {
+          causa: 'Fuga detectada',
+          accion: 'Cambio de componente',
+          prevencion: 'Revisión semanal',
+        },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('crea la OT usando el escalar legado equipo_componente_id cuando no se envia el arreglo', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    repos.equipoComponenteRepo.find.mockResolvedValue([
+      {
+        id: 'comp-1',
+        equipo_id: 'equipo-1',
+        codigo: 'C1',
+        nombre: 'Motor',
+        nombre_oficial: 'Motor principal',
+        is_deleted: false,
+      },
+    ]);
+    repos.woRepo.save.mockImplementation(async (value) => ({
+      id: 'wo-1',
+      ...value,
+    }));
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-1' } });
+    jest.spyOn(service as any, 'enrichWorkOrder').mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00013',
+      title: 'Orden',
+      status_workflow: 'PLANNED',
+    });
+
+    await service.createWorkOrder({
+      code: 'OT-A00013',
+      type: 'MANTENIMIENTO',
+      title: 'Orden',
+      equipment_id: 'equipo-1',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      equipo_componente_id: 'comp-1',
+      valor_json: {
+        causa: 'Fuga detectada',
+        accion: 'Cambio de componente',
+        prevencion: 'Revisión semanal',
+      },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_componente_id: 'comp-1',
+        valor_json: expect.objectContaining({
+          equipo_componentes: [
+            {
+              id: 'comp-1',
+              codigo: 'C1',
+              nombre: 'Motor',
+              nombre_oficial: 'Motor principal',
+              label: 'Motor principal',
+            },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('actualiza reemplazando la seleccion de compartimientos preservando el nombre historico de los ids repetidos', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00014',
+      type: 'MANTENIMIENTO',
+      equipment_id: 'equipo-1',
+      plan_id: 'plan-1',
+      title: 'Orden',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      equipo_componente_id: 'comp-1',
+      equipo_componente_nombre: 'Motor viejo',
+      equipo_componente_nombre_oficial: 'Motor viejo oficial',
+      valor_json: {
+        causa: 'Fuga detectada',
+        accion: 'Cambio de componente',
+        prevencion: 'Revisión semanal',
+        equipo_componentes: [
+          {
+            id: 'comp-1',
+            codigo: 'C1',
+            nombre: 'Motor viejo',
+            nombre_oficial: 'Motor viejo oficial',
+            label: 'Motor viejo oficial',
+          },
+        ],
+      },
+      is_deleted: false,
+    });
+    repos.equipoComponenteRepo.find.mockResolvedValue([
+      {
+        id: 'comp-1',
+        equipo_id: 'equipo-1',
+        codigo: 'C1',
+        nombre: 'Motor NUEVO NOMBRE',
+        nombre_oficial: 'Motor nuevo oficial',
+        is_deleted: false,
+      },
+      {
+        id: 'comp-2',
+        equipo_id: 'equipo-1',
+        codigo: 'C2',
+        nombre: 'Generador',
+        nombre_oficial: 'Generador principal',
+        is_deleted: false,
+      },
+    ]);
+    repos.woRepo.save.mockImplementation(async (value) => value);
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-1' } });
+    jest.spyOn(service as any, 'enrichWorkOrder').mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00014',
+      title: 'Orden',
+      status_workflow: 'PLANNED',
+    });
+
+    await service.updateWorkOrder('wo-1', {
+      status_workflow: 'PLANNED',
+      equipo_componente_ids: ['comp-1', 'comp-2'],
+      valor_json: { accion: 'Cambio de componente' },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_componente_id: 'comp-1',
+        equipo_componente_nombre: 'Motor viejo',
+        equipo_componente_nombre_oficial: 'Motor viejo oficial',
+        valor_json: expect.objectContaining({
+          equipo_componentes: [
+            {
+              id: 'comp-1',
+              codigo: 'C1',
+              nombre: 'Motor viejo',
+              nombre_oficial: 'Motor viejo oficial',
+              label: 'Motor viejo oficial',
+            },
+            {
+              id: 'comp-2',
+              codigo: 'C2',
+              nombre: 'Generador',
+              nombre_oficial: 'Generador principal',
+              label: 'Generador principal',
+            },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('preserva los compartimientos guardados cuando la actualizacion omite ambos campos de compartimiento', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    const storedSnapshot = [
+      {
+        id: 'comp-1',
+        codigo: 'C1',
+        nombre: 'Motor',
+        nombre_oficial: 'Motor principal',
+        label: 'Motor principal',
+      },
+    ];
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00015',
+      type: 'MANTENIMIENTO',
+      equipment_id: 'equipo-1',
+      plan_id: 'plan-1',
+      title: 'Orden',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      equipo_componente_id: 'comp-1',
+      equipo_componente_nombre: 'Motor',
+      equipo_componente_nombre_oficial: 'Motor principal',
+      valor_json: {
+        causa: 'Fuga detectada',
+        accion: 'Cambio de componente',
+        prevencion: 'Revisión semanal',
+        equipo_componentes: storedSnapshot,
+      },
+      is_deleted: false,
+    });
+    repos.woRepo.save.mockImplementation(async (value) => value);
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-1' } });
+    jest.spyOn(service as any, 'enrichWorkOrder').mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00015',
+      title: 'Orden',
+      status_workflow: 'PLANNED',
+    });
+
+    await service.updateWorkOrder('wo-1', {
+      status_workflow: 'PLANNED',
+      maintenance_kind: 'PREVENTIVO',
+    } as any);
+
+    expect(repos.equipoComponenteRepo.find).not.toHaveBeenCalled();
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_componente_id: 'comp-1',
+        equipo_componente_nombre: 'Motor',
+        equipo_componente_nombre_oficial: 'Motor principal',
+        valor_json: expect.objectContaining({
+          equipo_componentes: storedSnapshot,
+        }),
+      }),
+    );
+  });
+
+  it('limpia los compartimientos cuando la actualizacion envia un arreglo vacio explicito', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      nombre: 'UG 03',
+      codigo: 'UG03',
+      is_deleted: false,
+    });
+    repos.planRepo.findOne.mockResolvedValue({
+      id: 'plan-1',
+      nombre: 'Plan 325H',
+      codigo: '325H',
+      is_deleted: false,
+    });
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00016',
+      type: 'MANTENIMIENTO',
+      equipment_id: 'equipo-1',
+      plan_id: 'plan-1',
+      title: 'Orden',
+      maintenance_kind: 'CORRECTIVO',
+      status_workflow: 'PLANNED',
+      equipo_componente_id: 'comp-1',
+      equipo_componente_nombre: 'Motor',
+      equipo_componente_nombre_oficial: 'Motor principal',
+      valor_json: {
+        causa: 'Fuga detectada',
+        accion: 'Cambio de componente',
+        prevencion: 'Revisión semanal',
+        equipo_componentes: [
+          {
+            id: 'comp-1',
+            codigo: 'C1',
+            nombre: 'Motor',
+            nombre_oficial: 'Motor principal',
+            label: 'Motor principal',
+          },
+        ],
+      },
+      is_deleted: false,
+    });
+    repos.woRepo.save.mockImplementation(async (value) => value);
+    jest
+      .spyOn(service as any, 'syncPlanFromProcedimiento')
+      .mockResolvedValue({ plan: { id: 'plan-1' } });
+    jest.spyOn(service as any, 'enrichWorkOrder').mockResolvedValue({
+      id: 'wo-1',
+      code: 'OT-A00016',
+      title: 'Orden',
+      status_workflow: 'PLANNED',
+    });
+
+    await service.updateWorkOrder('wo-1', {
+      status_workflow: 'PLANNED',
+      equipo_componente_ids: [],
+      valor_json: { accion: 'Cambio de componente' },
+    } as any);
+
+    expect(repos.woRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_componente_id: null,
+        equipo_componente_nombre: null,
+        equipo_componente_nombre_oficial: null,
+        valor_json: expect.objectContaining({ equipo_componentes: [] }),
+      }),
+    );
+  });
+
   it('rechaza crear una OT de Cebado sin equipo aunque tenga plantilla y fecha', async () => {
     repos.planRepo.findOne.mockResolvedValue({
       id: 'plan-1',
