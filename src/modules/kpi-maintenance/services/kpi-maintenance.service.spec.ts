@@ -171,6 +171,41 @@ describe('KpiMaintenanceService alerts', () => {
     ).toEqual({ 'Content-Type': 'application/json' });
   });
 
+  it('registra el incidente tecnico con el metodo, la URL y los datos enviados', async () => {
+    (service as any).securityServiceUrl = 'http://security.local/kpi_security';
+    const postJson = jest
+      .spyOn(service as any, 'postJson')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'sendTechnicalIncidentEmail')
+      .mockResolvedValue(undefined);
+
+    await (service as any).processTechnicalIncidentReport({
+      ticket: 'TCK-1',
+      module: 'kpi_maintenance',
+      method: 'post',
+      request_url: '/kpi_maintenance/equipos',
+      status_code: 500,
+      user_name: 'jenny.ramirez',
+      request_payload: { codigo: 'EQ-A00024', estado_operativo: 'CORRECTIVO' },
+      response_message: 'violates check constraint',
+    });
+
+    expect(postJson).toHaveBeenCalledWith(
+      'http://security.local/kpi_security/log-transacts',
+      expect.objectContaining({
+        typeLog: 'TECHNICAL_INCIDENT',
+        status: 'ERROR',
+        requestMethod: 'post',
+        requestUrl: '/kpi_maintenance/equipos',
+        requestPayload: {
+          codigo: 'EQ-A00024',
+          estado_operativo: 'CORRECTIVO',
+        },
+      }),
+    );
+  });
+
   it('envia correos cuando se dispara una alerta nueva', async () => {
     const sendMail = jest.fn().mockResolvedValue(undefined);
     jest

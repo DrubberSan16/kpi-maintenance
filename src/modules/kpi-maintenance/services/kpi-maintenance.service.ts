@@ -5541,6 +5541,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     status?: string;
     typeLog?: string;
     createdBy?: string | null;
+    requestMethod?: string | null;
+    requestUrl?: string | null;
+    requestPayload?: unknown;
   }) {
     if (!this.securityServiceUrl) return;
     try {
@@ -5550,6 +5553,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         typeLog: payload.typeLog ?? 'WORK_ORDER',
         description: payload.description,
         createdBy: payload.createdBy ?? null,
+        requestMethod: payload.requestMethod ?? null,
+        requestUrl: payload.requestUrl ?? null,
+        requestPayload: payload.requestPayload ?? null,
       });
     } catch (error: any) {
       if (this.isUnauthorizedServiceError(error)) {
@@ -5620,6 +5626,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       status: 'ERROR',
       typeLog: 'TECHNICAL_INCIDENT',
       createdBy,
+      requestMethod: method,
+      requestUrl,
+      requestPayload: payload.request_payload ?? payload.requestPayload ?? null,
     });
 
     await this.sendTechnicalIncidentEmail({
