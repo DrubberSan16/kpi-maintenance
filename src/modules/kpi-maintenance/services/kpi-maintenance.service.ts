@@ -2248,8 +2248,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     procedure?: ProcedimientoPlantillaEntity | null,
   ) {
     const basePayload = payload ? { ...payload } : {};
-    const horometroActual =
-      equipment?.horometro_actual != null
+    const hasRequestedHorometer =
+      Object.prototype.hasOwnProperty.call(basePayload, 'horometro_actual') &&
+      basePayload.horometro_actual !== null &&
+      basePayload.horometro_actual !== undefined &&
+      String(basePayload.horometro_actual).trim() !== '';
+    const requestedHorometer = this.extractNumericRecordValue(
+      basePayload,
+      'horometro_actual',
+    );
+    if (hasRequestedHorometer && requestedHorometer == null) {
+      throw new BadRequestException('El horometro actual de la OT no es valido.');
+    }
+    if (requestedHorometer != null && requestedHorometer < 0) {
+      throw new BadRequestException('El horometro actual no puede ser negativo.');
+    }
+    const horometroActual = hasRequestedHorometer
+      ? requestedHorometer
+      : equipment?.horometro_actual != null
         ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
         : null;
     const horasARealizar =
@@ -2272,10 +2288,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horas_a_realizar: horasARealizar,
       horas_plantilla: horasARealizar,
       horometro_proyectado: horometroProyectado,
-      horometro_equipo_referencia:
-        equipment?.horometro_actual != null
-          ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
-          : null,
+      horometro_equipo_referencia: horometroActual,
     };
   }
 
@@ -2312,12 +2325,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async syncEquipmentHorometerFromWorkOrder(
     workOrder: WorkOrderEntity,
     previousPayload?: Record<string, unknown> | null,
-    _actor?: RequestActorContext | null,
-    _manager?: EntityManager,
+    actor?: RequestActorContext | null,
+    manager?: EntityManager,
   ) {
     const equipmentId = this.firstNonEmptyString(workOrder.equipment_id);
     if (!equipmentId) {
-      return [] as string[];
+      return { notes: [] as string[], equipmentUpdated: false };
     }
     const currentPayload =
       (workOrder.valor_json as Record<string, unknown> | null | undefined) ?? {};
@@ -2328,18 +2341,78 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       currentPayload,
     );
     const notes: string[] = [];
+    let equipmentUpdated = false;
+    const currentHorometerChanged = this.haveDifferentNumericValue(
+      previousSnapshot.horometro_actual,
+      currentSnapshot.horometro_actual,
+    );
 
-    if (
-      this.haveDifferentNumericValue(
-        previousSnapshot.horometro_actual,
-        currentSnapshot.horometro_actual,
-      )
-    ) {
+    if (currentHorometerChanged) {
       notes.push(
         previousSnapshot.horometro_actual == null
           ? `Horómetro actual OT registrado: ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`
           : `Horómetro actual OT actualizado: ${this.formatHorometerHistoryValue(previousSnapshot.horometro_actual)} -> ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`,
       );
+    }
+
+    if (currentHorometerChanged && currentSnapshot.horometro_actual != null) {
+      const equipmentRepo = manager
+        ? manager.getRepository(EquipoEntity)
+        : this.equipoRepo;
+      const historyRepo = manager
+        ? manager.getRepository(EquipoHorometroHistorialEntity)
+        : this.equipoHorometroHistorialRepo;
+      const equipment = await equipmentRepo.findOne({
+        where: { id: equipmentId, is_deleted: false } as FindOptionsWhere<EquipoEntity>,
+        ...(manager ? { lock: { mode: 'pessimistic_write' as const } } : {}),
+      });
+      if (!equipment) {
+        throw new NotFoundException('Equipo no encontrado');
+      }
+      const previousEquipmentHorometer = this.toNumeric(
+        equipment.horometro_actual,
+        0,
+      );
+      const requestedHorometer = currentSnapshot.horometro_actual;
+      if (
+        this.haveDifferentNumericValue(
+          previousEquipmentHorometer,
+          requestedHorometer,
+        )
+      ) {
+        const changedAt = new Date();
+        const actorSnapshot = this.resolveHorometerActor(
+          actor,
+          workOrder.updated_by,
+        );
+        const isBackwardCorrection =
+          requestedHorometer < previousEquipmentHorometer;
+        equipment.horometro_actual = requestedHorometer;
+        equipment.fecha_ultima_lectura = changedAt;
+        equipment.updated_by = actorSnapshot.label ?? equipment.updated_by ?? null;
+        await equipmentRepo.save(equipment);
+        await historyRepo.save(
+          historyRepo.create({
+            id: randomUUID(),
+            equipo_id: equipmentId,
+            horometro_anterior: isBackwardCorrection
+              ? requestedHorometer
+              : previousEquipmentHorometer,
+            horometro_nuevo: requestedHorometer,
+            changed_at: changedAt,
+            changed_by_id: actorSnapshot.id,
+            changed_by: actorSnapshot.label,
+            fuente: 'ORDEN_TRABAJO',
+            observacion: isBackwardCorrection
+              ? `Correccion descendente desde la OT ${workOrder.code}: ${previousEquipmentHorometer} -> ${requestedHorometer}; la nueva lectura se establece como base anterior.`
+              : `Actualizacion desde la OT ${workOrder.code}.`,
+          }),
+        );
+        equipmentUpdated = true;
+        notes.push(
+          `Horómetro del equipo actualizado desde la OT: ${this.formatHorometerHistoryValue(previousEquipmentHorometer)} -> ${this.formatHorometerHistoryValue(requestedHorometer)}`,
+        );
+      }
     }
 
     if (
@@ -2355,7 +2428,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    return [...new Set(notes.filter(Boolean))];
+    return {
+      notes: [...new Set(notes.filter(Boolean))],
+      equipmentUpdated,
+    };
   }
 
   private async syncReprogrammingHorometer(options: {
@@ -2416,12 +2492,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrder.updated_by =
         actorSnapshot.username ?? workOrder.updated_by ?? null;
       const savedWorkOrder = await this.woRepo.save(workOrder);
-      const notes = await this.syncEquipmentHorometerFromWorkOrder(
+      const horometerSync = await this.syncEquipmentHorometerFromWorkOrder(
         savedWorkOrder,
         previousPayload,
         options.actor,
       );
-      const uniqueNotes = [...new Set(notes.filter(Boolean))];
+      const uniqueNotes = [
+        ...new Set(horometerSync.notes.filter(Boolean)),
+      ];
       for (const note of uniqueNotes) {
         await this.appendWorkOrderHistory(
           savedWorkOrder.id,
@@ -3332,7 +3410,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ${equipmentUrl ? `<div style="margin-top:22px;text-align:center;"><a href="${this.escapeHtml(equipmentUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#245b84;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Abrir módulo Equipos</a></div>` : ''}
       `,
       footer:
-        'El horómetro solo debe actualizarse manualmente desde el módulo Equipos. Las órdenes y programaciones utilizarán automáticamente el último valor registrado.',
+        'El horómetro puede actualizarse desde Equipos o al guardar una orden de trabajo. Las programaciones utilizarán automáticamente el último valor registrado.',
     });
   }
 
@@ -3353,7 +3431,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       `Pendientes hoy: ${input.pendingToday}`,
       equipmentUrl ? `Abrir módulo Equipos: ${equipmentUrl}` : '',
       '',
-      'Las órdenes y programaciones tomarán automáticamente el último horómetro registrado.',
+      'También puedes ajustar el horómetro desde una orden de trabajo; ese valor actualizará el equipo y será usado por las programaciones.',
     ]
       .filter((item) => item !== '')
       .join('\n');
@@ -24884,13 +24962,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           saved,
           actor,
         );
-    const horometerHistoryNotes =
-      await this.syncEquipmentHorometerFromWorkOrder(
-        saved,
-        previousHeaderPayload,
-        actor,
-        manager,
-      );
+    const horometerSync = await this.syncEquipmentHorometerFromWorkOrder(
+      saved,
+      previousHeaderPayload,
+      actor,
+      manager,
+    );
 
     return {
       workOrder: saved,
@@ -24900,7 +24977,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       resolution,
       alertaId: explicitAlertId ?? automaticAlert?.alert.id ?? null,
       alertWasAutoCreated: Boolean(automaticAlert?.created),
-      horometerHistoryNotes,
+      horometerHistoryNotes: horometerSync.notes,
+      equipmentHorometerUpdated: horometerSync.equipmentUpdated,
       programacionSync,
     };
   }
@@ -24939,6 +25017,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             alertaId: string | null;
             alertWasAutoCreated: boolean;
             horometerHistoryNotes: string[];
+            equipmentHorometerUpdated: boolean;
             programacionSync: Awaited<
               ReturnType<
                 KpiMaintenanceService['syncCebadoProgramacionFromWorkOrder']
@@ -25194,6 +25273,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           fromStatus: transactionResult!.previousStatus,
           changedBy: this.resolveActorHistoryUserId(actor),
         }),
+      );
+    }
+
+    if (transactionResult.equipmentHorometerUpdated) {
+      await safePostCommit('el recalculo de alertas por horometro de la OT', () =>
+        this.triggerAlertRecalculation('horometro-orden-trabajo'),
       );
     }
 
@@ -25490,8 +25575,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actor,
       );
     await this.publishCebadoProgramacionSync(created, createdProgramacionSync, actor);
-    const createdHorometerHistoryNotes =
+    const createdHorometerSync =
       await this.syncEquipmentHorometerFromWorkOrder(created, null, actor);
+    if (createdHorometerSync.equipmentUpdated) {
+      await this.triggerAlertRecalculation('horometro-orden-trabajo');
+    }
 
         if (created.blocked_by_work_order_id) {
       const blocker = await this.woRepo.findOne({
@@ -25522,7 +25610,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
-    for (const note of createdHorometerHistoryNotes) {
+    for (const note of createdHorometerSync.notes) {
       await this.appendWorkOrderHistory(
         created.id,
         this.normalizeWorkflowStatus(created.status_workflow),
@@ -25773,12 +25861,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actor,
       );
     await this.publishCebadoProgramacionSync(saved, updatedProgramacionSync, actor);
-    const updatedHorometerHistoryNotes =
+    const updatedHorometerSync =
       await this.syncEquipmentHorometerFromWorkOrder(
         saved,
         previousPayload,
         actor,
       );
+    if (updatedHorometerSync.equipmentUpdated) {
+      await this.triggerAlertRecalculation('horometro-orden-trabajo');
+    }
     const generatedWorkOrderAlert =
       this.normalizeMaintenanceKind(saved.maintenance_kind) === 'CEBADO'
         ? null
@@ -25829,7 +25920,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
-    for (const note of updatedHorometerHistoryNotes) {
+    for (const note of updatedHorometerSync.notes) {
       await this.appendWorkOrderHistory(
         saved.id,
         this.normalizeWorkflowStatus(saved.status_workflow),

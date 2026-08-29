@@ -629,7 +629,7 @@ describe('KpiMaintenanceService alerts', () => {
     expect(repos.equipoRepo.save).not.toHaveBeenCalled();
   });
 
-  it('la OT toma el horómetro vigente del equipo e ignora valores editables del payload', () => {
+  it('la OT usa el horómetro editable como valor final', () => {
     const result = (service as any).buildWorkOrderHorometerPayload(
       { horometro_actual: 999, horas_a_realizar: 25 },
       { horometro_actual: 150 },
@@ -638,9 +638,52 @@ describe('KpiMaintenanceService alerts', () => {
 
     expect(result).toEqual(
       expect.objectContaining({
-        horometro_actual: 150,
-        horometro_equipo_referencia: 150,
-        horometro_proyectado: 175,
+        horometro_actual: 999,
+        horometro_equipo_referencia: 999,
+        horometro_proyectado: 1024,
+      }),
+    );
+  });
+
+  it('sincroniza el horómetro editado en la OT con el equipo y su historial', async () => {
+    const equipment = {
+      id: 'equipo-1',
+      codigo: 'EQ-1',
+      horometro_actual: 125,
+      is_deleted: false,
+    };
+    repos.equipoRepo.findOne.mockResolvedValue(equipment);
+
+    const result = await (service as any).syncEquipmentHorometerFromWorkOrder(
+      {
+        id: 'wo-1',
+        code: 'OT-A00001',
+        equipment_id: 'equipo-1',
+        updated_by: 'supervisor',
+        valor_json: { horometro_actual: 90, horometro_proyectado: 115 },
+      },
+      { horometro_actual: 125, horometro_proyectado: 150 },
+      { username: 'supervisor' },
+    );
+
+    expect(repos.equipoRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ horometro_actual: 90 }),
+    );
+    expect(repos.equipoHorometroHistorialRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_id: 'equipo-1',
+        horometro_anterior: 90,
+        horometro_nuevo: 90,
+        fuente: 'ORDEN_TRABAJO',
+        observacion: expect.stringContaining('OT-A00001'),
+      }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        equipmentUpdated: true,
+        notes: expect.arrayContaining([
+          expect.stringContaining('Horómetro del equipo actualizado desde la OT'),
+        ]),
       }),
     );
   });
