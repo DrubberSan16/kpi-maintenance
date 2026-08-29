@@ -14328,11 +14328,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
       if (!e) throw new NotFoundException('Equipo no encontrado');
       const previousHorometer = this.toNumeric(e.horometro_actual, 0);
-      if (requestedHorometer < previousHorometer) {
-        throw new ConflictException(
-          `El horometro no puede retroceder (${previousHorometer} -> ${requestedHorometer}).`,
-        );
-      }
+      const isBackwardCorrection = requestedHorometer < previousHorometer;
       const horometerChanged = this.haveDifferentNumericValue(
         previousHorometer,
         requestedHorometer,
@@ -14385,13 +14381,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           historyRepo.create({
             id: randomUUID(),
             equipo_id: id,
-            horometro_anterior: previousHorometer,
+            horometro_anterior: isBackwardCorrection
+              ? requestedHorometer
+              : previousHorometer,
             horometro_nuevo: requestedHorometer,
             changed_at: savedEquipo.fecha_ultima_lectura ?? new Date(),
             changed_by_id: actorSnapshot.id,
             changed_by: actorSnapshot.label,
             fuente: 'MANUAL_EQUIPOS',
-            observacion: 'Actualizacion manual desde el modulo Equipos.',
+            observacion: isBackwardCorrection
+              ? `Correccion manual descendente desde ${previousHorometer}; la nueva lectura se establece como base anterior.`
+              : 'Actualizacion manual desde el modulo Equipos.',
           }),
         );
       }

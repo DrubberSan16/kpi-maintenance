@@ -686,6 +686,51 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 
+  it('permite corregir el horómetro hacia abajo y usa la lectura menor como nueva base', async () => {
+    const current = {
+      id: 'equipo-1',
+      codigo: 'EQ-1',
+      horometro_actual: 125,
+      es_servicio: false,
+      is_deleted: false,
+    };
+    repos.equipoRepo.findOne.mockResolvedValue(current);
+    const equipmentTxRepo = createRepo();
+    equipmentTxRepo.findOne.mockResolvedValue({ ...current });
+    const historyTxRepo = createRepo();
+    (dataSource as any).transaction = jest.fn(async (callback: any) =>
+      callback({
+        getRepository: (entity: unknown) =>
+          entity === EquipoEntity ? equipmentTxRepo : historyTxRepo,
+      }),
+    );
+    jest
+      .spyOn(service, 'triggerAlertRecalculation')
+      .mockResolvedValue({ data: { accepted: true }, message: 'OK' } as any);
+
+    await service.updateEquipoHorometro(
+      'equipo-1',
+      { horometro_actual: 90 },
+      { username: 'supervisor' },
+    );
+
+    expect(equipmentTxRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ horometro_actual: 90 }),
+    );
+    expect(historyTxRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        equipo_id: 'equipo-1',
+        horometro_anterior: 90,
+        horometro_nuevo: 90,
+        fuente: 'MANUAL_EQUIPOS',
+        observacion: expect.stringContaining('Correccion manual descendente'),
+      }),
+    );
+    expect(service.triggerAlertRecalculation).toHaveBeenCalledWith(
+      'horometro-manual',
+    );
+  });
+
   it('el endpoint dedicado de horómetro reutiliza la actualización manual auditada', async () => {
     const updateSpy = jest
       .spyOn(service, 'updateEquipo')
