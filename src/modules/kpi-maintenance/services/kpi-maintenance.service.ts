@@ -12819,9 +12819,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           null;
         const equipoCodigo = equipo?.codigo ?? equipoCodigoFallback;
         const equipoNombre = equipo?.nombre ?? equipoNombreFallback;
-        const equipoLabel = [equipoCodigo, equipoNombre]
-          .filter(Boolean)
-          .join(' - ');
+        // El listado muestra la misma identidad que el correo de la alerta.
+        const equipoLabel =
+          (equipo ? this.buildEquipmentReportLabel(equipo) : null) ??
+          this.firstNonEmptyString(payload.equipo_label) ??
+          [equipoCodigo, equipoNombre].filter(Boolean).join(' - ');
         const workOrderLabel = workOrder
           ? `${workOrder.code} ? ${workOrder.title}`
           : null;
