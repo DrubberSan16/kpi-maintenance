@@ -150,6 +150,117 @@ describe('KpiMaintenanceService alerts', () => {
     service = createService(repos, dataSource);
   });
 
+  it('arma la identidad del equipo como codigo - nombre (nombre real - modelo)', () => {
+    const label = (service as any).buildEquipmentReportLabel({
+      codigo: 'EQ-A00024',
+      nombre: 'MOTOSOLDADORA MILLER',
+      nombre_real: 'MOTOSOLDADORA MILLER BLUE',
+      modelo: 'MILLER BLUE 405',
+    });
+    expect(label).toBe(
+      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405)',
+    );
+
+    expect(
+      (service as any).buildEquipmentReportLabel({
+        codigo: 'EQ-A00010',
+        nombre: 'PERFORADORA',
+      }),
+    ).toBe('EQ-A00010 - PERFORADORA');
+
+    expect(
+      (service as any).buildEquipmentReportLabel({
+        codigo: 'EQ-A00011',
+        nombre: 'GRUA',
+        nombre_real: 'GRUA',
+        modelo: 'XCMG 25',
+      }),
+    ).toBe('EQ-A00011 - GRUA (XCMG 25)');
+  });
+
+  it('reemplaza el codigo por la identidad completa en el detalle de la alerta', async () => {
+    repos.equipoRepo.find.mockResolvedValue([
+      {
+        id: 'equipo-1',
+        codigo: 'EQ-A00024',
+        nombre: 'MOTOSOLDADORA MILLER',
+        nombre_real: 'MOTOSOLDADORA MILLER BLUE',
+        modelo: 'MILLER BLUE 405',
+      },
+    ]);
+
+    const [candidate] = await (service as any).applyEquipmentIdentityToAlertCandidates([
+      {
+        equipo_id: 'equipo-1',
+        tipo_alerta: 'PROGRAMACION_VENCIDA',
+        categoria: 'MANTENIMIENTO',
+        nivel: 'CRITICAL',
+        origen: 'PROGRAMACION',
+        detalle: 'EQ-A00024 · MPG 250H · horas faltantes 12.00',
+        payload_json: { equipo_id: 'equipo-1', equipo_codigo: 'EQ-A00024' },
+      },
+    ]);
+
+    expect(candidate.detalle).toBe(
+      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405) · MPG 250H · horas faltantes 12.00',
+    );
+    expect(candidate.payload_json.equipo_label).toBe(
+      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405)',
+    );
+    expect(candidate.payload_json.equipo_nombre_real).toBe(
+      'MOTOSOLDADORA MILLER BLUE',
+    );
+    expect(candidate.payload_json.equipo_modelo).toBe('MILLER BLUE 405');
+  });
+
+  it('envia la identidad completa del equipo en el correo de la alerta', async () => {
+    const sendMail = jest.fn().mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'resolveAlertNotificationRecipients')
+      .mockResolvedValue([
+        {
+          type: 'ADMINISTRATOR',
+          email: 'admin@example.com',
+          userId: 'u-3',
+          username: 'admin',
+          displayName: 'Administrador',
+          roleName: 'ADMINISTRADOR',
+        },
+      ]);
+    jest
+      .spyOn(service as any, 'getAlertMailTransporter')
+      .mockResolvedValue({ sendMail } as any);
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      codigo: 'EQ-A00024',
+      nombre: 'MOTOSOLDADORA MILLER',
+      nombre_real: 'MOTOSOLDADORA MILLER BLUE',
+      modelo: 'MILLER BLUE 405',
+    });
+
+    await (service as any).sendAlertTriggerEmails({
+      id: 'alert-2',
+      categoria: 'MANTENIMIENTO',
+      nivel: 'CRITICAL',
+      estado: 'ABIERTA',
+      origen: 'PROGRAMACION',
+      tipo_alerta: 'PROGRAMACION_VENCIDA',
+      detalle: 'Mantenimiento vencido',
+      referencia: 'PROGRAMACION:1',
+      referencia_tipo: 'PROGRAMACION',
+      fecha_generada: new Date('2026-08-29T10:00:00Z'),
+      equipo_id: 'equipo-1',
+      payload_json: { equipo_id: 'equipo-1', equipo_codigo: 'EQ-A00024' },
+    });
+
+    const identity =
+      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405)';
+    const mail = sendMail.mock.calls[0][0];
+    expect(mail.subject).toContain(identity);
+    expect(mail.text).toContain(`Equipo: ${identity}`);
+    expect(mail.html).toContain('MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405');
+  });
+
   it('envía el token interno solo hacia el servicio de seguridad', () => {
     (service as any).securityServiceUrl = 'http://security.local/kpi_security';
     (service as any).internalServiceToken = 'token-interno';

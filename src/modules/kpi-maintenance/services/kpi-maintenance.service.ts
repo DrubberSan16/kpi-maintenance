@@ -4592,16 +4592,135 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return false;
   }
 
+  /**
+   * Identidad completa del equipo: `codigo - nombre (nombre real - modelo)`.
+   * Los parentesis se omiten cuando no hay nombre real ni modelo, y el nombre
+   * real no se repite cuando coincide con el nombre.
+   */
   private buildEquipmentReportLabel(
-    equipment?: Pick<EquipoEntity, 'codigo' | 'nombre' | 'modelo'> | null,
+    equipment?: Pick<
+      EquipoEntity,
+      'codigo' | 'nombre' | 'modelo' | 'nombre_real'
+    > | null,
   ): string {
     if (!equipment) return 'Sin equipo';
     const codigo = this.firstNonEmptyString(equipment.codigo);
     const nombre = this.firstNonEmptyString(equipment.nombre);
+    const nombreReal = this.firstNonEmptyString(equipment.nombre_real);
     const modelo = this.firstNonEmptyString(equipment.modelo);
     const base = [codigo, nombre].filter(Boolean).join(' - ');
     if (!base) return 'Sin equipo';
-    return modelo ? `${base} (${modelo})` : base;
+    const details = [
+      nombreReal && nombreReal !== nombre ? nombreReal : null,
+      modelo,
+    ]
+      .filter(Boolean)
+      .join(' - ');
+    return details ? `${base} (${details})` : base;
+  }
+
+  /**
+   * Sustituye el codigo (o el nombre) con el que empieza el detalle de una
+   * alerta por la identidad completa del equipo.
+   */
+  private replaceAlertEquipmentPrefix(
+    detalle: string,
+    equipment: EquipoEntity,
+    label: string,
+  ) {
+    const text = String(detalle ?? '');
+    for (const candidate of [
+      equipment.codigo,
+      equipment.nombre,
+      equipment.nombre_real,
+    ]) {
+      const token = this.firstNonEmptyString(candidate);
+      if (!token || token === label || !text.startsWith(token)) continue;
+      const rest = text.slice(token.length);
+      if (rest && !/^[\s·:|,-]/.test(rest)) continue;
+      return `${label}${rest}`;
+    }
+    return text;
+  }
+
+  /**
+   * Las alertas solo identificaban al equipo por su codigo. Se resuelve la
+   * identidad completa una sola vez por lote y queda disponible para el correo,
+   * la notificacion en app y el detalle almacenado.
+   */
+  private async applyEquipmentIdentityToAlertCandidates(
+    candidates: AlertCandidate[],
+  ): Promise<AlertCandidate[]> {
+    const ids = new Set<string>();
+    const codigos = new Set<string>();
+    for (const candidate of candidates) {
+      const payload = (candidate.payload_json ?? {}) as Record<string, unknown>;
+      const equipoId = this.firstNonEmptyString(
+        candidate.equipo_id,
+        payload.equipo_id,
+      );
+      if (equipoId) ids.add(equipoId);
+      const codigo = this.firstNonEmptyString(payload.equipo_codigo);
+      if (codigo) codigos.add(codigo);
+    }
+    if (!ids.size && !codigos.size) return candidates;
+
+    let equipos: EquipoEntity[] = [];
+    try {
+      equipos = await this.equipoRepo.find({
+        where: [
+          ...(ids.size ? [{ id: In([...ids]) }] : []),
+          ...(codigos.size ? [{ codigo: In([...codigos]) }] : []),
+        ],
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudo resolver la identidad de los equipos de las alertas: ${error?.message ?? 'desconocido'}`,
+      );
+      return candidates;
+    }
+
+    const byId = new Map(equipos.map((item) => [item.id, item]));
+    const byCodigo = new Map(
+      equipos.map((item) => [
+        String(item.codigo ?? '').trim().toUpperCase(),
+        item,
+      ]),
+    );
+
+    return candidates.map((candidate) => {
+      const payload = {
+        ...((candidate.payload_json ?? {}) as Record<string, unknown>),
+      };
+      const equipoId = this.firstNonEmptyString(
+        candidate.equipo_id,
+        payload.equipo_id,
+      );
+      const codigo = this.firstNonEmptyString(payload.equipo_codigo);
+      const equipo =
+        (equipoId ? byId.get(equipoId) : undefined) ??
+        (codigo ? byCodigo.get(codigo.toUpperCase()) : undefined);
+      if (!equipo) return candidate;
+
+      const label = this.buildEquipmentReportLabel(equipo);
+      return {
+        ...candidate,
+        detalle: this.replaceAlertEquipmentPrefix(
+          candidate.detalle,
+          equipo,
+          label,
+        ),
+        payload_json: {
+          ...payload,
+          equipo_id: this.firstNonEmptyString(payload.equipo_id) ?? equipo.id,
+          equipo_codigo: equipo.codigo,
+          equipo_nombre: equipo.nombre,
+          equipo_nombre_real: equipo.nombre_real ?? null,
+          equipo_modelo: equipo.modelo ?? null,
+          equipo_label: label,
+        },
+      };
+    });
   }
 
   private isWorkOrderReservationActive(status: unknown) {
@@ -6778,12 +6897,51 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ];
   }
 
+  /**
+   * Identidad del equipo para el correo. Usa la etiqueta guardada en la alerta
+   * y, si es una alerta anterior a ese cambio, la resuelve contra el equipo.
+   */
+  private async resolveAlertEquipmentLabel(
+    row: AlertaMantenimientoEntity,
+    payload: Record<string, unknown>,
+  ) {
+    const stored = this.firstNonEmptyString(payload.equipo_label);
+    if (stored) return stored;
+
+    const equipoId = this.firstNonEmptyString(row.equipo_id, payload.equipo_id);
+    const codigo = this.firstNonEmptyString(payload.equipo_codigo);
+    if (equipoId || codigo) {
+      try {
+        const equipo = await this.equipoRepo.findOne({
+          where: equipoId ? { id: equipoId } : { codigo: codigo as string },
+        });
+        if (equipo) return this.buildEquipmentReportLabel(equipo);
+      } catch (error: any) {
+        this.logger.warn(
+          `[AlertEmail:${row.id}] No se pudo resolver la identidad del equipo: ${error?.message ?? 'desconocido'}`,
+        );
+      }
+    }
+
+    return (
+      this.firstNonEmptyString(
+        payload.equipo_codigo,
+        payload.equipo_nombre,
+        row.equipo_id,
+        'General',
+      ) ?? 'General'
+    );
+  }
+
   private buildAlertEmailSubject(
     row: AlertaMantenimientoEntity,
     recipient: AlertNotificationRecipient,
+    equipoLabel?: string | null,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
     const equipo = this.firstNonEmptyString(
+      equipoLabel,
+      payload.equipo_label,
       payload.equipo_codigo,
       payload.equipo_nombre,
       row.equipo_id,
@@ -6803,6 +6961,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private buildAlertEmailHtml(
     row: AlertaMantenimientoEntity,
     recipient: AlertNotificationRecipient,
+    equipoLabel?: string | null,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
     const alertType = this.resolveAlertPublicType(row);
@@ -6818,6 +6977,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             ? 'supervisión'
             : 'administracion');
     const equipo = this.firstNonEmptyString(
+      equipoLabel,
+      payload.equipo_label,
       payload.equipo_codigo,
       payload.equipo_nombre,
       row.equipo_id,
@@ -6870,10 +7031,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private buildAlertEmailText(
     row: AlertaMantenimientoEntity,
     recipient: AlertNotificationRecipient,
+    equipoLabel?: string | null,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
     const alertType = this.resolveAlertPublicType(row);
     const equipo = this.firstNonEmptyString(
+      equipoLabel,
+      payload.equipo_label,
       payload.equipo_codigo,
       payload.equipo_nombre,
       row.equipo_id,
@@ -6991,6 +7155,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const transporter = await this.getAlertMailTransporter();
+    const equipoLabel = await this.resolveAlertEquipmentLabel(row, payload);
     const sent: string[] = [];
     const failed: string[] = [];
     const transactionOwner = recipients.find(
@@ -7010,9 +7175,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
             replyTo: transactionOwner?.email || undefined,
-            subject: this.buildAlertEmailSubject(row, recipient),
-            html: this.buildAlertEmailHtml(row, recipient),
-            text: this.buildAlertEmailText(row, recipient),
+            subject: this.buildAlertEmailSubject(row, recipient, equipoLabel),
+            html: this.buildAlertEmailHtml(row, recipient, equipoLabel),
+            text: this.buildAlertEmailText(row, recipient, equipoLabel),
           });
           sent.push(recipient.email);
           this.logger.log(
@@ -12344,7 +12509,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...inventario,
       ...equipmentServices,
     ];
-    return candidates.map((candidate) => {
+    const normalized = candidates.map((candidate) => {
       const isCriticalMaintenanceCondition =
         candidate.origen === 'PROGRAMACION' ||
         candidate.referencia_tipo === 'EQUIPO_SERVICIO_TIEMPO';
@@ -12353,6 +12518,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
       return candidate;
     });
+
+    return this.applyEquipmentIdentityToAlertCandidates(normalized);
   }
 
   private async syncAlertCandidates(
