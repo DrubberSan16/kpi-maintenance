@@ -1581,6 +1581,158 @@ describe('KpiMaintenanceService alerts', () => {
       });
     });
   });
+
+  describe('sendMissingEquipmentAlertsToRequiredRoles', () => {
+    it('rechaza el reenvio cuando el actor no es Super Administrador', async () => {
+      await expect(
+        service.sendMissingEquipmentAlertsToRequiredRoles({
+          roleName: 'ADMINISTRADOR',
+        } as any),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(repos.alertaRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('envia solo a administradores faltantes sin repetir supervisores ya registrados', async () => {
+      const activeAlert = {
+        id: 'alert-required-roles',
+        equipo_id: 'equipo-1',
+        estado: 'EN_PROCESO',
+        fecha_generada: new Date('2026-08-29T08:00:00Z'),
+        payload_json: {
+          supervisor_alert_notifications: [
+            { email_sent: ['supervisor@example.com'] },
+          ],
+          alert_notification: {
+            email_sent: ['admin1@example.com'],
+          },
+        },
+        is_deleted: false,
+      };
+      repos.alertaRepo.find.mockResolvedValue([activeAlert]);
+      repos.alertaRepo.save.mockImplementation(async (value: any) => value);
+      jest
+        .spyOn(service as any, 'resolveAlertNotificationRecipients')
+        .mockResolvedValue([
+          {
+            type: 'SUPERVISOR',
+            email: 'supervisor@example.com',
+            roleName: 'SUPERVISOR',
+          },
+          {
+            type: 'ADMINISTRATOR',
+            email: 'admin1@example.com',
+            roleName: 'ADMINISTRADOR',
+          },
+          {
+            type: 'ADMINISTRATOR',
+            email: 'admin2@example.com',
+            roleName: 'ADMINISTRADOR',
+          },
+          {
+            type: 'ADMINISTRATOR',
+            email: 'superadmin@example.com',
+            roleName: 'SUPER ADMINISTRADOR',
+          },
+          {
+            type: 'GENERAL_MANAGER',
+            email: 'manager@example.com',
+            roleName: 'GERENTE GENERAL',
+          },
+        ]);
+      const sendSpy = jest
+        .spyOn(service as any, 'sendAlertTriggerEmails')
+        .mockResolvedValue({
+          recipients: [],
+          userIds: [],
+          recipientTokens: [],
+          sent: ['admin2@example.com', 'superadmin@example.com'],
+          failed: [],
+          skippedReason: null,
+        });
+      jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      const result = await service.sendMissingEquipmentAlertsToRequiredRoles(
+        { roleName: 'SUPER ADMINISTRADOR' } as any,
+        'test-required-roles',
+      );
+
+      expect(sendSpy).toHaveBeenCalledWith(activeAlert, [
+        expect.objectContaining({ email: 'admin2@example.com' }),
+        expect.objectContaining({ email: 'superadmin@example.com' }),
+      ]);
+      expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload_json: expect.objectContaining({
+            required_role_alert_notifications: expect.arrayContaining([
+              expect.objectContaining({
+                source: 'test-required-roles',
+                email_sent: [
+                  'admin2@example.com',
+                  'superadmin@example.com',
+                ],
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(result.data).toMatchObject({
+        alerts_scanned: 1,
+        alerts_with_missing_recipients: 1,
+        attempted_count: 2,
+        sent_count: 2,
+        failed_count: 0,
+        already_delivered_count: 2,
+      });
+    });
+
+    it('no repite destinatarios registrados por el saneamiento de perfiles', async () => {
+      repos.alertaRepo.find.mockResolvedValue([
+        {
+          id: 'alert-required-complete',
+          equipo_id: 'equipo-1',
+          estado: 'ABIERTA',
+          fecha_generada: new Date('2026-08-29T08:00:00Z'),
+          payload_json: {
+            required_role_alert_notifications: [
+              { email_sent: ['admin@example.com'] },
+            ],
+          },
+          is_deleted: false,
+        },
+      ]);
+      jest
+        .spyOn(service as any, 'resolveAlertNotificationRecipients')
+        .mockResolvedValue([
+          {
+            type: 'ADMINISTRATOR',
+            email: 'admin@example.com',
+            roleName: 'ADMINISTRADOR',
+          },
+        ]);
+      const sendSpy = jest.spyOn(service as any, 'sendAlertTriggerEmails');
+      jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      const result = await service.sendMissingEquipmentAlertsToRequiredRoles({
+        roleName: 'SUPERADMINISTRADOR',
+      } as any);
+
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(repos.alertaRepo.save).not.toHaveBeenCalled();
+      expect(result.data).toMatchObject({
+        alerts_scanned: 1,
+        alerts_with_missing_recipients: 0,
+        attempted_count: 0,
+        sent_count: 0,
+        failed_count: 0,
+        already_delivered_count: 1,
+      });
+    });
+  });
 });
 
 describe('KpiMaintenanceService analisis de lubricante', () => {

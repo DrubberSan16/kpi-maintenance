@@ -987,6 +987,22 @@ export class KpiMaintenanceController {
   @ApiTags('Alertas')
   @ApiOperation({
     summary:
+      'Enviar únicamente las alertas activas de equipo faltantes a administradores, superadministradores y supervisores',
+  })
+  @Post('alertas/enviar-faltantes-roles-requeridos')
+  sendMissingEquipmentAlertsToRequiredRoles(
+    @Body() payload: Record<string, unknown> | undefined,
+    @Req() req: any,
+  ) {
+    return this.service.sendMissingEquipmentAlertsToRequiredRoles(
+      getRequestActor(req),
+      payload?.source != null ? String(payload.source) : undefined,
+    );
+  }
+
+  @ApiTags('Alertas')
+  @ApiOperation({
+    summary:
       'Ejecutar manualmente el envio de correo de una alerta (solo Super Administrador)',
   })
   @ApiParam({ name: 'id', description: 'ID de la alerta', required: true })

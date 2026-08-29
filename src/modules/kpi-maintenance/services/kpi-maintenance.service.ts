@@ -7120,6 +7120,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     for (const key of [
       'manual_alert_notifications',
       'supervisor_alert_notifications',
+      'required_role_alert_notifications',
     ]) {
       const history = Array.isArray(payload[key]) ? payload[key] : [];
       for (const entry of history) {
@@ -7137,6 +7138,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     return [recipient.roleName, recipient.type].some((value) =>
       this.normalizeRoleName(value).includes('SUPERVISOR'),
+    );
+  }
+
+  private isRequiredEquipmentAlertRecipient(
+    recipient: AlertNotificationRecipient,
+  ) {
+    const roleName = this.normalizeRoleName(recipient.roleName);
+    return (
+      roleName.includes('SUPERVISOR') ||
+      roleName.includes('ADMINISTRADOR') ||
+      roleName.includes('ADMINISTRATIVO') ||
+      roleName === 'ADMIN' ||
+      roleName.includes('SUPER ADMIN') ||
+      roleName.includes('SUPERADMIN')
     );
   }
 
@@ -23384,6 +23399,139 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       sentCount > 0
         ? 'Alertas faltantes enviadas a supervisores'
         : 'No se encontraron alertas pendientes para supervisores',
+    );
+  }
+
+  async sendMissingEquipmentAlertsToRequiredRoles(
+    actor?: RequestActorContext | null,
+    source?: string,
+  ) {
+    if (!this.isSuperAdministratorRoleName(actor?.roleName ?? undefined)) {
+      throw new ForbiddenException(
+        'Solo el Super Administrador puede reenviar alertas faltantes a los perfiles requeridos.',
+      );
+    }
+
+    const alerts = await this.alertaRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_generada: 'DESC' },
+    });
+    const activeEquipmentAlerts = alerts.filter((alert) => {
+      const state = this.normalizeAlertState(alert.estado);
+      return (
+        Boolean(alert.equipo_id) &&
+        (state === 'ABIERTA' || state === 'EN_PROCESO')
+      );
+    });
+    const normalizedSource =
+      String(source || 'required-role-alert-backfill').trim() ||
+      'required-role-alert-backfill';
+    const executedAt = new Date();
+    let alertsWithMissingRecipients = 0;
+    let attemptedCount = 0;
+    let sentCount = 0;
+    let failedCount = 0;
+    let alreadyDeliveredCount = 0;
+    const results: Array<{
+      alert_id: string;
+      attempted_count: number;
+      sent_count: number;
+      failed_count: number;
+      skipped_reason: string | null;
+    }> = [];
+
+    for (const alert of activeEquipmentAlerts) {
+      const payload = (alert.payload_json ?? {}) as Record<string, unknown>;
+      const requiredRecipients = (
+        await this.resolveAlertNotificationRecipients(payload)
+      ).filter((recipient) =>
+        this.isRequiredEquipmentAlertRecipient(recipient),
+      );
+      const alreadyDelivered = this.getRecordedAlertEmailRecipients(payload);
+      alreadyDeliveredCount += requiredRecipients.filter((recipient) =>
+        alreadyDelivered.has(recipient.email),
+      ).length;
+      const missingRecipients = requiredRecipients.filter(
+        (recipient) => !alreadyDelivered.has(recipient.email),
+      );
+      if (!missingRecipients.length) continue;
+
+      alertsWithMissingRecipients += 1;
+      attemptedCount += missingRecipients.length;
+      const emailResult = await this.sendAlertTriggerEmails(
+        alert,
+        missingRecipients,
+      );
+      sentCount += emailResult.sent.length;
+      failedCount += emailResult.failed.length;
+
+      const historyEntry = {
+        executed_at: executedAt.toISOString(),
+        actor_user_id: actor?.userId ?? null,
+        actor_username: actor?.username ?? null,
+        actor_name: actor?.displayName ?? null,
+        actor_email: actor?.email ?? null,
+        source: normalizedSource,
+        recipients: missingRecipients.map((recipient) => ({
+          type: recipient.type,
+          email: recipient.email,
+          user_id: recipient.userId ?? null,
+          username: recipient.username ?? null,
+          role_name: recipient.roleName ?? null,
+        })),
+        email_sent: emailResult.sent,
+        email_failed: emailResult.failed,
+        skipped_reason: emailResult.skippedReason,
+      };
+      const previousHistory = Array.isArray(
+        payload.required_role_alert_notifications,
+      )
+        ? [
+            ...(payload.required_role_alert_notifications as Record<
+              string,
+              unknown
+            >[]),
+          ]
+        : [];
+      alert.payload_json = {
+        ...payload,
+        required_role_alert_notifications: [
+          ...previousHistory,
+          historyEntry,
+        ].slice(-20),
+      };
+      await this.alertaRepo.save(alert);
+
+      results.push({
+        alert_id: alert.id,
+        attempted_count: missingRecipients.length,
+        sent_count: emailResult.sent.length,
+        failed_count: emailResult.failed.length,
+        skipped_reason: emailResult.skippedReason,
+      });
+    }
+
+    await this.writeSecurityLog({
+      typeLog: 'ALERTA_ROLES_REQUERIDOS_REENVIADA',
+      description: `Reenvio de alertas activas de equipo a perfiles requeridos. Alertas=${alertsWithMissingRecipients}, intentos=${attemptedCount}, exitosas=${sentCount}, fallidas=${failedCount}`,
+      createdBy:
+        actor?.displayName || actor?.username || actor?.userId || null,
+    });
+
+    return this.wrap(
+      {
+        alerts_scanned: activeEquipmentAlerts.length,
+        alerts_with_missing_recipients: alertsWithMissingRecipients,
+        attempted_count: attemptedCount,
+        sent_count: sentCount,
+        failed_count: failedCount,
+        already_delivered_count: alreadyDeliveredCount,
+        executed_at: executedAt.toISOString(),
+        results,
+      },
+      sentCount > 0
+        ? 'Alertas faltantes enviadas a los perfiles requeridos'
+        : 'No se encontraron alertas pendientes para los perfiles requeridos',
     );
   }
 
