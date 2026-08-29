@@ -971,6 +971,22 @@ export class KpiMaintenanceController {
   @ApiTags('Alertas')
   @ApiOperation({
     summary:
+      'Enviar a supervisores únicamente las alertas activas de equipo que aún no recibieron',
+  })
+  @Post('alertas/enviar-faltantes-supervisores')
+  sendMissingEquipmentAlertsToSupervisors(
+    @Body() payload: Record<string, unknown> | undefined,
+    @Req() req: any,
+  ) {
+    return this.service.sendMissingEquipmentAlertsToSupervisors(
+      getRequestActor(req),
+      payload?.source != null ? String(payload.source) : undefined,
+    );
+  }
+
+  @ApiTags('Alertas')
+  @ApiOperation({
+    summary:
       'Ejecutar manualmente el envio de correo de una alerta (solo Super Administrador)',
   })
   @ApiParam({ name: 'id', description: 'ID de la alerta', required: true })

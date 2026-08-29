@@ -368,6 +368,7 @@ type AlertNotificationRecipient = {
     | 'GENERAL_MANAGER'
     | 'ADMINISTRATOR'
     | 'SUPER_ADMINISTRATOR'
+    | 'SUPERVISOR'
     | 'WAREHOUSE_STAFF';
   email: string;
   userId?: string | null;
@@ -6418,6 +6419,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         roleName.includes(expected),
       ),
     );
+    const supervisorUsers = this.findSecurityUsersByRole(users, (roleName) =>
+      roleName.includes('SUPERVISOR'),
+    );
     const adminUsers = this.findSecurityUsersByRole(users, (roleName) =>
       ['ADMINISTRADOR', 'ADMIN', 'SUPER ADMIN', 'SUPERADMIN'].some((expected) =>
         roleName.includes(expected),
@@ -6478,6 +6482,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       pushRecipient('GENERAL_MANAGER', this.alertGeneralManagerEmail, {
         displayName: 'Gerencia General',
         roleName: 'GERENTE GENERAL',
+      });
+    }
+
+    for (const supervisorUser of supervisorUsers) {
+      pushRecipient('SUPERVISOR', supervisorUser.email, {
+        userId: supervisorUser.id,
+        username: supervisorUser.nameUser,
+        displayName: supervisorUser.nameSurname ?? supervisorUser.nameUser,
+        roleName: supervisorUser.roleName,
       });
     }
 
@@ -6781,7 +6794,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ? 'Proceso transaccionado'
         : recipient.type === 'GENERAL_MANAGER'
           ? 'Gerencia general'
-          : 'Administrador';
+          : recipient.type === 'SUPERVISOR'
+            ? 'Supervisión'
+            : 'Administrador';
     return `[Alerta ${this.getAlertEmailLevelLabel(row.nivel)}] ${equipo} · ${row.categoria} · ${kind}`;
   }
 
@@ -6799,7 +6814,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ? 'equipo operativo'
         : recipient.type === 'GENERAL_MANAGER'
           ? 'gerencia general'
-          : 'administracion');
+          : recipient.type === 'SUPERVISOR'
+            ? 'supervisión'
+            : 'administracion');
     const equipo = this.firstNonEmptyString(
       payload.equipo_codigo,
       payload.equipo_nombre,
@@ -6951,9 +6968,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.mailTransporter;
   }
 
-  private async sendAlertTriggerEmails(row: AlertaMantenimientoEntity) {
+  private async sendAlertTriggerEmails(
+    row: AlertaMantenimientoEntity,
+    recipientOverride?: AlertNotificationRecipient[],
+  ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
-    const recipients = await this.resolveAlertNotificationRecipients(payload);
+    const recipients =
+      recipientOverride ??
+      (await this.resolveAlertNotificationRecipients(payload));
     if (!recipients.length) {
       this.logger.warn(
         `[AlertEmail:${row.id}] Sin destinatarios resueltos para la alerta.`,
@@ -7074,6 +7096,48 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `No se pudieron emitir notificaciones de alerta ${row.id}: ${error?.message ?? 'desconocido'}`,
       );
     }
+  }
+
+  private getRecordedAlertEmailRecipients(
+    payload: Record<string, unknown>,
+  ) {
+    const recorded = new Set<string>();
+    const append = (values: unknown) => {
+      if (!Array.isArray(values)) return;
+      for (const value of values) {
+        const email = this.normalizeEmail(value);
+        if (email) recorded.add(email);
+      }
+    };
+
+    const triggered =
+      payload.alert_notification &&
+      typeof payload.alert_notification === 'object'
+        ? (payload.alert_notification as Record<string, unknown>)
+        : {};
+    append(triggered.email_sent);
+
+    for (const key of [
+      'manual_alert_notifications',
+      'supervisor_alert_notifications',
+    ]) {
+      const history = Array.isArray(payload[key]) ? payload[key] : [];
+      for (const entry of history) {
+        if (entry && typeof entry === 'object') {
+          append((entry as Record<string, unknown>).email_sent);
+        }
+      }
+    }
+
+    return recorded;
+  }
+
+  private isSupervisorAlertRecipient(
+    recipient: AlertNotificationRecipient,
+  ) {
+    return [recipient.roleName, recipient.type].some((value) =>
+      this.normalizeRoleName(value).includes('SUPERVISOR'),
+    );
   }
 
   private normalizeStringArray(values?: string[] | null) {
@@ -23186,6 +23250,140 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       emailResult.sent.length > 0
         ? 'Alerta ejecutada manualmente y correo enviado'
         : 'Alerta ejecutada manualmente sin envios de correo',
+    );
+  }
+
+  async sendMissingEquipmentAlertsToSupervisors(
+    actor?: RequestActorContext | null,
+    source?: string,
+  ) {
+    if (!this.isSuperAdministratorRoleName(actor?.roleName ?? undefined)) {
+      throw new ForbiddenException(
+        'Solo el Super Administrador puede reenviar alertas faltantes a supervisores.',
+      );
+    }
+
+    const alerts = await this.alertaRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_generada: 'DESC' },
+    });
+    const activeEquipmentAlerts = alerts.filter((alert) => {
+      const state = this.normalizeAlertState(alert.estado);
+      return (
+        Boolean(alert.equipo_id) &&
+        (state === 'ABIERTA' || state === 'EN_PROCESO')
+      );
+    });
+    const normalizedSource =
+      String(source || 'supervisor-alert-backfill').trim() ||
+      'supervisor-alert-backfill';
+    const executedAt = new Date();
+    let alertsWithMissingRecipients = 0;
+    let attemptedCount = 0;
+    let sentCount = 0;
+    let failedCount = 0;
+    let alreadyDeliveredCount = 0;
+    const results: Array<{
+      alert_id: string;
+      attempted_count: number;
+      sent_count: number;
+      failed_count: number;
+      skipped_reason: string | null;
+    }> = [];
+
+    for (const alert of activeEquipmentAlerts) {
+      const payload = (alert.payload_json ?? {}) as Record<string, unknown>;
+      const allRecipients = await this.resolveAlertNotificationRecipients(
+        payload,
+      );
+      const supervisorRecipients = allRecipients.filter((recipient) =>
+        this.isSupervisorAlertRecipient(recipient),
+      );
+      const alreadyDelivered = this.getRecordedAlertEmailRecipients(payload);
+      alreadyDeliveredCount += supervisorRecipients.filter((recipient) =>
+        alreadyDelivered.has(recipient.email),
+      ).length;
+      const missingRecipients = supervisorRecipients.filter(
+        (recipient) => !alreadyDelivered.has(recipient.email),
+      );
+      if (!missingRecipients.length) continue;
+
+      alertsWithMissingRecipients += 1;
+      attemptedCount += missingRecipients.length;
+      const emailResult = await this.sendAlertTriggerEmails(
+        alert,
+        missingRecipients,
+      );
+      sentCount += emailResult.sent.length;
+      failedCount += emailResult.failed.length;
+
+      const historyEntry = {
+        executed_at: executedAt.toISOString(),
+        actor_user_id: actor?.userId ?? null,
+        actor_username: actor?.username ?? null,
+        actor_name: actor?.displayName ?? null,
+        actor_email: actor?.email ?? null,
+        source: normalizedSource,
+        recipients: missingRecipients.map((recipient) => ({
+          type: recipient.type,
+          email: recipient.email,
+          user_id: recipient.userId ?? null,
+          username: recipient.username ?? null,
+          role_name: recipient.roleName ?? null,
+        })),
+        email_sent: emailResult.sent,
+        email_failed: emailResult.failed,
+        skipped_reason: emailResult.skippedReason,
+      };
+      const previousHistory = Array.isArray(
+        payload.supervisor_alert_notifications,
+      )
+        ? [
+            ...(payload.supervisor_alert_notifications as Record<
+              string,
+              unknown
+            >[]),
+          ]
+        : [];
+      alert.payload_json = {
+        ...payload,
+        supervisor_alert_notifications: [
+          ...previousHistory,
+          historyEntry,
+        ].slice(-20),
+      };
+      await this.alertaRepo.save(alert);
+
+      results.push({
+        alert_id: alert.id,
+        attempted_count: missingRecipients.length,
+        sent_count: emailResult.sent.length,
+        failed_count: emailResult.failed.length,
+        skipped_reason: emailResult.skippedReason,
+      });
+    }
+
+    await this.writeSecurityLog({
+      typeLog: 'ALERTA_SUPERVISORES_REENVIADA',
+      description: `Reenvio de alertas activas de equipo a supervisores. Alertas=${alertsWithMissingRecipients}, intentos=${attemptedCount}, exitosas=${sentCount}, fallidas=${failedCount}`,
+      createdBy:
+        actor?.displayName || actor?.username || actor?.userId || null,
+    });
+
+    return this.wrap(
+      {
+        alerts_scanned: activeEquipmentAlerts.length,
+        alerts_with_missing_recipients: alertsWithMissingRecipients,
+        attempted_count: attemptedCount,
+        sent_count: sentCount,
+        failed_count: failedCount,
+        already_delivered_count: alreadyDeliveredCount,
+        executed_at: executedAt.toISOString(),
+        results,
+      },
+      sentCount > 0
+        ? 'Alertas faltantes enviadas a supervisores'
+        : 'No se encontraron alertas pendientes para supervisores',
     );
   }
 

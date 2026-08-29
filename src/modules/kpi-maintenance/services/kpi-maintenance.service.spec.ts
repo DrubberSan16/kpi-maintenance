@@ -267,7 +267,7 @@ describe('KpiMaintenanceService alerts', () => {
     ]);
   });
 
-  it('resuelve el correo del usuario transaccionante desde usuarios y expande la lista de gerencia general', async () => {
+  it('resuelve el actor y agrega gerencia, administradores, superadministradores y todos los supervisores activos', async () => {
     jest.spyOn(service as any, 'fetchSecurityUsers').mockResolvedValue([
       {
         id: 'u-actor',
@@ -309,6 +309,26 @@ describe('KpiMaintenanceService alerts', () => {
         status: 'ACTIVE',
         isDeleted: false,
       },
+      {
+        id: 'u-super',
+        nameUser: 'superadmin',
+        nameSurname: 'Super Administrador',
+        email: 'superadmin@example.com',
+        roleName: 'SUPER ADMINISTRADOR',
+        roleNames: ['SUPER ADMINISTRADOR'],
+        status: 'ACTIVE',
+        isDeleted: false,
+      },
+      {
+        id: 'u-supervisor-2',
+        nameUser: 'supervisor2',
+        nameSurname: 'Supervisor Dos',
+        email: 'supervisor2@example.com',
+        roleName: 'SUPERVISOR',
+        roleNames: ['SUPERVISOR'],
+        status: 'ACTIVE',
+        isDeleted: false,
+      },
     ]);
 
     const recipients = await (service as any).resolveAlertNotificationRecipients({
@@ -338,6 +358,16 @@ describe('KpiMaintenanceService alerts', () => {
           type: 'ADMINISTRATOR',
           email: 'admin@example.com',
           userId: 'u-admin',
+        }),
+        expect.objectContaining({
+          type: 'ADMINISTRATOR',
+          email: 'superadmin@example.com',
+          userId: 'u-super',
+        }),
+        expect.objectContaining({
+          type: 'SUPERVISOR',
+          email: 'supervisor2@example.com',
+          userId: 'u-supervisor-2',
         }),
       ]),
     );
@@ -1387,6 +1417,168 @@ describe('KpiMaintenanceService alerts', () => {
         'SMTP no configurado para envio de alertas.',
       );
       expect(result.message).not.toMatch(/correo enviado/);
+    });
+  });
+
+  describe('sendMissingEquipmentAlertsToSupervisors', () => {
+    it('rechaza el reenvio cuando el actor no es Super Administrador', async () => {
+      await expect(
+        service.sendMissingEquipmentAlertsToSupervisors({
+          roleName: 'SUPERVISOR',
+        } as any),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(repos.alertaRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('envia solo a los supervisores faltantes de alertas activas de equipo y registra la auditoria', async () => {
+      const activeAlert = {
+        id: 'alert-active',
+        equipo_id: 'equipo-1',
+        estado: 'ABIERTA',
+        fecha_generada: new Date('2026-08-29T08:00:00Z'),
+        payload_json: {
+          alert_notification: {
+            email_sent: ['supervisor1@example.com', 'admin@example.com'],
+          },
+        },
+        is_deleted: false,
+      };
+      repos.alertaRepo.find.mockResolvedValue([
+        activeAlert,
+        {
+          id: 'alert-closed',
+          equipo_id: 'equipo-2',
+          estado: 'CERRADA',
+          fecha_generada: new Date('2026-08-28T08:00:00Z'),
+          payload_json: {},
+          is_deleted: false,
+        },
+      ]);
+      repos.alertaRepo.save.mockImplementation(async (value: any) => value);
+      jest
+        .spyOn(service as any, 'resolveAlertNotificationRecipients')
+        .mockResolvedValue([
+          {
+            type: 'TRANSACTION_OWNER',
+            email: 'supervisor1@example.com',
+            roleName: 'SUPERVISOR',
+          },
+          {
+            type: 'SUPERVISOR',
+            email: 'supervisor2@example.com',
+            roleName: 'SUPERVISOR',
+          },
+          {
+            type: 'ADMINISTRATOR',
+            email: 'admin@example.com',
+            roleName: 'ADMINISTRADOR',
+          },
+        ]);
+      const sendSpy = jest
+        .spyOn(service as any, 'sendAlertTriggerEmails')
+        .mockResolvedValue({
+          recipients: [
+            {
+              type: 'SUPERVISOR',
+              email: 'supervisor2@example.com',
+              roleName: 'SUPERVISOR',
+            },
+          ],
+          userIds: [],
+          recipientTokens: [],
+          sent: ['supervisor2@example.com'],
+          failed: [],
+          skippedReason: null,
+        });
+      const auditSpy = jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      const result = await service.sendMissingEquipmentAlertsToSupervisors(
+        {
+          userId: 'super-1',
+          username: 'superadmin',
+          displayName: 'Super Administrador',
+          roleName: 'SUPER ADMINISTRADOR',
+        } as any,
+        'test-backfill',
+      );
+
+      expect(sendSpy).toHaveBeenCalledWith(activeAlert, [
+        expect.objectContaining({
+          email: 'supervisor2@example.com',
+          type: 'SUPERVISOR',
+        }),
+      ]);
+      expect(repos.alertaRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'alert-active',
+          payload_json: expect.objectContaining({
+            supervisor_alert_notifications: expect.arrayContaining([
+              expect.objectContaining({
+                source: 'test-backfill',
+                email_sent: ['supervisor2@example.com'],
+                email_failed: [],
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(auditSpy).toHaveBeenCalled();
+      expect(result.data).toMatchObject({
+        alerts_scanned: 1,
+        alerts_with_missing_recipients: 1,
+        attempted_count: 1,
+        sent_count: 1,
+        failed_count: 0,
+        already_delivered_count: 1,
+      });
+    });
+
+    it('no repite correos de supervisores ya registrados como enviados', async () => {
+      repos.alertaRepo.find.mockResolvedValue([
+        {
+          id: 'alert-complete',
+          equipo_id: 'equipo-1',
+          estado: 'EN_PROCESO',
+          fecha_generada: new Date('2026-08-29T08:00:00Z'),
+          payload_json: {
+            supervisor_alert_notifications: [
+              { email_sent: ['supervisor@example.com'] },
+            ],
+          },
+          is_deleted: false,
+        },
+      ]);
+      jest
+        .spyOn(service as any, 'resolveAlertNotificationRecipients')
+        .mockResolvedValue([
+          {
+            type: 'SUPERVISOR',
+            email: 'supervisor@example.com',
+            roleName: 'SUPERVISOR',
+          },
+        ]);
+      const sendSpy = jest.spyOn(service as any, 'sendAlertTriggerEmails');
+      jest
+        .spyOn(service as any, 'writeSecurityLog')
+        .mockResolvedValue(undefined);
+
+      const result = await service.sendMissingEquipmentAlertsToSupervisors({
+        roleName: 'SUPERADMINISTRADOR',
+      } as any);
+
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(repos.alertaRepo.save).not.toHaveBeenCalled();
+      expect(result.data).toMatchObject({
+        alerts_scanned: 1,
+        alerts_with_missing_recipients: 0,
+        attempted_count: 0,
+        sent_count: 0,
+        failed_count: 0,
+        already_delivered_count: 1,
+      });
     });
   });
 });
