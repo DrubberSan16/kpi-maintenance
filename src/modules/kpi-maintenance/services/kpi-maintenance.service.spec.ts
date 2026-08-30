@@ -770,7 +770,7 @@ describe('KpiMaintenanceService alerts', () => {
     expect(repos.equipoRepo.save).not.toHaveBeenCalled();
   });
 
-  it('la OT usa el horómetro editable como valor final', () => {
+  it('la OT conserva solo el horómetro editable y su valor anterior', () => {
     const result = (service as any).buildWorkOrderHorometerPayload(
       { horometro_actual: 999, horas_a_realizar: 25 },
       { horometro_actual: 150 },
@@ -780,10 +780,13 @@ describe('KpiMaintenanceService alerts', () => {
     expect(result).toEqual(
       expect.objectContaining({
         horometro_actual: 999,
-        horometro_equipo_referencia: 999,
-        horometro_proyectado: 1024,
+        horometro_anterior: 150,
       }),
     );
+    expect(result).not.toHaveProperty('horas_a_realizar');
+    expect(result).not.toHaveProperty('horas_plantilla');
+    expect(result).not.toHaveProperty('horometro_proyectado');
+    expect(result).not.toHaveProperty('horometro_equipo_referencia');
   });
 
   it('sincroniza el horómetro editado en la OT con el equipo y su historial', async () => {
@@ -801,9 +804,9 @@ describe('KpiMaintenanceService alerts', () => {
         code: 'OT-A00001',
         equipment_id: 'equipo-1',
         updated_by: 'supervisor',
-        valor_json: { horometro_actual: 90, horometro_proyectado: 115 },
+        valor_json: { horometro_anterior: 125, horometro_actual: 90 },
       },
-      { horometro_actual: 125, horometro_proyectado: 150 },
+      { horometro_anterior: 100, horometro_actual: 125 },
       { username: 'supervisor' },
     );
 
@@ -813,7 +816,7 @@ describe('KpiMaintenanceService alerts', () => {
     expect(repos.equipoHorometroHistorialRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({
         equipo_id: 'equipo-1',
-        horometro_anterior: 90,
+        horometro_anterior: 125,
         horometro_nuevo: 90,
         fuente: 'ORDEN_TRABAJO',
         observacion: expect.stringContaining('OT-A00001'),

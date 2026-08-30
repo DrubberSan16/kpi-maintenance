@@ -2246,9 +2246,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private buildWorkOrderHorometerPayload(
     payload: Record<string, unknown> | null | undefined,
     equipment?: EquipoEntity | null,
-    procedure?: ProcedimientoPlantillaEntity | null,
+    _procedure?: ProcedimientoPlantillaEntity | null,
   ) {
-    const basePayload = payload ? { ...payload } : {};
+    const {
+      horas_a_realizar: _horasARealizar,
+      horas_plantilla: _horasPlantilla,
+      horometro_proyectado: _horometroProyectado,
+      horometro_equipo_referencia: _horometroEquipoReferencia,
+      ...basePayload
+    } = payload ? { ...payload } : {};
     const hasRequestedHorometer =
       Object.prototype.hasOwnProperty.call(basePayload, 'horometro_actual') &&
       basePayload.horometro_actual !== null &&
@@ -2269,27 +2275,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : equipment?.horometro_actual != null
         ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
         : null;
-    const horasARealizar =
-      this.extractNumericRecordValue(
-        basePayload,
-        'horas_a_realizar',
-        'horas_plantilla',
-      ) ??
-      (procedure?.frecuencia_horas != null
-        ? Number(this.toNumeric(procedure.frecuencia_horas, 0).toFixed(2))
-        : null);
-    const horometroProyectado =
-      horometroActual != null && horasARealizar != null
-        ? Number((horometroActual + horasARealizar).toFixed(2))
+    const equipmentHorometer =
+      equipment?.horometro_actual != null
+        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
         : null;
+    const storedPreviousHorometer = this.extractNumericRecordValue(
+      basePayload,
+      'horometro_anterior',
+    );
+    const horometroAnterior =
+      horometroActual != null &&
+      equipmentHorometer != null &&
+      this.haveDifferentNumericValue(horometroActual, equipmentHorometer)
+        ? equipmentHorometer
+        : storedPreviousHorometer ?? equipmentHorometer;
 
     return {
       ...basePayload,
+      horometro_anterior: horometroAnterior,
       horometro_actual: horometroActual,
-      horas_a_realizar: horasARealizar,
-      horas_plantilla: horasARealizar,
-      horometro_proyectado: horometroProyectado,
-      horometro_equipo_referencia: horometroActual,
     };
   }
 
@@ -2301,14 +2305,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         payload,
         'horometro_actual',
       ),
-      horas_a_realizar: this.extractNumericRecordValue(
+      horometro_anterior: this.extractNumericRecordValue(
         payload,
-        'horas_a_realizar',
-        'horas_plantilla',
-      ),
-      horometro_proyectado: this.extractNumericRecordValue(
-        payload,
-        'horometro_proyectado',
+        'horometro_anterior',
       ),
     };
   }
@@ -2396,9 +2395,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           historyRepo.create({
             id: randomUUID(),
             equipo_id: equipmentId,
-            horometro_anterior: isBackwardCorrection
-              ? requestedHorometer
-              : previousEquipmentHorometer,
+            horometro_anterior: previousEquipmentHorometer,
             horometro_nuevo: requestedHorometer,
             changed_at: changedAt,
             changed_by_id: actorSnapshot.id,
@@ -2414,19 +2411,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           `Horómetro del equipo actualizado desde la OT: ${this.formatHorometerHistoryValue(previousEquipmentHorometer)} -> ${this.formatHorometerHistoryValue(requestedHorometer)}`,
         );
       }
-    }
-
-    if (
-      this.haveDifferentNumericValue(
-        previousSnapshot.horometro_proyectado,
-        currentSnapshot.horometro_proyectado,
-      )
-    ) {
-      notes.push(
-        previousSnapshot.horometro_proyectado == null
-          ? `Horómetro proyectado OT calculado: ${this.formatHorometerHistoryValue(currentSnapshot.horometro_proyectado)}`
-          : `Horómetro proyectado OT actualizado: ${this.formatHorometerHistoryValue(previousSnapshot.horometro_proyectado)} -> ${this.formatHorometerHistoryValue(currentSnapshot.horometro_proyectado)}`,
-      );
     }
 
     return {
@@ -21625,8 +21609,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         consumo_bodegas: consumptionWarehouseLabels.join(' | ') || null,
         is_maintenance: this.isMaintenanceWorkOrderType(workOrder.type),
         horometro_actual_ot: horometerSnapshot.horometro_actual,
-        horas_a_realizar_ot: horometerSnapshot.horas_a_realizar,
-        horometro_proyectado_ot: horometerSnapshot.horometro_proyectado,
       });
     }
 
