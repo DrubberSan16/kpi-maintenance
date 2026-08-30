@@ -2246,11 +2246,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private buildWorkOrderHorometerPayload(
     payload: Record<string, unknown> | null | undefined,
     equipment?: EquipoEntity | null,
-    _procedure?: ProcedimientoPlantillaEntity | null,
+    procedure?: ProcedimientoPlantillaEntity | null,
   ) {
     const {
-      horas_a_realizar: _horasARealizar,
-      horas_plantilla: _horasPlantilla,
       horometro_proyectado: _horometroProyectado,
       horometro_equipo_referencia: _horometroEquipoReferencia,
       ...basePayload
@@ -2275,6 +2273,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : equipment?.horometro_actual != null
         ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
         : null;
+    const horasARealizar =
+      this.extractNumericRecordValue(
+        basePayload,
+        'horas_a_realizar',
+        'horas_plantilla',
+      ) ??
+      (procedure?.frecuencia_horas != null
+        ? Number(this.toNumeric(procedure.frecuencia_horas, 0).toFixed(2))
+        : null);
     const equipmentHorometer =
       equipment?.horometro_actual != null
         ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
@@ -2294,6 +2301,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...basePayload,
       horometro_anterior: horometroAnterior,
       horometro_actual: horometroActual,
+      horas_a_realizar: horasARealizar,
+      horas_plantilla: horasARealizar,
     };
   }
 
@@ -2308,6 +2317,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horometro_anterior: this.extractNumericRecordValue(
         payload,
         'horometro_anterior',
+      ),
+      horas_a_realizar: this.extractNumericRecordValue(
+        payload,
+        'horas_a_realizar',
+        'horas_plantilla',
       ),
     };
   }
@@ -2453,25 +2467,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (workOrder) {
       const previousPayload =
         ((workOrder.valor_json ?? {}) as Record<string, unknown>) ?? {};
-      const previousHours = this.firstNullableNumeric(
-        previousPayload.horas_a_realizar,
-        previousPayload.horas_plantilla,
-      );
+      const {
+        horometro_proyectado: _horometroProyectado,
+        horometro_equipo_referencia: _horometroEquipoReferencia,
+        ...baseWorkOrderPayload
+      } = previousPayload;
       const nextPayload = {
-        ...previousPayload,
+        ...baseWorkOrderPayload,
         horometro_actual: currentHorometer,
-        horometro_equipo_referencia: currentHorometer,
         horometro_actual_reprogramacion: currentHorometer,
         horometro_actual_reprogramado_at: nowIso,
         reprogramado_horometro_at: nowIso,
         reprogramado_horometro_por: actorSnapshot.username ?? null,
         reprogramado_horometro_por_user_id: actorSnapshot.userId ?? null,
       } as Record<string, unknown>;
-      if (previousHours != null) {
-        nextPayload.horometro_proyectado = Number(
-          (currentHorometer + previousHours).toFixed(2),
-        );
-      }
 
       workOrder.valor_json = nextPayload;
       workOrder.updated_by =
@@ -21609,6 +21618,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         consumo_bodegas: consumptionWarehouseLabels.join(' | ') || null,
         is_maintenance: this.isMaintenanceWorkOrderType(workOrder.type),
         horometro_actual_ot: horometerSnapshot.horometro_actual,
+        horas_a_realizar_ot: horometerSnapshot.horas_a_realizar,
       });
     }
 

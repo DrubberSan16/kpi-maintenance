@@ -770,7 +770,7 @@ describe('KpiMaintenanceService alerts', () => {
     expect(repos.equipoRepo.save).not.toHaveBeenCalled();
   });
 
-  it('la OT conserva solo el horómetro editable y su valor anterior', () => {
+  it('la OT conserva el horómetro editable, su valor anterior y las horas-hombre', () => {
     const result = (service as any).buildWorkOrderHorometerPayload(
       { horometro_actual: 999, horas_a_realizar: 25 },
       { horometro_actual: 150 },
@@ -781,10 +781,10 @@ describe('KpiMaintenanceService alerts', () => {
       expect.objectContaining({
         horometro_actual: 999,
         horometro_anterior: 150,
+        horas_a_realizar: 25,
+        horas_plantilla: 25,
       }),
     );
-    expect(result).not.toHaveProperty('horas_a_realizar');
-    expect(result).not.toHaveProperty('horas_plantilla');
     expect(result).not.toHaveProperty('horometro_proyectado');
     expect(result).not.toHaveProperty('horometro_equipo_referencia');
   });
