@@ -178,6 +178,50 @@ describe('KpiMaintenanceService alerts', () => {
     ).toBe('EQ-A00011 - GRUA (XCMG 25)');
   });
 
+  it('resume el inventario mensual con nomenclatura clara y corte a la fecha elegida', async () => {
+    (dataSource.query as jest.Mock).mockResolvedValueOnce([
+      {
+        producto_id: 'product-1',
+        bodega_id: 'warehouse-1',
+        producto_codigo: 'MAT-001',
+        producto_nombre: 'Filtro de aceite',
+        producto_descripcion: 'Motor principal',
+        ingresos: '12',
+        salidas: '5',
+        stock_actual: '19',
+      },
+      {
+        producto_id: 'product-1',
+        bodega_id: 'warehouse-2',
+        producto_codigo: 'MAT-001',
+        producto_nombre: 'Filtro de aceite',
+        producto_descripcion: 'Motor principal',
+        ingresos: '3',
+        salidas: '2',
+        stock_actual: '8',
+      },
+    ]);
+
+    const result = await service.getMonthlyInventoryReport(
+      { fecha: '2026-08-18' } as any,
+      null,
+    );
+
+    expect(dataSource.query).toHaveBeenCalledWith(
+      expect.stringContaining('kardex.fecha <= $2::date'),
+      ['2026-08-01', '2026-08-18'],
+    );
+    expect((result as any).data.inventory).toEqual([
+      expect.objectContaining({
+        material_label: 'MAT-001 - Filtro de aceite (Motor principal)',
+        inventario_inicial: 19,
+        ingresos: 15,
+        salidas: 7,
+        inventario_actual: 27,
+      }),
+    ]);
+  });
+
   it('reemplaza el codigo por la identidad completa en el detalle de la alerta', async () => {
     repos.equipoRepo.find.mockResolvedValue([
       {

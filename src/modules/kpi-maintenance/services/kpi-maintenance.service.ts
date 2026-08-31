@@ -21334,6 +21334,138 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async getMonthlyInventoryReport(
+    query: DailyOperationsReportQueryDto,
+    sucursalId?: string | null,
+  ) {
+    const dateRange = this.buildDailyOperationsDateRange(query);
+    const monthStart = `${dateRange.fecha.slice(0, 7)}-01`;
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+    const rows = await this.dataSource.query(
+      `
+        WITH monthly_movements AS (
+          SELECT
+            kardex.producto_id,
+            kardex.bodega_id,
+            SUM(COALESCE(kardex.entrada_cantidad, 0)) AS ingresos,
+            SUM(COALESCE(kardex.salida_cantidad, 0)) AS salidas,
+            (ARRAY_AGG(
+              kardex.saldo_cantidad
+              ORDER BY kardex.fecha DESC, kardex.created_at DESC, kardex.id DESC
+            ))[1] AS stock_cierre
+          FROM kpi_inventory.tb_kardex kardex
+          WHERE kardex.is_deleted = false
+            AND kardex.fecha >= $1::date
+            AND kardex.fecha <= $2::date
+          GROUP BY kardex.producto_id, kardex.bodega_id
+        ),
+        inventory_keys AS (
+          SELECT producto_id, bodega_id
+          FROM kpi_inventory.tb_stock_bodega
+          WHERE is_deleted = false
+          UNION
+          SELECT producto_id, bodega_id
+          FROM monthly_movements
+        )
+        SELECT
+          keys.producto_id,
+          keys.bodega_id,
+          producto.codigo AS producto_codigo,
+          producto.nombre AS producto_nombre,
+          producto.descripcion AS producto_descripcion,
+          COALESCE(movimientos.ingresos, 0) AS ingresos,
+          COALESCE(movimientos.salidas, 0) AS salidas,
+          COALESCE(
+            movimientos.stock_cierre,
+            stock.stock_actual,
+            0
+          ) AS stock_actual
+        FROM inventory_keys keys
+        INNER JOIN kpi_inventory.tb_producto producto
+          ON producto.id = keys.producto_id
+         AND producto.is_deleted = false
+        INNER JOIN kpi_inventory.tb_bodega bodega
+          ON bodega.id = keys.bodega_id
+         AND bodega.is_deleted = false
+         AND COALESCE(bodega.es_chatarra, false) = false
+        LEFT JOIN monthly_movements movimientos
+          ON movimientos.producto_id = keys.producto_id
+         AND movimientos.bodega_id = keys.bodega_id
+        LEFT JOIN kpi_inventory.tb_stock_bodega stock
+          ON stock.producto_id = keys.producto_id
+         AND stock.bodega_id = keys.bodega_id
+         AND stock.is_deleted = false
+        ORDER BY producto.codigo ASC, producto.nombre ASC
+      `,
+      [monthStart, dateRange.fecha],
+    );
+
+    const byProduct = new Map<string, any>();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const warehouseId = String(row?.bodega_id || '').trim();
+      if (scope && !scope.warehouseIds.has(warehouseId)) continue;
+
+      const productId = String(row?.producto_id || '').trim();
+      if (!productId) continue;
+      const ingresos = this.toNumeric(row?.ingresos, 0);
+      const salidas = this.toNumeric(row?.salidas, 0);
+      const stockActual = this.toNumeric(row?.stock_actual, 0);
+      const current = byProduct.get(productId) ?? {
+        producto_id: productId,
+        producto_codigo: this.firstNonEmptyString(row?.producto_codigo),
+        producto_nombre:
+          this.firstNonEmptyString(row?.producto_nombre) ?? 'Material sin nombre',
+        producto_descripcion:
+          this.firstNonEmptyString(row?.producto_descripcion) ?? null,
+        inventario_inicial: 0,
+        ingresos: 0,
+        salidas: 0,
+        inventario_actual: 0,
+      };
+      current.ingresos += ingresos;
+      current.salidas += salidas;
+      current.inventario_actual += stockActual;
+      current.inventario_inicial += stockActual - ingresos + salidas;
+      byProduct.set(productId, current);
+    }
+
+    const inventory = [...byProduct.values()]
+      .map((row) => {
+        const materialBase = [row.producto_codigo, row.producto_nombre]
+          .filter(Boolean)
+          .join(' - ');
+        return {
+          ...row,
+          material_label: row.producto_descripcion
+            ? `${materialBase} (${row.producto_descripcion})`
+            : materialBase,
+          inventario_inicial: Number(row.inventario_inicial.toFixed(4)),
+          ingresos: Number(row.ingresos.toFixed(4)),
+          salidas: Number(row.salidas.toFixed(4)),
+          inventario_actual: Number(row.inventario_actual.toFixed(4)),
+        };
+      })
+      .filter(
+        (row) =>
+          row.inventario_inicial !== 0 ||
+          row.ingresos !== 0 ||
+          row.salidas !== 0 ||
+          row.inventario_actual !== 0,
+      );
+
+    return this.wrap(
+      {
+        filters: {
+          month: monthStart.slice(0, 7),
+          from: monthStart,
+          to: dateRange.fecha,
+        },
+        inventory,
+      },
+      'Inventario mensual generado',
+    );
+  }
+
   async getSystemReports(
     query: SystemReportsQueryDto,
     sucursalId?: string | null,

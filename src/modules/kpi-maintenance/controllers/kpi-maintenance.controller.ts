@@ -1629,6 +1629,22 @@ export class KpiMaintenanceController {
     );
   }
 
+  @ApiTags('Inteligencia Operativa')
+  @ApiOperation({
+    summary:
+      'Obtener el inventario mensual resumido para el reporte detallado gerencial',
+  })
+  @Get('inteligencia/inventario-mensual')
+  getMonthlyInventoryReport(
+    @Query() query: DailyOperationsReportQueryDto,
+    @Req() req: any,
+  ) {
+    return this.service.getMonthlyInventoryReport(
+      query,
+      getSucursalScopeId(req),
+    );
+  }
+
   @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Listar órdenes de trabajo con filtros opcionales' })
   @Get('work-orders')
