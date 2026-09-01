@@ -4614,31 +4614,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return false;
   }
 
-  /**
-   * Identidad completa del equipo: `codigo - nombre (nombre real - modelo)`.
-   * Los parentesis se omiten cuando no hay nombre real ni modelo, y el nombre
-   * real no se repite cuando coincide con el nombre.
-   */
+  /** Identidad visible del equipo: `marca - nombre (modelo)`. */
   private buildEquipmentReportLabel(
-    equipment?: Pick<
-      EquipoEntity,
-      'codigo' | 'nombre' | 'modelo' | 'nombre_real'
-    > | null,
+    equipment?: (Pick<EquipoEntity, 'nombre' | 'modelo'> & {
+      marca_nombre?: string | null;
+    }) | null,
   ): string {
     if (!equipment) return 'Sin equipo';
-    const codigo = this.firstNonEmptyString(equipment.codigo);
+    const marca = this.firstNonEmptyString(equipment.marca_nombre) || 'Sin marca';
     const nombre = this.firstNonEmptyString(equipment.nombre);
-    const nombreReal = this.firstNonEmptyString(equipment.nombre_real);
     const modelo = this.firstNonEmptyString(equipment.modelo);
-    const base = [codigo, nombre].filter(Boolean).join(' - ');
-    if (!base) return 'Sin equipo';
-    const details = [
-      nombreReal && nombreReal !== nombre ? nombreReal : null,
-      modelo,
-    ]
-      .filter(Boolean)
-      .join(' - ');
-    return details ? `${base} (${details})` : base;
+    if (!nombre) return 'Sin equipo';
+    const base = `${marca} - ${nombre}`;
+    return modelo ? `${base} (${modelo})` : base;
   }
 
   /**
@@ -4695,6 +4683,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ...(codigos.size ? [{ codigo: In([...codigos]) }] : []),
         ],
       });
+      equipos = await this.attachEquipmentBrandNames(equipos);
     } catch (error: any) {
       this.logger.warn(
         `No se pudo resolver la identidad de los equipos de las alertas: ${error?.message ?? 'desconocido'}`,
@@ -6937,7 +6926,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const equipo = await this.equipoRepo.findOne({
           where: equipoId ? { id: equipoId } : { codigo: codigo as string },
         });
-        if (equipo) return this.buildEquipmentReportLabel(equipo);
+        if (equipo) {
+          const [equipmentWithBrand] =
+            await this.attachEquipmentBrandNames([equipo]);
+          return this.buildEquipmentReportLabel(equipmentWithBrand);
+        }
       } catch (error: any) {
         this.logger.warn(
           `[AlertEmail:${row.id}] No se pudo resolver la identidad del equipo: ${error?.message ?? 'desconocido'}`,
@@ -14367,6 +14360,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return `${raw} ${suffix}`;
   }
 
+  private async attachEquipmentBrandNames<T extends EquipoEntity>(rows: T[]) {
+    const brandIds = [
+      ...new Set(
+        rows
+          .map((row) => String(row.marca_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const brands = brandIds.length
+      ? await this.marcaRepo.find({
+          where: { id: In(brandIds), is_deleted: false },
+        })
+      : [];
+    const brandNames = new Map(
+      brands.map((brand) => [
+        String(brand.id),
+        String(brand.nombre || '').trim(),
+      ]),
+    );
+
+    return rows.map((row) => ({
+      ...row,
+      marca_nombre: brandNames.get(String(row.marca_id || '')) || null,
+    }));
+  }
+
   async listEquipos(query: EquipoQueryDto, sucursalId?: string | null) {
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 10, 100);
@@ -14412,7 +14431,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
-    return this.wrap(data, 'Equipos listados', { page, limit, total });
+    const equipmentWithBrands = await this.attachEquipmentBrandNames(data);
+    return this.wrap(equipmentWithBrands, 'Equipos listados', {
+      page,
+      limit,
+      total,
+    });
   }
 
   async getEquipo(id: string, sucursalId?: string | null) {
@@ -14432,7 +14456,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!equipo) {
       throw new NotFoundException('Equipo no encontrado');
     }
-    return this.wrap(equipo, 'Equipo obtenido');
+    const [equipmentWithBrand] = await this.attachEquipmentBrandNames([equipo]);
+    return this.wrap(equipmentWithBrand, 'Equipo obtenido');
   }
 
   private currentGuayaquilDateString(value = new Date()) {
@@ -21170,8 +21195,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { id: In(relatedEquipmentIds), is_deleted: false },
         })
       : [];
+    const relatedEquipmentsWithBrands =
+      await this.attachEquipmentBrandNames(relatedEquipments);
     const equipmentMap = new Map(
-      relatedEquipments.map((row) => [String(row.id || '').trim(), row]),
+      relatedEquipmentsWithBrands.map((row) => [String(row.id || '').trim(), row]),
     );
     const workOrderMap = new Map(
       relatedWorkOrders.map((row) => [String(row.id || '').trim(), row]),
@@ -21607,7 +21634,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ]);
 
     const planMap = new Map(plans.map((row) => [row.id, row]));
-    const equipmentMap = new Map(equipments.map((row) => [row.id, row]));
+    const equipmentsWithBrands = await this.attachEquipmentBrandNames(equipments);
+    const equipmentMap = new Map(
+      equipmentsWithBrands.map((row) => [row.id, row]),
+    );
     const procedureIds = new Set<string>();
     for (const workOrder of datedWorkOrders) {
       const payload =
@@ -22626,9 +22656,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           equipment_id: requestedEquipmentId,
           equipment_label:
             requestedEquipment != null
-              ? [requestedEquipment.codigo, requestedEquipment.nombre]
-                  .filter(Boolean)
-                  .join(' - ') || requestedEquipment.id
+              ? this.buildEquipmentReportLabel(requestedEquipment)
               : null,
           group_by: groupBy,
         },
@@ -22644,8 +22672,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               id: row.id,
               codigo: row.codigo ?? null,
               nombre: row.nombre ?? null,
-              label:
-                [row.codigo, row.nombre].filter(Boolean).join(' - ') || row.id,
+              modelo: row.modelo ?? null,
+              marca_nombre: row.marca_nombre ?? null,
+              label: this.buildEquipmentReportLabel(row),
             }))
             .sort((a, b) => a.label.localeCompare(b.label)),
         },
@@ -22963,7 +22992,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { id: In(equipmentIds), is_deleted: false },
         })
       : [];
-    const equipmentMap = new Map(equipments.map((row) => [row.id, row]));
+    const equipmentsWithBrands = await this.attachEquipmentBrandNames(equipments);
+    const equipmentMap = new Map(
+      equipmentsWithBrands.map((row) => [row.id, row]),
+    );
 
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       [selectedProductId],

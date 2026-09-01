@@ -150,32 +150,62 @@ describe('KpiMaintenanceService alerts', () => {
     service = createService(repos, dataSource);
   });
 
-  it('arma la identidad del equipo como codigo - nombre (nombre real - modelo)', () => {
+  it('incluye el nombre de la marca en el catálogo de equipos', async () => {
+    const equipment = {
+      id: 'equipment-1',
+      codigo: 'EQ-001',
+      nombre: 'EXCAVADORA',
+      modelo: '320D',
+      marca_id: 'brand-1',
+      is_deleted: false,
+    };
+    const queryBuilder = {
+      leftJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      getManyAndCount: jest.fn().mockResolvedValue([[equipment], 1]),
+    };
+    repos.equipoRepo.createQueryBuilder.mockReturnValue(queryBuilder);
+    repos.marcaRepo.find.mockResolvedValue([
+      { id: 'brand-1', nombre: 'CATERPILLAR', is_deleted: false },
+    ]);
+
+    const result = await service.listEquipos({ page: 1, limit: 10 } as any);
+
+    expect(result.data).toEqual([
+      expect.objectContaining({
+        id: 'equipment-1',
+        marca_nombre: 'CATERPILLAR',
+      }),
+    ]);
+    expect(repos.marcaRepo.find).toHaveBeenCalledTimes(1);
+  });
+
+  it('arma la identidad del equipo como marca - nombre (modelo)', () => {
     const label = (service as any).buildEquipmentReportLabel({
-      codigo: 'EQ-A00024',
+      marca_nombre: 'MILLER',
       nombre: 'MOTOSOLDADORA MILLER',
-      nombre_real: 'MOTOSOLDADORA MILLER BLUE',
       modelo: 'MILLER BLUE 405',
     });
-    expect(label).toBe(
-      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405)',
-    );
+    expect(label).toBe('MILLER - MOTOSOLDADORA MILLER (MILLER BLUE 405)');
 
     expect(
       (service as any).buildEquipmentReportLabel({
-        codigo: 'EQ-A00010',
+        marca_nombre: 'BOSCH',
         nombre: 'PERFORADORA',
       }),
-    ).toBe('EQ-A00010 - PERFORADORA');
+    ).toBe('BOSCH - PERFORADORA');
 
     expect(
       (service as any).buildEquipmentReportLabel({
-        codigo: 'EQ-A00011',
+        marca_nombre: null,
         nombre: 'GRUA',
-        nombre_real: 'GRUA',
         modelo: 'XCMG 25',
       }),
-    ).toBe('EQ-A00011 - GRUA (XCMG 25)');
+    ).toBe('Sin marca - GRUA (XCMG 25)');
   });
 
   it('resume el inventario por rango con nomenclatura clara y corte a las fechas elegidas', async () => {
@@ -230,10 +260,14 @@ describe('KpiMaintenanceService alerts', () => {
       {
         id: 'equipo-1',
         codigo: 'EQ-A00024',
+        marca_id: 'brand-1',
         nombre: 'MOTOSOLDADORA MILLER',
         nombre_real: 'MOTOSOLDADORA MILLER BLUE',
         modelo: 'MILLER BLUE 405',
       },
+    ]);
+    repos.marcaRepo.find.mockResolvedValue([
+      { id: 'brand-1', nombre: 'MILLER', is_deleted: false },
     ]);
 
     const [candidate] = await (service as any).applyEquipmentIdentityToAlertCandidates([
@@ -249,10 +283,10 @@ describe('KpiMaintenanceService alerts', () => {
     ]);
 
     expect(candidate.detalle).toBe(
-      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405) · MPG 250H · horas faltantes 12.00',
+      'MILLER - MOTOSOLDADORA MILLER (MILLER BLUE 405) · MPG 250H · horas faltantes 12.00',
     );
     expect(candidate.payload_json.equipo_label).toBe(
-      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405)',
+      'MILLER - MOTOSOLDADORA MILLER (MILLER BLUE 405)',
     );
     expect(candidate.payload_json.equipo_nombre_real).toBe(
       'MOTOSOLDADORA MILLER BLUE',
@@ -280,10 +314,14 @@ describe('KpiMaintenanceService alerts', () => {
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',
       codigo: 'EQ-A00024',
+      marca_id: 'brand-1',
       nombre: 'MOTOSOLDADORA MILLER',
       nombre_real: 'MOTOSOLDADORA MILLER BLUE',
       modelo: 'MILLER BLUE 405',
     });
+    repos.marcaRepo.find.mockResolvedValue([
+      { id: 'brand-1', nombre: 'MILLER', is_deleted: false },
+    ]);
 
     await (service as any).sendAlertTriggerEmails({
       id: 'alert-2',
@@ -300,12 +338,11 @@ describe('KpiMaintenanceService alerts', () => {
       payload_json: { equipo_id: 'equipo-1', equipo_codigo: 'EQ-A00024' },
     });
 
-    const identity =
-      'EQ-A00024 - MOTOSOLDADORA MILLER (MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405)';
+    const identity = 'MILLER - MOTOSOLDADORA MILLER (MILLER BLUE 405)';
     const mail = sendMail.mock.calls[0][0];
     expect(mail.subject).toContain(identity);
     expect(mail.text).toContain(`Equipo: ${identity}`);
-    expect(mail.html).toContain('MOTOSOLDADORA MILLER BLUE - MILLER BLUE 405');
+    expect(mail.html).toContain(identity);
   });
 
   it('envía el token interno solo hacia el servicio de seguridad', () => {
@@ -3240,15 +3277,15 @@ describe('KpiMaintenanceService work orders', () => {
     expect(isAnnulled(null)).toBe(false);
   });
 
-  it('construye la etiqueta de equipo como codigo - nombre (modelo)', () => {
+  it('construye la etiqueta de equipo como marca - nombre (modelo)', () => {
     const buildLabel = (equipment: any) =>
       (service as any).buildEquipmentReportLabel(equipment);
 
     expect(
-      buildLabel({ codigo: 'UG03', nombre: 'GENERADOR', modelo: 'CAT 3512' }),
-    ).toBe('UG03 - GENERADOR (CAT 3512)');
-    expect(buildLabel({ codigo: 'UG03', nombre: 'GENERADOR', modelo: null })).toBe(
-      'UG03 - GENERADOR',
+      buildLabel({ marca_nombre: 'CAT', nombre: 'GENERADOR', modelo: '3512' }),
+    ).toBe('CAT - GENERADOR (3512)');
+    expect(buildLabel({ marca_nombre: 'CAT', nombre: 'GENERADOR', modelo: null })).toBe(
+      'CAT - GENERADOR',
     );
     expect(buildLabel(null)).toBe('Sin equipo');
   });
