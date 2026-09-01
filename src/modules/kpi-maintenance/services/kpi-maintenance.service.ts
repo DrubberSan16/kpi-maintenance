@@ -873,6 +873,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ] as const;
   private recalculationInterval: NodeJS.Timeout | null = null;
   private horometerReminderTimeout: NodeJS.Timeout | null = null;
+  private lowStockDigestTimeout: NodeJS.Timeout | null = null;
   private readonly reservationEmailBatches = new Map<
     string,
     {
@@ -887,8 +888,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       timer: NodeJS.Timeout;
     }
   >();
+  /**
+   * Consumos registrados en la misma OT dentro de la ventana de agrupación.
+   * Se acumulan para enviar un único correo con todos los materiales en una
+   * sola tabla, en lugar de un correo por material.
+   */
+  private readonly consumoEmailBatches = new Map<
+    string,
+    {
+      workOrder: WorkOrderEntity;
+      consumos: Array<{
+        producto_id: string;
+        bodega_id?: string | null;
+        cantidad: number;
+        costo_unitario?: number | null;
+        subtotal?: number | null;
+        observacion?: string | null;
+      }>;
+      actor?: RequestActorContext | null;
+      timer: NodeJS.Timeout;
+    }
+  >();
   private recalculationRunning = false;
   private horometerReminderRunning = false;
+  private lowStockDigestRunning = false;
   private inventoryImportSuppressed = false;
   private readonly CLOSED_WORK_ORDER_RAW_STATUSES = [
     'CANCELLED',
@@ -908,6 +931,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly RECALCULATION_BATCH_SIZE = 100;
   private readonly RECALCULATION_WORKERS = 4;
   private readonly MAX_STORED_ERRORS = 200;
+
+  /**
+   * Margen que debe cumplir una OT planificada antes de considerarse atrasada.
+   * Se exige el día completo: una OT agendada a las 23:50 no alerta hasta
+   * pasadas 24 h reales, no al cambiar de día.
+   */
+  private readonly PROGRAMACION_OVERDUE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+  /** Ventana de agrupación de los consumos de una misma OT en un solo correo. */
+  private readonly CONSUMO_EMAIL_BATCH_MS = 5 * 60 * 1000;
 
   constructor(
     @InjectRepository(EquipoEntity)
@@ -3302,13 +3335,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.ensureEquipoEstadoOperativoSchema();
     await this.ensureEquipoEstadoFuncionamientoSchema();
     await this.ensureEquipoHorometroSchema();
+    await this.closeRetiredAlertTypes();
     this.scheduleAlertRecalculation();
-    this.scheduleDailyHorometerReminder();
-    this.triggerDailyHorometerReminderIfDue('startup').catch((e: any) => {
+    this.scheduleDailyLowStockDigest();
+    this.triggerDailyLowStockDigestIfDue('startup').catch((e: any) => {
       this.logger.error(
-        `No se pudo evaluar el recordatorio diario de horometro: ${e?.message ?? 'desconocido'}`,
+        `No se pudo evaluar el resumen diario de stock: ${e?.message ?? 'desconocido'}`,
       );
     });
+    // Recordatorio diario de horómetros retirado del alcance vigente.
+    // Reactivar restaurando estas dos llamadas:
+    // this.scheduleDailyHorometerReminder();
+    // this.triggerDailyHorometerReminderIfDue('startup').catch((e: any) => {
+    //   this.logger.error(
+    //     `No se pudo evaluar el recordatorio diario de horometro: ${e?.message ?? 'desconocido'}`,
+    //   );
+    // });
     this.triggerAlertRecalculation('startup').catch((e: any) => {
       this.logger.error(
         `No se pudo iniciar recálculo de alertas en startup: ${e?.message ?? 'desconocido'}`,
@@ -3329,6 +3371,84 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(batch.timer);
     }
     this.reservationEmailBatches.clear();
+    for (const batch of this.consumoEmailBatches.values()) {
+      clearTimeout(batch.timer);
+    }
+    this.consumoEmailBatches.clear();
+    if (this.lowStockDigestTimeout) {
+      clearTimeout(this.lowStockDigestTimeout);
+      this.lowStockDigestTimeout = null;
+    }
+  }
+
+  /**
+   * Cierra las alertas vivas de los generadores retirados.
+   *
+   * No borra nada: las filas quedan con su historial de entregas intacto y solo
+   * pasan a CERRADA/INFO para que dejen de aparecer como pendientes. Es
+   * idempotente, así que puede ejecutarse en cada arranque sin efectos.
+   */
+  private async closeRetiredAlertTypes() {
+    const retiredOrigins = [
+      'REPORTE_DIARIO',
+      'ANALISIS_LUBRICANTE',
+      'COMBUSTIBLE',
+      'INVENTARIO',
+      'BITACORA',
+    ];
+    const retiredTypes = [
+      'ANOMALIA_HOROMETRO',
+      'LUBRICANTE_CRITICO',
+      'LUBRICANTE_ALERTA',
+      'COMBUSTIBLE_BAJO',
+      'COMBUSTIBLE_PROXIMO_MINIMO',
+      'SIN_STOCK',
+      'STOCK_BAJO_BODEGA',
+      'REPORTE_DIARIO_VENCIDO',
+      'REPORTE_DIARIO_PROXIMO',
+      'OVERDUE',
+      'MPG_325',
+      'MPG_650',
+      'MPG_975',
+      'MPG_1300',
+    ];
+    try {
+      const rows = await this.alertaRepo.find({
+        where: [
+          {
+            is_deleted: false,
+            estado: In(['ABIERTA', 'EN_PROCESO']),
+            origen: In(retiredOrigins),
+          },
+          {
+            is_deleted: false,
+            estado: In(['ABIERTA', 'EN_PROCESO']),
+            tipo_alerta: In(retiredTypes),
+          },
+        ],
+      });
+      if (!rows.length) return;
+      const now = new Date();
+      for (const row of rows) {
+        row.estado = 'CERRADA';
+        row.nivel = 'INFO';
+        row.resolved_at = row.resolved_at ?? now;
+        row.ultima_evaluacion_at = now;
+        row.payload_json = {
+          ...((row.payload_json ?? {}) as Record<string, unknown>),
+          retired_at: now.toISOString(),
+          retired_reason: 'GENERADOR_DE_ALERTA_RETIRADO',
+        };
+      }
+      await this.alertaRepo.save(rows);
+      this.logger.log(
+        `Alertas de generadores retirados cerradas: ${rows.length}.`,
+      );
+    } catch (error: any) {
+      this.logger.warn(
+        `No se pudieron cerrar las alertas de generadores retirados: ${error?.message ?? 'desconocido'}`,
+      );
+    }
   }
 
   private scheduleAlertRecalculation() {
@@ -3592,6 +3712,268 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Resumen diario de stock bajo mínimo (06:00 America/Guayaquil)
+  //
+  // Sustituye a las alertas de inventario y a los correos por movimiento: se
+  // envía un único correo al día, con una sola tabla, y solo con los materiales
+  // que no se hubieran informado antes. Un material que se repone sale del
+  // conjunto vigilado, así que si vuelve a caer bajo mínimo se informa de nuevo.
+  // ---------------------------------------------------------------------------
+
+  private readonly LOW_STOCK_DIGEST_REFERENCE = 'STOCK_MINIMO:ESTADO';
+
+  private scheduleDailyLowStockDigest() {
+    if (this.lowStockDigestTimeout) {
+      clearTimeout(this.lowStockDigestTimeout);
+    }
+    const now = new Date();
+    const parts = this.getGuayaquilDateTimeParts(now);
+    // America/Guayaquil se mantiene en UTC-5 todo el año: 06:00 local = 11:00 UTC.
+    const nextRun = new Date(
+      Date.UTC(parts.year, parts.month - 1, parts.day, 11, 0, 0, 0),
+    );
+    if (nextRun.getTime() <= now.getTime()) {
+      nextRun.setUTCDate(nextRun.getUTCDate() + 1);
+    }
+    const delay = Math.max(1_000, nextRun.getTime() - now.getTime());
+    this.lowStockDigestTimeout = setTimeout(() => {
+      this.triggerDailyLowStockDigestIfDue('scheduler')
+        .catch((error: any) => {
+          this.logger.error(
+            `No se pudo enviar el resumen diario de stock: ${error?.message ?? 'desconocido'}`,
+          );
+        })
+        .finally(() => this.scheduleDailyLowStockDigest());
+    }, delay);
+    this.lowStockDigestTimeout.unref?.();
+  }
+
+  private async triggerDailyLowStockDigestIfDue(source: string) {
+    const parts = this.getGuayaquilDateTimeParts();
+    if (parts.hour !== 6 || this.lowStockDigestRunning) {
+      return {
+        sent: false,
+        reason: parts.hour !== 6 ? 'outside-window' : 'running',
+      };
+    }
+    this.lowStockDigestRunning = true;
+    try {
+      return await this.sendDailyLowStockDigest(parts.dateKey, source);
+    } finally {
+      this.lowStockDigestRunning = false;
+    }
+  }
+
+  private buildLowStockDigestHtml(
+    recipient: AlertNotificationRecipient,
+    items: InventoryAlertItem[],
+    dateKey: string,
+  ) {
+    const recipientLabel =
+      recipient.displayName || recipient.username || 'usuario';
+    const productosUrl = this.buildAppModuleUrl('productos');
+    const warehouseSections = this.groupInventoryItemsByWarehouse(items)
+      .map(({ label, items: warehouseItems }) => {
+        const rows = warehouseItems
+          .map(
+            (item) => `
+              <tr>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.producto_label)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.stock_actual.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.stock_critico.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.stock_disponible_minimo.toFixed(2)}</td>
+                <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.stock_min_bodega.toFixed(2)}</td>
+              </tr>`,
+          )
+          .join('');
+        return `
+          <div style="margin-top:22px;">
+            <h2 style="margin:0 0 10px;font-size:18px;color:#15314b;">${this.escapeHtml(label)}</h2>
+            <div style="overflow-x:auto;border:1px solid #dbe4f0;border-radius:12px;">
+              <table style="width:100%;min-width:720px;border-collapse:collapse;font-size:13px;color:#193550;">
+                <thead style="background:#eef4fb;">
+                  <tr>
+                    <th style="padding:10px;text-align:left;">Material</th>
+                    <th style="padding:10px;text-align:right;">Stock total</th>
+                    <th style="padding:10px;text-align:right;">Reserva crítica</th>
+                    <th style="padding:10px;text-align:right;">Disponible</th>
+                    <th style="padding:10px;text-align:right;">Mínimo</th>
+                  </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+          </div>`;
+      })
+      .join('');
+
+    return this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Inventario',
+      title: 'Resumen diario de stock bajo mínimo',
+      summary: `Materiales que bajaron del mínimo y aún no se habían informado. Corte del ${dateKey} a las 06:00.`,
+      accent: '#c0392b',
+      contentHtml: `
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+          Hola <strong>${this.escapeHtml(recipientLabel)}</strong>, estos son los ${items.length} material(es) nuevos bajo stock mínimo en las bodegas que tienes asignadas.
+        </p>
+        <div style="padding:13px 15px;border-radius:10px;background:#fff7e8;border:1px solid #f4d9a6;color:#754c00;font-size:13px;line-height:1.55;">
+          El disponible se calcula como stock total menos reserva crítica. Un material ya informado no vuelve a aparecer hasta que se reponga por encima del mínimo y caiga otra vez.
+        </div>
+        ${warehouseSections}
+        ${
+          productosUrl
+            ? `<div style="margin-top:22px;text-align:center;">
+                <a href="${this.escapeHtml(productosUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#c0392b;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Abrir materiales</a>
+              </div>`
+            : ''
+        }`,
+      footer:
+        'Resumen automático diario de inventario. El contenido respeta las sucursales y bodegas habilitadas para el destinatario.',
+    });
+  }
+
+  private buildLowStockDigestText(
+    items: InventoryAlertItem[],
+    dateKey: string,
+  ) {
+    const lines = [
+      `Resumen diario de stock bajo minimo - ${dateKey}.`,
+      'Solo se listan materiales que no se habian informado antes.',
+      'Disponible = stock total - reserva critica.',
+      '',
+    ];
+    for (const group of this.groupInventoryItemsByWarehouse(items)) {
+      lines.push(`Bodega: ${group.label}`);
+      for (const item of group.items) {
+        lines.push(
+          `- ${item.producto_label} | total ${item.stock_actual.toFixed(2)} | reserva critica ${item.stock_critico.toFixed(2)} | disponible ${item.stock_disponible_minimo.toFixed(2)} | minimo ${item.stock_min_bodega.toFixed(2)}`,
+        );
+      }
+      lines.push('');
+    }
+    const productosUrl = this.buildAppModuleUrl('productos');
+    if (productosUrl) lines.push(`Materiales: ${productosUrl}`);
+    return lines.join('\n');
+  }
+
+  private async sendDailyLowStockDigest(dateKey: string, source: string) {
+    const stateRow = await this.eventoProcesoRepo.findOne({
+      where: {
+        tipo_proceso: 'RESUMEN_STOCK_MINIMO',
+        referencia_codigo: this.LOW_STOCK_DIGEST_REFERENCE,
+        is_deleted: false,
+      },
+      order: { created_at: 'DESC' },
+    });
+    const lastDate = this.firstNonEmptyString(
+      (stateRow?.payload_notificacion as Record<string, unknown> | undefined)
+        ?.date,
+    );
+    if (lastDate === dateKey) {
+      return { sent: false, reason: 'already-processed', dateKey };
+    }
+
+    const candidates = await this.buildInventoryAlertCandidates();
+    const allItems = candidates.length
+      ? this.getInventoryAlertItems(candidates[0].payload_json)
+      : [];
+    const currentIds = allItems.map((item) => item.stock_id);
+    const previouslyAlerted = new Set(
+      Array.isArray(
+        (stateRow?.payload_kpi as Record<string, unknown> | undefined)
+          ?.alerted_stock_ids,
+      )
+        ? ((stateRow!.payload_kpi as Record<string, unknown>)
+            .alerted_stock_ids as unknown[]).map((value) => String(value))
+        : [],
+    );
+    // Solo entran los que aún no se habían informado. Los que se repusieron
+    // desaparecen de `currentIds`, por lo que volverán a informarse si recaen.
+    const nuevos = allItems.filter(
+      (item) => !previouslyAlerted.has(item.stock_id),
+    );
+
+    let sent = 0;
+    let failed = 0;
+    let recipientCount = 0;
+
+    if (nuevos.length) {
+      const scopedRecipients =
+        await this.resolveScopedInventoryRecipients(nuevos);
+      recipientCount = scopedRecipients.length;
+      const transporter = await this.getAlertMailTransporter();
+      if (!transporter) {
+        this.logger.warn(
+          `[LowStockDigest:${dateKey}] SMTP no configurado; destinatarios resueltos=${scopedRecipients.length}.`,
+        );
+      } else {
+        for (const { recipient, items } of scopedRecipients) {
+          try {
+            await transporter.sendMail({
+              from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+              to: recipient.email,
+              subject: `[Inventario] Stock bajo mínimo · ${items.length} material(es) · ${dateKey}`,
+              html: this.buildLowStockDigestHtml(recipient, items, dateKey),
+              text: this.buildLowStockDigestText(items, dateKey),
+            });
+            sent += 1;
+          } catch (error: any) {
+            failed += 1;
+            this.logger.warn(
+              `[LowStockDigest:${dateKey}] Fallo envio a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+            );
+          }
+        }
+      }
+    }
+
+    await this.eventoProcesoRepo.save(
+      this.eventoProcesoRepo.create({
+        ...(stateRow ?? {}),
+        tipo_proceso: 'RESUMEN_STOCK_MINIMO',
+        accion: 'EMAIL_STOCK_MINIMO_06H00',
+        referencia_tabla: 'kpi_inventory.tb_stock_bodega',
+        referencia_codigo: this.LOW_STOCK_DIGEST_REFERENCE,
+        fecha_evento: new Date(),
+        estado: failed > 0 && sent === 0 ? 'FAILED' : 'COMPLETED',
+        notificacion_enviada: sent > 0,
+        payload_notificacion: {
+          source,
+          date: dateKey,
+          recipients: recipientCount,
+          sent,
+          failed,
+          nuevos: nuevos.length,
+        },
+        payload_kpi: {
+          alerted_stock_ids: currentIds,
+          total_bajo_minimo: allItems.length,
+          nuevos: nuevos.length,
+        },
+        created_by: 'SYSTEM',
+      }),
+    );
+
+    if (nuevos.length) {
+      await this.writeSecurityLog({
+        typeLog: 'RESUMEN_STOCK_MINIMO_ENVIADO',
+        description: `[STOCK:${dateKey}] Materiales nuevos bajo minimo=${nuevos.length}, destinatarios=${recipientCount}, exitosos=${sent}, fallidos=${failed}`,
+        createdBy: 'system',
+      });
+    }
+
+    return {
+      sent: sent > 0,
+      dateKey,
+      nuevos: nuevos.length,
+      total_bajo_minimo: allItems.length,
+      recipients: recipientCount,
+      successful: sent,
+      failed,
+    };
+  }
+
   async triggerAlertRecalculation(source = 'manual') {
     if (this.recalculationRunning) {
       return this.wrap(
@@ -3628,6 +4010,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     context: AlertRecalculationContext = {},
   ) {
     const normalizedSource = String(source || 'manual').trim().toLowerCase();
+    // Los avisos del ciclo de importación de kardex siguen llegando desde
+    // kpi-inventory, pero ya no disparan correos: el stock se comunica una vez
+    // al día con `sendDailyLowStockDigest`. Se conserva la bandera para no
+    // recalcular alertas mientras corre una carga masiva.
     if (normalizedSource === 'inventory-kardex-import-started') {
       this.inventoryImportSuppressed = true;
       return this.wrap(
@@ -3643,27 +4029,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (this.recalculationRunning) {
-      const requiresInventoryEmail =
-        normalizedSource === 'inventory-kardex-import-completed' ||
-        String(context.movement_direction || '').trim().toLowerCase() ===
-          'decrease';
-      if (requiresInventoryEmail) {
-        const candidates = await this.buildInventoryAlertCandidates();
-        const inventoryEmail = await this.dispatchInventoryRecalculationEmails(
-          candidates,
-          source,
-          context,
-        );
-        return this.wrap(
-          {
-            accepted: true,
-            source,
-            notification_only: true,
-            inventory_email: inventoryEmail,
-          },
-          'Notificacion de inventario procesada durante el recalculo en curso',
-        );
-      }
       return this.wrap(
         { accepted: false, source },
         'Recalculo de alertas ya se encuentra en ejecución',
@@ -4575,14 +4940,51 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (['PLANNED', 'PLANIFICADA', 'PLANIFICADO', 'CREADA', 'CREADO'].includes(raw)) return 'PLANNED';
     if (['IN_PROGRESS', 'IN PROGRESS', 'EN_PROCESO', 'EN PROCESO', 'PROCESSING'].includes(raw)) return 'IN_PROGRESS';
     if (['BLOCKED', 'BLOQUEADA', 'BLOQUEADO', 'ON_HOLD', 'DETENIDA', 'DETENIDO'].includes(raw)) return 'BLOCKED';
+    if (
+      ['REVIEW', 'IN_REVIEW', 'IN REVIEW', 'EN_REVISION', 'EN REVISION', 'REVISION', 'REVISANDO'].includes(
+        raw,
+      )
+    )
+      return 'REVIEW';
     if (['CANCELLED', 'CANCELED', 'ANULADA', 'ANULADO', 'VOID', 'VOIDED'].includes(raw)) return 'CLOSED';
     if (['CLOSED', 'CERRADA', 'CERRADO', 'DONE', 'COMPLETED'].includes(raw)) return 'CLOSED';
     return raw || 'PLANNED';
   }
 
+  /**
+   * Estados en los que la OT sigue siendo editable: se pueden añadir tareas,
+   * consumos y salidas de material. `REVIEW` no bloquea nada; el único estado
+   * que congela la orden es `CLOSED`.
+   */
+  private isEditableWorkOrderStatus(value: unknown) {
+    return ['PLANNED', 'IN_PROGRESS', 'REVIEW'].includes(
+      this.normalizeWorkflowStatus(value),
+    );
+  }
+
   private isPendingDailyWorkOrderStatus(value: unknown) {
     const normalized = this.normalizeWorkflowStatus(value);
-    return normalized === 'PLANNED' || normalized === 'IN_PROGRESS';
+    return (
+      normalized === 'PLANNED' ||
+      normalized === 'IN_PROGRESS' ||
+      normalized === 'REVIEW'
+    );
+  }
+
+  /**
+   * Instante a partir del cual una OT planificada empieza a acumular atraso.
+   * Se prefiere el fin agendado y, si no existe, el inicio agendado. Sin
+   * ninguno de los dos no se puede medir atraso y la OT no alerta.
+   */
+  private resolveWorkOrderScheduledDueInstant(
+    workOrder?: Pick<WorkOrderEntity, 'scheduled_end' | 'scheduled_start'> | null,
+  ): Date | null {
+    for (const value of [workOrder?.scheduled_end, workOrder?.scheduled_start]) {
+      if (!value) continue;
+      const parsed = value instanceof Date ? value : new Date(String(value));
+      if (!Number.isNaN(parsed.getTime())) return parsed;
+    }
+    return null;
   }
 
   private isWorkOrderAnnulled(
@@ -4766,10 +5168,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'No se pueden reservar materiales para una orden de trabajo anulada.',
       );
     }
-    const status = this.normalizeWorkflowStatus(workOrder.status_workflow);
-    if (!['PLANNED', 'IN_PROGRESS'].includes(status)) {
+    if (!this.isEditableWorkOrderStatus(workOrder.status_workflow)) {
       throw new ForbiddenException(
-        'Solo se pueden reservar materiales cuando la orden de trabajo está en Planificación o En proceso.',
+        'Solo se pueden reservar materiales cuando la orden de trabajo está en Planificación, En proceso o En revisión.',
       );
     }
   }
@@ -5840,15 +6241,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       requestPayload: payload.request_payload ?? payload.requestPayload ?? null,
     });
 
-    await this.sendTechnicalIncidentEmail({
-      ticket,
-      moduleName,
-      method,
-      requestUrl,
-      statusCode,
-      createdBy,
-      payload,
-    });
+    // Correo de incidente técnico retirado del alcance vigente de alertas.
+    // El incidente se sigue registrando en el log de seguridad de arriba.
+    // Reactivar restaurando:
+    // await this.sendTechnicalIncidentEmail({
+    //   ticket,
+    //   moduleName,
+    //   method,
+    //   requestUrl,
+    //   statusCode,
+    //   createdBy,
+    //   payload,
+    // });
   }
 
   private async sendTechnicalIncidentEmail(input: {
@@ -8202,14 +8606,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }),
     );
 
-    await this.publishInAppNotification({
-      title: payload.title,
-      body: payload.body,
-      module: 'maintenance-intelligence',
-      entityType: payload.tipo_proceso,
-      entityId: payload.referencia_id ?? null,
-      level: payload.level ?? 'info',
-    });
+    // Aviso de inteligencia documental fuera del alcance actual de alertas.
+    // Reactivar volviendo a publicar la notificación in-app:
+    // await this.publishInAppNotification({
+    //   title: payload.title,
+    //   body: payload.body,
+    //   module: 'maintenance-intelligence',
+    //   entityType: payload.tipo_proceso,
+    //   entityId: payload.referencia_id ?? null,
+    //   level: payload.level ?? 'info',
+    // });
 
     event.notificacion_enviada = true;
     await this.eventoProcesoRepo.save(event);
@@ -11301,6 +11707,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ),
     );
 
+    // La alerta ya no se dispara al vencer la programación: solo cuando la OT
+    // asignada acumula 24 h completas de atraso y sigue sin arrancar.
+    const linkedWorkOrderIds = [
+      ...new Set(
+        programaciones
+          .map((row: any) => this.firstNonEmptyString(row.work_order_id))
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    const linkedWorkOrders = linkedWorkOrderIds.length
+      ? await this.woRepo.find({
+          where: { id: In(linkedWorkOrderIds), is_deleted: false },
+        })
+      : [];
+    const workOrderById = new Map(
+      linkedWorkOrders.map((workOrder) => [workOrder.id, workOrder]),
+    );
+    const evaluatedAt = Date.now();
+
     return programaciones.flatMap((row: any) => {
       const sourcePayload = (row.payload_json ?? {}) as Record<string, unknown>;
       const estado = String(row.estado_programacion || '').toUpperCase();
@@ -11313,7 +11738,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ) {
         return [];
       }
-      if (!['VENCIDA', 'PROXIMA'].includes(estado)) return [];
+
+      const workOrderId = this.firstNonEmptyString(row.work_order_id);
+      const workOrder = workOrderId ? workOrderById.get(workOrderId) : null;
+      // Sin OT vinculada no se alerta desde aquí: el cronograma semanal emite
+      // su propio aviso de "evento a realizar" y el mensual no alerta.
+      if (!workOrder) return [];
+
+      // Con la OT ya iniciada (o en revisión, bloqueada o cerrada) se deja de
+      // alertar. `resolveAlertStateFromLinkedWorkOrders` mueve la alerta viva a
+      // EN_PROCESO durante la sincronización.
+      if (this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'PLANNED') {
+        return [];
+      }
+
+      const dueAt = this.resolveWorkOrderScheduledDueInstant(workOrder);
+      if (!dueAt) return [];
+      const overdueMs = evaluatedAt - dueAt.getTime();
+      if (overdueMs < this.PROGRAMACION_OVERDUE_GRACE_MS) return [];
+      const overdueHours = Math.floor(overdueMs / 3_600_000);
 
       const hoursRemaining =
         row.horas_restantes == null ? null : this.toNumeric(row.horas_restantes);
@@ -11328,29 +11771,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         row.plan_id ||
         'Plan';
 
-      const timing: string[] = [];
-      if (hoursRemaining != null) {
-        timing.push(
-          estado === 'VENCIDA'
-            ? `atrasada ${Math.abs(hoursRemaining).toFixed(2)} h`
-            : `vence en ${hoursRemaining.toFixed(2)} h`,
-        );
-      }
-      if (daysRemaining != null) {
-        timing.push(
-          estado === 'VENCIDA'
-            ? `atrasada ${Math.abs(daysRemaining)} d`
-            : `vence en ${daysRemaining} d`,
-        );
-      }
+      const timing = [
+        `OT ${workOrder.code ?? workOrder.id} sin iniciar`,
+        `atrasada ${overdueHours} h`,
+      ];
 
       return [
         {
           equipo_id: row.equipo_id ?? null,
-          tipo_alerta:
-            estado === 'VENCIDA'
-              ? 'MANTENIMIENTO_VENCIDO'
-              : 'MANTENIMIENTO_PROXIMO',
+          tipo_alerta: 'MANTENIMIENTO_VENCIDO',
           categoria: 'MANTENIMIENTO' as AlertCategory,
           nivel: 'CRITICAL',
           origen: 'PROGRAMACION' as AlertOrigin,
@@ -11379,6 +11808,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             equipo_codigo: row.equipo_codigo ?? null,
             equipo_nombre: row.equipo_nombre ?? null,
             estado_programacion: estado,
+            work_order_code: workOrder.code ?? null,
+            work_order_title: workOrder.title ?? null,
+            work_order_status: this.normalizeWorkflowStatus(
+              workOrder.status_workflow,
+            ),
+            work_order_due_at: dueAt.toISOString(),
+            overdue_hours: overdueHours,
             horometro_actual: row.horometro_actual ?? null,
             horas_restantes: hoursRemaining,
             dias_restantes: daysRemaining,
@@ -12310,6 +12746,431 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Alertas del ciclo de vida de la orden de trabajo
+  //
+  // La OT solo notifica en cinco momentos: creación, registro de consumos,
+  // finalización, bloqueo y desbloqueo. Cualquier otra actualización de la OT
+  // dejó de generar aviso a propósito.
+  // ---------------------------------------------------------------------------
+
+  private readonly WORK_ORDER_LIFECYCLE_ALERTS = {
+    CONSUMOS: {
+      tipo_alerta: 'ORDEN_TRABAJO_CONSUMOS',
+      nivel: 'INFO' as AlertLevel,
+      estado: 'CERRADA',
+      titulo: 'Consumos registrados',
+    },
+    FINALIZADA: {
+      tipo_alerta: 'ORDEN_TRABAJO_FINALIZADA',
+      nivel: 'INFO' as AlertLevel,
+      estado: 'CERRADA',
+      titulo: 'Orden de trabajo finalizada',
+    },
+    BLOQUEADA: {
+      tipo_alerta: 'ORDEN_TRABAJO_BLOQUEADA',
+      nivel: 'WARNING' as AlertLevel,
+      estado: 'ABIERTA',
+      titulo: 'Orden de trabajo bloqueada',
+    },
+    DESBLOQUEADA: {
+      tipo_alerta: 'ORDEN_TRABAJO_DESBLOQUEADA',
+      nivel: 'INFO' as AlertLevel,
+      estado: 'CERRADA',
+      titulo: 'Orden de trabajo desbloqueada',
+    },
+  } as const;
+
+  /**
+   * Registra y notifica un evento del ciclo de vida de la OT.
+   *
+   * El tipo se persiste con el mismo mecanismo defensivo que ya usaba
+   * `ORDEN_TRABAJO_GENERADA`: si la base todavía no admite el valor nuevo en el
+   * CHECK, se guarda con un tipo permitido y el real queda en
+   * `payload_json.tipo_alerta_publico`.
+   */
+  private async emitWorkOrderLifecycleAlert(
+    workOrder: WorkOrderEntity,
+    event: keyof typeof this.WORK_ORDER_LIFECYCLE_ALERTS,
+    options?: {
+      detalle?: string | null;
+      payload?: Record<string, unknown>;
+      actor?: RequestActorContext | null;
+      notify?: boolean;
+    },
+  ) {
+    const config = this.WORK_ORDER_LIFECYCLE_ALERTS[event];
+    const now = new Date();
+    const equipo = workOrder.equipment_id
+      ? await this.equipoRepo.findOne({
+          where: { id: workOrder.equipment_id, is_deleted: false },
+        })
+      : null;
+    const equipoLabel =
+      equipo?.codigo || equipo?.nombre || workOrder.equipment_id || 'General';
+
+    const payload: Record<string, unknown> = {
+      source: 'WORK_ORDER_LIFECYCLE',
+      tipo_alerta_publico: config.tipo_alerta,
+      work_order_event: event,
+      work_order_id: workOrder.id,
+      work_order_code: workOrder.code ?? null,
+      work_order_title: workOrder.title ?? null,
+      work_order_description: workOrder.description ?? null,
+      work_order_status: this.normalizeWorkflowStatus(workOrder.status_workflow),
+      maintenance_kind: workOrder.maintenance_kind ?? null,
+      equipo_id: workOrder.equipment_id ?? null,
+      equipo_codigo: equipo?.codigo ?? null,
+      equipo_nombre: equipo?.nombre ?? null,
+      actor_user_id: this.firstNonEmptyString(options?.actor?.userId) ?? null,
+      actor_username: this.firstNonEmptyString(options?.actor?.username) ?? null,
+      actor_name:
+        this.firstNonEmptyString(
+          options?.actor?.displayName,
+          options?.actor?.username,
+        ) ?? null,
+      actor_email: this.normalizeEmail(options?.actor?.email),
+      created_by: workOrder.created_by ?? null,
+      updated_by: workOrder.updated_by ?? null,
+      requested_by: workOrder.requested_by ?? null,
+      ...(options?.payload ?? {}),
+    };
+
+    const detalle =
+      this.firstNonEmptyString(options?.detalle) ??
+      `${equipoLabel} · ${workOrder.code ?? workOrder.id} · ${config.titulo}`;
+
+    const buildRow = (storedAlertType: string) =>
+      this.alertaRepo.create({
+        equipo_id: workOrder.equipment_id ?? null,
+        tipo_alerta: storedAlertType,
+        categoria: 'MANTENIMIENTO' as AlertCategory,
+        nivel: config.nivel,
+        origen: 'WORK_ORDER' as AlertOrigin,
+        referencia_tipo: 'WORK_ORDER',
+        referencia: `WORK_ORDER:${workOrder.id}:${event}:${now.getTime()}`,
+        detalle,
+        payload_json: { ...payload, tipo_alerta_guardado: storedAlertType },
+        work_order_id: workOrder.id,
+        fecha_generada: now,
+        ultima_evaluacion_at: now,
+        estado: config.estado,
+        resolved_at: config.estado === 'CERRADA' ? now : null,
+      });
+
+    let alertRow: AlertaMantenimientoEntity;
+    try {
+      alertRow = await this.alertaRepo.save(buildRow(config.tipo_alerta));
+    } catch (error: any) {
+      if (!this.isAlertTypeConstraintError(error)) throw error;
+      this.logger.warn(
+        `La BD aun no admite el tipo de alerta ${config.tipo_alerta}; se guardara como ${this.WORK_ORDER_AUTOGENERATED_ALERT_FALLBACK_TYPE}.`,
+      );
+      alertRow = await this.alertaRepo.save(
+        buildRow(this.WORK_ORDER_AUTOGENERATED_ALERT_FALLBACK_TYPE),
+      );
+    }
+
+    if (options?.notify !== false) {
+      await this.dispatchAlertTriggeredNotifications(alertRow);
+    }
+    return alertRow;
+  }
+
+  /**
+   * Cierra la alerta de bloqueo abierta de una OT cuando vuelve a liberarse.
+   */
+  private async closeWorkOrderBlockAlerts(workOrderId: string) {
+    const rows = await this.alertaRepo.find({
+      where: {
+        work_order_id: workOrderId,
+        origen: 'WORK_ORDER',
+        estado: In(['ABIERTA', 'EN_PROCESO']),
+        is_deleted: false,
+      },
+    });
+    const blocked = rows.filter(
+      (row) =>
+        this.resolveAlertPublicType(row) ===
+        this.WORK_ORDER_LIFECYCLE_ALERTS.BLOQUEADA.tipo_alerta,
+    );
+    if (!blocked.length) return;
+    const now = new Date();
+    for (const row of blocked) {
+      row.estado = 'CERRADA';
+      row.nivel = 'INFO';
+      row.resolved_at = now;
+      row.ultima_evaluacion_at = now;
+    }
+    await this.alertaRepo.save(blocked);
+  }
+
+  private buildConsumoEmailTableHtml(
+    items: Array<{
+      producto_label: string;
+      bodega_label: string;
+      cantidad: number;
+      costo_unitario: number;
+      subtotal: number;
+      observacion: string | null;
+    }>,
+  ) {
+    const rows = items
+      .map(
+        (item) => `
+          <tr>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.producto_label)}</td>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.bodega_label)}</td>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.cantidad.toFixed(2)}</td>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.costo_unitario.toFixed(2)}</td>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.subtotal.toFixed(2)}</td>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.observacion || '-')}</td>
+          </tr>`,
+      )
+      .join('');
+    const total = items.reduce((sum, item) => sum + item.subtotal, 0);
+    return `
+      <div style="margin-top:20px;overflow-x:auto;border:1px solid #dbe4f0;border-radius:12px;">
+        <table style="width:100%;min-width:760px;border-collapse:collapse;font-size:13px;color:#193550;">
+          <thead style="background:#eef4fb;">
+            <tr>
+              <th style="padding:10px;text-align:left;">Material</th>
+              <th style="padding:10px;text-align:left;">Bodega</th>
+              <th style="padding:10px;text-align:right;">Cantidad</th>
+              <th style="padding:10px;text-align:right;">Costo unit.</th>
+              <th style="padding:10px;text-align:right;">Subtotal</th>
+              <th style="padding:10px;text-align:left;">Observación</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+          <tfoot>
+            <tr>
+              <td colspan="4" style="padding:11px 10px;text-align:right;font-weight:700;background:#f6f9fc;">Total consumido</td>
+              <td style="padding:11px 10px;text-align:right;font-weight:800;background:#f6f9fc;">${total.toFixed(2)}</td>
+              <td style="background:#f6f9fc;"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>`;
+  }
+
+  /**
+   * Envía un único correo con todos los consumos acumulados de la OT.
+   */
+  private async sendWorkOrderConsumoEmails(
+    workOrder: WorkOrderEntity,
+    consumos: Array<{
+      producto_id: string;
+      bodega_id?: string | null;
+      cantidad: number;
+      costo_unitario?: number | null;
+      subtotal?: number | null;
+      observacion?: string | null;
+    }>,
+    actor?: RequestActorContext | null,
+  ) {
+    const valid = consumos.filter(
+      (item) => item.producto_id && this.toNumeric(item.cantidad, 0) > 0,
+    );
+    if (!valid.length) return { sent: 0, failed: 0, recipients: 0 };
+
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      valid.map((item) => item.producto_id),
+      valid
+        .map((item) => this.firstNonEmptyString(item.bodega_id))
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    const items = valid.map((item) => {
+      const producto = productMap.get(item.producto_id);
+      const bodega = item.bodega_id
+        ? warehouseMap.get(String(item.bodega_id))
+        : null;
+      const cantidad = this.toNumeric(item.cantidad, 0);
+      const costoUnitario = this.toNumeric(item.costo_unitario, 0);
+      return {
+        producto_label:
+          this.buildProductoLabel(producto) ?? item.producto_id,
+        bodega_label: this.buildBodegaLabel(bodega) ?? 'Sin bodega',
+        cantidad,
+        costo_unitario: costoUnitario,
+        subtotal:
+          item.subtotal != null
+            ? this.toNumeric(item.subtotal, 0)
+            : Number((cantidad * costoUnitario).toFixed(4)),
+        observacion: this.firstNonEmptyString(item.observacion),
+      };
+    });
+
+    const alertPayload: Record<string, unknown> = {
+      work_order_id: workOrder.id,
+      actor_user_id: this.firstNonEmptyString(actor?.userId),
+      actor_username: this.firstNonEmptyString(actor?.username),
+      actor_email: this.normalizeEmail(actor?.email),
+      created_by: workOrder.created_by ?? null,
+      updated_by: workOrder.updated_by ?? null,
+    };
+    const recipients =
+      await this.resolveAlertNotificationRecipients(alertPayload);
+    const transporter = await this.getAlertMailTransporter();
+    const workOrdersUrl = this.buildAppModuleUrl('work-orders');
+    let sent = 0;
+    let failed = 0;
+
+    if (!transporter) {
+      this.logger.warn(
+        `[ConsumoEmail:${workOrder.id}] SMTP no configurado; destinatarios resueltos=${recipients.length}.`,
+      );
+    } else {
+      for (const recipient of recipients) {
+        const recipientLabel =
+          recipient.displayName || recipient.username || 'usuario';
+        try {
+          await transporter.sendMail({
+            from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+            to: recipient.email,
+            subject: `[OT ${workOrder.code ?? workOrder.id}] Consumos registrados · ${items.length} material(es)`,
+            html: this.buildEnterpriseEmailLayout({
+              moduleLabel: 'Justice KPI · Órdenes de trabajo',
+              title: 'Consumos registrados en la OT',
+              summary: `Se registraron ${items.length} material(es) de consumo en la orden ${workOrder.code ?? workOrder.id}.`,
+              accent: '#245b84',
+              contentHtml: `
+                <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+                  Hola <strong>${this.escapeHtml(recipientLabel)}</strong>, este es el detalle consolidado de los materiales consumidos.
+                </p>
+                ${this.buildEmailInfoTable([
+                  { label: 'Orden', value: workOrder.code ?? workOrder.id },
+                  { label: 'Título', value: workOrder.title },
+                  { label: 'Descripción', value: workOrder.description },
+                  {
+                    label: 'Estado',
+                    value: this.normalizeWorkflowStatus(
+                      workOrder.status_workflow,
+                    ),
+                  },
+                  { label: 'Materiales', value: items.length },
+                ])}
+                ${this.buildConsumoEmailTableHtml(items)}
+                ${
+                  workOrdersUrl
+                    ? `<div style="margin-top:22px;text-align:center;">
+                        <a href="${this.escapeHtml(workOrdersUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#245b84;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Abrir órdenes de trabajo</a>
+                      </div>`
+                    : ''
+                }`,
+              footer:
+                'Correo automático del módulo de órdenes de trabajo de Justice KPI.',
+            }),
+            text: [
+              `Consumos registrados en la OT ${workOrder.code ?? workOrder.id}.`,
+              '',
+              ...items.map(
+                (item) =>
+                  `- ${item.producto_label} | ${item.bodega_label} | cantidad ${item.cantidad.toFixed(2)} | subtotal ${item.subtotal.toFixed(2)}${item.observacion ? ` | ${item.observacion}` : ''}`,
+              ),
+              '',
+              workOrdersUrl ? `Órdenes de trabajo: ${workOrdersUrl}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          });
+          sent += 1;
+        } catch (error: any) {
+          failed += 1;
+          this.logger.warn(
+            `[ConsumoEmail:${workOrder.id}] Fallo envio a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+          );
+        }
+      }
+    }
+
+    await this.emitWorkOrderLifecycleAlert(workOrder, 'CONSUMOS', {
+      actor,
+      notify: false,
+      detalle: `${workOrder.code ?? workOrder.id} · ${items.length} material(es) consumido(s)`,
+      payload: {
+        consumo_items: items,
+        total_materiales: items.length,
+        total_consumido: Number(
+          items.reduce((sum, item) => sum + item.subtotal, 0).toFixed(4),
+        ),
+        email_sent: sent,
+        email_failed: failed,
+      },
+    });
+
+    await this.writeSecurityLog({
+      typeLog: 'OT_CONSUMOS_NOTIFICADOS',
+      description: `[WO:${workOrder.id}] Consumos notificados: ${items.length} material(es); destinatarios=${recipients.length}, exitosos=${sent}, fallidos=${failed}`,
+      createdBy: this.firstNonEmptyString(actor?.username, actor?.userId),
+    });
+
+    return { sent, failed, recipients: recipients.length };
+  }
+
+  /**
+   * Agrupa los consumos de una misma OT durante `CONSUMO_EMAIL_BATCH_MS`
+   * (5 minutos) para que salga un solo correo con la tabla completa.
+   */
+  private queueWorkOrderConsumoEmail(
+    workOrder: WorkOrderEntity,
+    consumos: Array<{
+      producto_id: string;
+      bodega_id?: string | null;
+      cantidad: number;
+      costo_unitario?: number | null;
+      subtotal?: number | null;
+      observacion?: string | null;
+    }>,
+    actor?: RequestActorContext | null,
+  ) {
+    if (!consumos.length) return;
+    const key = workOrder.id;
+    const previous = this.consumoEmailBatches.get(key);
+    if (previous) clearTimeout(previous.timer);
+
+    const grouped = new Map<string, (typeof consumos)[number]>();
+    for (const item of [...(previous?.consumos ?? []), ...consumos]) {
+      const itemKey = `${item.bodega_id ?? ''}|${item.producto_id}|${item.observacion ?? ''}`;
+      const current = grouped.get(itemKey);
+      if (current) {
+        current.cantidad =
+          this.toNumeric(current.cantidad, 0) + this.toNumeric(item.cantidad, 0);
+        current.subtotal =
+          this.toNumeric(current.subtotal, 0) + this.toNumeric(item.subtotal, 0);
+      } else {
+        grouped.set(itemKey, {
+          ...item,
+          cantidad: this.toNumeric(item.cantidad, 0),
+          subtotal: this.toNumeric(item.subtotal, 0),
+        });
+      }
+    }
+
+    const timer = setTimeout(() => {
+      const batch = this.consumoEmailBatches.get(key);
+      if (!batch) return;
+      this.consumoEmailBatches.delete(key);
+      void this.sendWorkOrderConsumoEmails(
+        batch.workOrder,
+        batch.consumos,
+        batch.actor,
+      ).catch((error: any) => {
+        this.logger.warn(
+          `No se pudo notificar los consumos de la OT ${batch.workOrder.code}: ${error?.message ?? 'desconocido'}`,
+        );
+      });
+    }, this.CONSUMO_EMAIL_BATCH_MS);
+    timer.unref?.();
+    this.consumoEmailBatches.set(key, {
+      workOrder,
+      consumos: [...grouped.values()],
+      actor: actor ?? previous?.actor,
+      timer,
+    });
+  }
+
   private async notifyInventoryDecreaseForPairs(
     pairs: Array<{ producto_id: string; bodega_id: string }>,
   ) {
@@ -12494,47 +13355,145 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async buildAlertCandidates(options?: { includeInventory?: boolean }) {
-    const includeInventory = options?.includeInventory !== false;
+  /**
+   * Actividades del cronograma semanal que ya llegaron a su fecha y todavía no
+   * tienen OT vinculada. No se comunican como vencimiento sino como evento a
+   * realizar: el destinatario necesita saber qué actividad toca y a qué
+   * cronograma pertenece. El equivalente mensual no genera aviso cuando no hay
+   * OT, por decisión operativa.
+   */
+  private async buildCronogramaSemanalAlertCandidates(): Promise<
+    AlertCandidate[]
+  > {
+    const today = this.currentGuayaquilDateString();
+    const detalles = await this.cronogramaSemanalDetRepo.find({
+      where: { is_deleted: false },
+      order: { fecha_actividad: 'ASC', hora_inicio: 'ASC', orden: 'ASC' },
+    });
 
-    const [
-      programaciones,
-      reportesDiarios,
-      lubricantes,
-      combustibles,
-      inventario,
-      equipmentServices,
-    ] =
+    const pending = detalles.filter((item) => {
+      if (this.firstNonEmptyString(item.work_order_id)) return false;
+      const fecha = this.toDateOnlyString(item.fecha_actividad);
+      return Boolean(fecha && fecha <= today);
+    });
+    if (!pending.length) return [];
+
+    const cronogramaIds = [
+      ...new Set(pending.map((item) => item.cronograma_id).filter(Boolean)),
+    ];
+    const [cronogramas, equipos] = await Promise.all([
+      cronogramaIds.length
+        ? this.cronogramaSemanalRepo.find({
+            where: { id: In(cronogramaIds), is_deleted: false },
+          })
+        : Promise.resolve([] as CronogramaSemanalEntity[]),
+      this.equipoRepo.find({ where: { is_deleted: false } }),
+    ]);
+    const cronogramaById = new Map(cronogramas.map((item) => [item.id, item]));
+    const equipoByCodigo = new Map(
+      equipos
+        .filter((item) => this.firstNonEmptyString(item.codigo))
+        .map((item) => [this.normalizeWorkbookToken(item.codigo), item]),
+    );
+
+    return pending.flatMap((item) => {
+      const cronograma = cronogramaById.get(item.cronograma_id);
+      if (!cronograma) return [];
+      const fecha = this.toDateOnlyString(item.fecha_actividad)!;
+      const equipoCodigo = this.firstNonEmptyString(item.equipo_codigo);
+      const equipo = equipoCodigo
+        ? equipoByCodigo.get(this.normalizeWorkbookToken(equipoCodigo)) ?? null
+        : null;
+      const actividad =
+        this.firstNonEmptyString(item.actividad) ?? 'Actividad programada';
+      const horario = [item.hora_inicio, item.hora_fin]
+        .map((value) => this.firstNonEmptyString(value))
+        .filter(Boolean)
+        .join(' - ');
+
+      return [
+        {
+          equipo_id: equipo?.id ?? null,
+          tipo_alerta: 'EVENTO_A_REALIZAR',
+          categoria: 'MANTENIMIENTO' as AlertCategory,
+          nivel: 'WARNING' as AlertLevel,
+          origen: 'PROGRAMACION' as AlertOrigin,
+          referencia_tipo: 'CRONOGRAMA_SEMANAL',
+          referencia: `CRONOGRAMA_SEMANAL:${item.id}`,
+          detalle: [
+            equipoCodigo || equipo?.codigo || 'General',
+            actividad,
+            `programado ${fecha}${horario ? ` · ${horario}` : ''}`,
+            'sin OT asignada',
+          ].join(' · '),
+          payload_json: {
+            tipo_alerta_publico: 'EVENTO_A_REALIZAR',
+            evento_a_realizar: true,
+            cronograma_id: cronograma.id,
+            cronograma_codigo: cronograma.codigo ?? null,
+            cronograma_titulo:
+              this.firstNonEmptyString(
+                cronograma.resumen,
+                cronograma.referencia_orden,
+                cronograma.codigo,
+              ) ?? null,
+            detalle_id: item.id,
+            actividad,
+            tipo_proceso: item.tipo_proceso ?? null,
+            dia_semana: item.dia_semana ?? null,
+            fecha_actividad: fecha,
+            hora_inicio: item.hora_inicio ?? null,
+            hora_fin: item.hora_fin ?? null,
+            horas_asignadas: item.horas_asignadas ?? null,
+            responsable_area: item.responsable_area ?? null,
+            observacion: item.observacion ?? null,
+            locacion: cronograma.locacion ?? null,
+            equipo_id: equipo?.id ?? null,
+            equipo_codigo: equipoCodigo ?? equipo?.codigo ?? null,
+            equipo_nombre: equipo?.nombre ?? null,
+            actor_username: this.firstNonEmptyString(
+              cronograma.updated_by,
+              cronograma.created_by,
+            ),
+            actor_email: null,
+            actor_user_id: null,
+          },
+        },
+      ];
+    });
+  }
+
+  /**
+   * Catálogo vigente de alertas recalculadas periódicamente.
+   *
+   * Solo se mantienen los dos orígenes acordados:
+   *  - Equipos con mantenimiento por tiempo (`es_servicio`).
+   *  - Programaciones cuya OT asignada lleva 24 h de atraso, más las
+   *    actividades del cronograma semanal que aún no tienen OT.
+   *
+   * Los generadores de reporte diario, análisis de lubricante, combustible e
+   * inventario quedan desactivados a propósito. El código sigue disponible más
+   * abajo (`buildReporteDiarioAlertCandidates`, `buildLubricanteAlertCandidates`,
+   * `buildFuelAlertCandidates`, `buildInventoryAlertCandidates`) para poder
+   * reactivarlos volviendo a añadirlos a este `Promise.all`. El stock de bodega
+   * pasó a notificarse con el resumen diario de las 06:00
+   * (`sendDailyLowStockDigest`), no como alerta persistente.
+   */
+  private async buildAlertCandidates(_options?: { includeInventory?: boolean }) {
+    const [programaciones, cronogramaSemanal, equipmentServices] =
       await Promise.all([
         this.buildProgramacionAlertCandidates(),
-        this.buildReporteDiarioAlertCandidates(),
-        this.buildLubricanteAlertCandidates(),
-        this.buildFuelAlertCandidates(),
-        includeInventory
-          ? this.buildInventoryAlertCandidates()
-          : Promise.resolve([] as AlertCandidate[]),
+        this.buildCronogramaSemanalAlertCandidates(),
         this.buildEquipmentServiceAlertCandidates(),
       ]);
 
     const candidates = [
       ...programaciones,
-      ...reportesDiarios,
-      ...lubricantes,
-      ...combustibles,
-      ...inventario,
+      ...cronogramaSemanal,
       ...equipmentServices,
     ];
-    const normalized = candidates.map((candidate) => {
-      const isCriticalMaintenanceCondition =
-        candidate.origen === 'PROGRAMACION' ||
-        candidate.referencia_tipo === 'EQUIPO_SERVICIO_TIEMPO';
-      if (!isCriticalMaintenanceCondition && candidate.nivel === 'CRITICAL') {
-        return { ...candidate, nivel: 'WARNING' as AlertLevel };
-      }
-      return candidate;
-    });
 
-    return this.applyEquipmentIdentityToAlertCandidates(normalized);
+    return this.applyEquipmentIdentityToAlertCandidates(candidates);
   }
 
   private async syncAlertCandidates(
@@ -13431,17 +14390,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         note,
         { changedBy: this.resolveActorHistoryUserId(actor) },
       );
-      await this.publishInAppNotification({
-        title:
-          sync.action === 'created'
-            ? 'Programación generada desde una OT de Cebado'
-            : 'Programación de Cebado reprogramada',
-        body: `${workOrder.code} quedó programada para el ${fecha}`,
-        module: 'maintenance',
-        entityType: 'programacion',
-        entityId: sync.programacion.id,
-        level: 'info',
-      });
+      // Aviso de programación de Cebado retirado del alcance de alertas.
+      // Reactivar restaurando la notificación in-app:
+      // await this.publishInAppNotification({
+      //   title:
+      //     sync.action === 'created'
+      //       ? 'Programación generada desde una OT de Cebado'
+      //       : 'Programación de Cebado reprogramada',
+      //   body: `${workOrder.code} quedó programada para el ${fecha}`,
+      //   module: 'maintenance',
+      //   entityType: 'programacion',
+      //   entityId: sync.programacion.id,
+      //   level: 'info',
+      // });
       await this.writeSecurityLog({
         description: `[WO:${workOrder.id}] ${note} (programacion ${sync.programacion.id})`,
         typeLog: 'PROGRAMACION',
@@ -15157,26 +16118,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       order: { fecha: 'DESC', created_at: 'DESC' },
     });
     if (last && Number(dto.horometro) < Number(last.horometro)) {
-      const createdAlert = await this.alertaRepo.save(
-        this.alertaRepo.create({
-          equipo_id: equipoId,
-          tipo_alerta: 'ANOMALIA_HOROMETRO',
-          categoria: 'DATOS',
-          nivel: 'CRITICAL',
-          origen: 'BITACORA',
-          referencia_tipo: 'BITACORA',
-          referencia: `BITACORA:${equipoId}:${dto.fecha}`,
-          payload_json: {
-            equipo_id: equipoId,
-            fecha: dto.fecha,
-            nuevo_horometro: this.toNumeric(dto.horometro),
-            ultimo_horometro: this.toNumeric(last.horometro),
-            actor_username: this.firstNonEmptyString(dto.registrado_por),
-          },
-          detalle: `Horómetro ${dto.horometro} menor al último ${last.horometro}`,
-        }),
-      );
-      await this.dispatchAlertTriggeredNotifications(createdAlert);
+      // La alerta ANOMALIA_HOROMETRO quedó fuera del alcance vigente: la
+      // validación sigue rechazando el retroceso, pero ya no genera alerta ni
+      // correo. Reactivar restaurando el bloque siguiente:
+      // const createdAlert = await this.alertaRepo.save(
+      //   this.alertaRepo.create({
+      //     equipo_id: equipoId,
+      //     tipo_alerta: 'ANOMALIA_HOROMETRO',
+      //     categoria: 'DATOS',
+      //     nivel: 'CRITICAL',
+      //     origen: 'BITACORA',
+      //     referencia_tipo: 'BITACORA',
+      //     referencia: `BITACORA:${equipoId}:${dto.fecha}`,
+      //     payload_json: {
+      //       equipo_id: equipoId,
+      //       fecha: dto.fecha,
+      //       nuevo_horometro: this.toNumeric(dto.horometro),
+      //       ultimo_horometro: this.toNumeric(last.horometro),
+      //       actor_username: this.firstNonEmptyString(dto.registrado_por),
+      //     },
+      //     detalle: `Horómetro ${dto.horometro} menor al último ${last.horometro}`,
+      //   }),
+      // );
+      // await this.dispatchAlertTriggeredNotifications(createdAlert);
       throw new ConflictException('El horómetro no puede retroceder');
     }
     const saved = await this.bitacoraRepo.save(
@@ -15462,14 +16426,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const saved = await this.programacionRepo.save(entity);
     await this.mirrorProgramacionDateIntoCebadoWorkOrder(saved);
     const enriched = await this.recalculateProgramacionFields(saved);
-    await this.publishInAppNotification({
-      title: 'Nueva programación de mantenimiento',
-      body: `${enriched.plan_nombre} programado para ${enriched.equipo_nombre}`,
-      module: 'maintenance',
-      entityType: 'programacion',
-      entityId: saved.id,
-      level: 'info',
-    });
+    // La programación ya no avisa al crearse: solo alerta cuando su OT lleva
+    // 24 h de atraso sin arrancar. Reactivar restaurando:
+    // await this.publishInAppNotification({
+    //   title: 'Nueva programación de mantenimiento',
+    //   body: `${enriched.plan_nombre} programado para ${enriched.equipo_nombre}`,
+    //   module: 'maintenance',
+    //   entityType: 'programacion',
+    //   entityId: saved.id,
+    //   level: 'info',
+    // });
     await this.writeSecurityLog({
       description: `[PROGRAMACION:${saved.id}] Programación creada para equipo ${saved.equipo_id} y plan ${saved.plan_id}` ,
       typeLog: 'PROGRAMACION',
@@ -15619,14 +16585,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
     await this.mirrorProgramacionDateIntoCebadoWorkOrder(saved, actor);
     const enriched = await this.recalculateProgramacionFields(saved);
-    await this.publishInAppNotification({
-      title: 'Programación actualizada',
-      body: `${enriched.plan_nombre} actualizado para ${enriched.equipo_nombre}`,
-      module: 'maintenance',
-      entityType: 'programacion',
-      entityId: saved.id,
-      level: 'info',
-    });
+    // Aviso de programación actualizada retirado del alcance de alertas.
+    // Reactivar restaurando:
+    // await this.publishInAppNotification({
+    //   title: 'Programación actualizada',
+    //   body: `${enriched.plan_nombre} actualizado para ${enriched.equipo_nombre}`,
+    //   module: 'maintenance',
+    //   entityType: 'programacion',
+    //   entityId: saved.id,
+    //   level: 'info',
+    // });
     await this.writeSecurityLog({
       description: `[PROGRAMACION:${saved.id}] Programación actualizada`,
       typeLog: 'PROGRAMACION',
@@ -18992,7 +19960,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    await this.dispatchAlertTriggeredNotifications(alertRow);
+    // La reprogramación mensual ya no notifica: queda registrada como alerta
+    // informativa para trazabilidad. Reactivar el aviso restaurando:
+    // await this.dispatchAlertTriggeredNotifications(alertRow);
     return alertRow;
   }
 
@@ -20816,7 +21786,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }),
       this.programacionRepo.find({ where: { is_deleted: false, activo: true } }),
       this.woRepo.find({
-        where: { is_deleted: false, status_workflow: In(['PLANNED', 'IN_PROGRESS']) },
+        where: {
+          is_deleted: false,
+          status_workflow: In(['PLANNED', 'IN_PROGRESS', 'REVIEW']),
+        },
         order: { scheduled_start: 'DESC' },
       }),
     ]);
@@ -23929,47 +24902,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     source = 'manual',
     context: AlertRecalculationContext = {},
   ) {
-    const inventoryImportRunning =
-      this.inventoryImportSuppressed || (await this.isInventoryImportRunning());
-    const managedOrigins: AlertOrigin[] = inventoryImportRunning
-      ? [
-          'SYSTEM',
-          'PROGRAMACION',
-          'REPORTE_DIARIO',
-          'ANALISIS_LUBRICANTE',
-          'COMBUSTIBLE',
-        ]
-      : [
-          'SYSTEM',
-          'PROGRAMACION',
-          'REPORTE_DIARIO',
-          'ANALISIS_LUBRICANTE',
-          'COMBUSTIBLE',
-          'INVENTARIO',
-        ];
-    const candidates = await this.buildAlertCandidates({
-      includeInventory: !inventoryImportRunning,
-    });
-    const stats = await this.syncAlertCandidates(candidates, {
-      managedOrigins,
-      shouldNotifyCandidate: (candidate) => candidate.origen !== 'INVENTARIO',
-    });
-    const inventoryEmail = inventoryImportRunning
-      ? null
-      : await this.dispatchInventoryRecalculationEmails(
-          candidates,
-          source,
-          context,
-        );
-    return this.wrap(
-      {
-        source,
-        inventory_import_running: inventoryImportRunning,
-        inventory_email: inventoryEmail,
-        ...stats,
-      },
-      'Alertas recalculadas',
-    );
+    // Solo quedan vivos los orígenes de programación (incluido el cronograma
+    // semanal) y de equipos con mantenimiento por tiempo. El inventario dejó de
+    // ser alerta persistente: ahora se comunica con el resumen diario de stock.
+    const managedOrigins: AlertOrigin[] = ['SYSTEM', 'PROGRAMACION'];
+    const candidates = await this.buildAlertCandidates();
+    const stats = await this.syncAlertCandidates(candidates, { managedOrigins });
+    return this.wrap({ source, ...stats }, 'Alertas recalculadas');
   }
 
   private async processProgramacionesInWorkers(
@@ -24430,13 +25369,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `OT liberada por parte de la ${blocker.code}`,
         { fromStatus: 'BLOCKED' },
       );
-      await this.publishInAppNotification({
-        title: 'Orden desbloqueada',
-        body: `${saved.code} ya puede continuar porque culmino la OT anexada ${blocker.code}.`,
-        module: 'maintenance',
-        entityType: 'work-order',
-        entityId: saved.id,
-        level: 'success',
+      await this.closeWorkOrderBlockAlerts(saved.id);
+      await this.emitWorkOrderLifecycleAlert(saved, 'DESBLOQUEADA', {
+        detalle: `${saved.code ?? saved.id} liberada porque culminó la OT anexada ${blocker.code ?? blocker.id}`,
+        payload: {
+          unblocked_by_work_order_id: blocker.id,
+          unblocked_by_work_order_code: blocker.code ?? null,
+          restored_status: this.normalizeWorkflowStatus(saved.status_workflow),
+        },
       });
     }
   }
@@ -26024,15 +26964,40 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    // Avisos del ciclo de vida: solo en las transiciones acordadas.
+    const previousSavedStatus = this.normalizeWorkflowStatus(
+      transactionResult.previousStatus,
+    );
+    if (previousSavedStatus !== normalizedSavedStatus) {
+      if (normalizedSavedStatus === 'CLOSED') {
+        await safePostCommit('la alerta de OT finalizada', () =>
+          this.emitWorkOrderLifecycleAlert(saved, 'FINALIZADA', { actor }),
+        );
+      } else if (normalizedSavedStatus === 'BLOCKED') {
+        await safePostCommit('la alerta de OT bloqueada', () =>
+          this.emitWorkOrderLifecycleAlert(saved, 'BLOQUEADA', {
+            actor,
+            payload: { blocked_reason: saved.blocked_reason ?? null },
+          }),
+        );
+      } else if (previousSavedStatus === 'BLOCKED') {
+        await safePostCommit('la alerta de OT desbloqueada', async () => {
+          await this.closeWorkOrderBlockAlerts(saved.id);
+          return this.emitWorkOrderLifecycleAlert(saved, 'DESBLOQUEADA', {
+            actor,
+            payload: {
+              restored_status: normalizedSavedStatus,
+            },
+          });
+        });
+      }
+    }
+
     await safePostCommit('la sincronizacion de alertas de la OT', () =>
       this.syncAlertsForWorkOrder(saved),
     );
     if (dto.consumo_pendiente) {
-      this.queueInventoryReservationEmail(
-        saved,
-        [dto.consumo_pendiente],
-        actor,
-      );
+      this.queueWorkOrderConsumoEmail(saved, [dto.consumo_pendiente], actor);
     }
     if (dto.salida_materiales_pendiente?.items?.length) {
       await safePostCommit('la alerta de stock por salida de materiales', () =>
@@ -26053,18 +27018,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       title?: string | null;
     };
 
-    await safePostCommit('la notificacion interna', () =>
-      this.publishInAppNotification({
-        title: transactionResult.isNew
-          ? 'Nueva orden de trabajo creada'
-          : 'Orden de trabajo actualizada',
-        body: `${enrichedWorkOrder.code ?? saved.code} - ${enrichedWorkOrder.title ?? saved.title}`,
-        module: 'maintenance',
-        entityType: 'work-order',
-        entityId: saved.id,
-        level: normalizedSavedStatus === 'CLOSED' ? 'success' : 'info',
-      }),
-    );
+    // La notificación genérica de "OT actualizada" se retiró: la OT solo avisa
+    // en creación, consumos, finalización, bloqueo y desbloqueo.
     await this.writeSecurityLog({
       description: `[WO:${saved.id}] Guardado transaccional de OT ${saved.code}`,
       typeLog: 'WORK_ORDER',
@@ -26355,16 +27310,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       code_was_reassigned: resolution.codeWasReassigned,
       code_reassignment_reason: resolution.reassignmentReason,
     };
-    await this.publishInAppNotification({
-      title: 'Nueva orden de trabajo creada',
-      body: resolution.codeWasReassigned
-        ? `${enriched.code} - ${enriched.title}. Código ajustado automáticamente.`
-        : `${enriched.code} - ${enriched.title}`,
-      module: 'maintenance',
-      entityType: 'work-order',
-      entityId: created.id,
-      level: this.normalizeWorkflowStatus(created.status_workflow) === 'CLOSED' ? 'success' : 'info',
-    });
+    // El aviso de creación lo emite la alerta ORDEN_TRABAJO_GENERADA, que
+    // además envía el correo a los destinatarios resueltos.
     await this.writeSecurityLog({
       description: `[WO:${created.id}] Creación de OT ${created.code}${resolution.codeWasReassigned ? ` (reemplazó ${resolution.requestedCode ?? 'sin código'})` : ''}`,
       typeLog: 'WORK_ORDER',
@@ -26632,17 +27579,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     await this.syncAlertsForWorkOrder(saved);
     const enriched = await this.enrichWorkOrder(saved, actor);
-    await this.publishInAppNotification({
-      title: previousStatus !== saved.status_workflow ? 'Estado de orden de trabajo actualizado' : 'Orden de trabajo actualizada',
-      body:
-        previousStatus !== saved.status_workflow
-          ? `${enriched.code} cambió de ${previousStatus} a ${saved.status_workflow}`
-          : `${enriched.code} - ${enriched.title} (${saved.status_workflow})`,
-      module: 'maintenance',
-      entityType: 'work-order',
-      entityId: saved.id,
-      level: saved.status_workflow === 'CLOSED' ? 'success' : 'info',
-    });
+    // Solo se avisa en las transiciones acordadas; el resto de ediciones de la
+    // OT ya no genera notificación ni correo.
+    const nextStatus = this.normalizeWorkflowStatus(saved.status_workflow);
+    if (previousStatus !== nextStatus) {
+      if (nextStatus === 'CLOSED') {
+        await this.emitWorkOrderLifecycleAlert(saved, 'FINALIZADA', { actor });
+      } else if (nextStatus === 'BLOCKED') {
+        await this.emitWorkOrderLifecycleAlert(saved, 'BLOQUEADA', {
+          actor,
+          payload: { blocked_reason: saved.blocked_reason ?? null },
+        });
+      } else if (previousStatus === 'BLOCKED') {
+        await this.closeWorkOrderBlockAlerts(saved.id);
+        await this.emitWorkOrderLifecycleAlert(saved, 'DESBLOQUEADA', {
+          actor,
+          payload: { restored_status: nextStatus },
+        });
+      }
+    }
     await this.writeSecurityLog({
       description: `[WO:${saved.id}] Actualización de OT ${saved.code} (${previousStatus} -> ${saved.status_workflow})`,
       typeLog: 'WORK_ORDER',
@@ -28594,7 +29549,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       description: `[WO:${workOrderId}] Consumo registrado producto ${dto.producto_id} cantidad ${dto.cantidad}`,
       typeLog: 'CONSUMO',
     });
-    this.queueInventoryReservationEmail(workOrder, [dto], actor);
+    this.queueWorkOrderConsumoEmail(
+      workOrder,
+      [{ ...dto, costo_unitario: costoUnitario, subtotal }],
+      actor,
+    );
     return this.wrap(
       {
         ...this.mapConsumoWithCatalogs(

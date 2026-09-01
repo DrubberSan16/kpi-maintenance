@@ -787,7 +787,7 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 
-  it('bitácora con horómetro retrocedido crea alerta, notifica y rechaza la operación', async () => {
+  it('bitácora con horómetro retrocedido rechaza la operación sin generar alerta ni correo', async () => {
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',
       is_deleted: false,
@@ -811,13 +811,183 @@ describe('KpiMaintenanceService alerts', () => {
       } as any),
     ).rejects.toBeInstanceOf(ConflictException);
 
-    expect(repos.alertaRepo.save).toHaveBeenCalledTimes(1);
-    expect(dispatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'alert-1',
-        tipo_alerta: 'ANOMALIA_HOROMETRO',
-      }),
-    );
+    // ANOMALIA_HOROMETRO quedó fuera del alcance vigente: la validación sigue
+    // bloqueando el retroceso, pero ya no crea alerta ni notifica.
+    expect(repos.alertaRepo.save).not.toHaveBeenCalled();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  describe('alertas de programación por atraso de la OT', () => {
+    const HOUR = 60 * 60 * 1000;
+
+    const buildProgramacionRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'prog-1',
+      equipo_id: 'equipo-1',
+      equipo_codigo: 'EQ-01',
+      plan_id: 'plan-1',
+      plan_nombre: 'Plan 325',
+      work_order_id: 'wo-1',
+      estado_programacion: 'VENCIDA',
+      horas_restantes: null,
+      dias_restantes: null,
+      payload_json: {},
+      ...overrides,
+    });
+
+    const setup = (progRow: any, workOrder: any | null) => {
+      repos.programacionRepo.find.mockResolvedValue([progRow]);
+      jest
+        .spyOn(service as any, 'recalculateProgramacionFields')
+        .mockResolvedValue(progRow);
+      repos.woRepo.find.mockResolvedValue(workOrder ? [workOrder] : []);
+    };
+
+    it('no alerta si la OT planificada aún no acumula 24 h de atraso', async () => {
+      setup(buildProgramacionRow(), {
+        id: 'wo-1',
+        code: 'OT-1',
+        status_workflow: 'PLANNED',
+        scheduled_end: new Date(Date.now() - 3 * HOUR),
+      });
+
+      await expect(
+        (service as any).buildProgramacionAlertCandidates(),
+      ).resolves.toHaveLength(0);
+    });
+
+    it('alerta cuando la OT planificada supera las 24 h de atraso', async () => {
+      setup(buildProgramacionRow(), {
+        id: 'wo-1',
+        code: 'OT-1',
+        status_workflow: 'PLANNED',
+        scheduled_end: new Date(Date.now() - 30 * HOUR),
+      });
+
+      const candidates = await (
+        service as any
+      ).buildProgramacionAlertCandidates();
+
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toEqual(
+        expect.objectContaining({
+          tipo_alerta: 'MANTENIMIENTO_VENCIDO',
+          origen: 'PROGRAMACION',
+        }),
+      );
+      expect(candidates[0].payload_json.overdue_hours).toBeGreaterThanOrEqual(
+        24,
+      );
+    });
+
+    it('deja de alertar cuando la OT ya arrancó, aunque esté atrasada', async () => {
+      setup(buildProgramacionRow(), {
+        id: 'wo-1',
+        code: 'OT-1',
+        status_workflow: 'IN_PROGRESS',
+        scheduled_end: new Date(Date.now() - 96 * HOUR),
+      });
+
+      await expect(
+        (service as any).buildProgramacionAlertCandidates(),
+      ).resolves.toHaveLength(0);
+    });
+
+    it('no alerta una programación sin OT asignada', async () => {
+      setup(buildProgramacionRow({ work_order_id: null }), null);
+
+      await expect(
+        (service as any).buildProgramacionAlertCandidates(),
+      ).resolves.toHaveLength(0);
+    });
+  });
+
+  describe('avisos del cronograma semanal', () => {
+    it('genera un evento a realizar para la actividad semanal sin OT', async () => {
+      repos.cronogramaSemanalDetRepo.find.mockResolvedValue([
+        {
+          id: 'det-1',
+          cronograma_id: 'crono-1',
+          dia_semana: 'LUNES',
+          fecha_actividad: '2026-01-05',
+          hora_inicio: '08:00',
+          hora_fin: '10:00',
+          actividad: 'Cambio de filtros',
+          equipo_codigo: 'EQ-01',
+          work_order_id: null,
+          is_deleted: false,
+        },
+      ]);
+      repos.cronogramaSemanalRepo.find.mockResolvedValue([
+        { id: 'crono-1', codigo: 'CRON-01', resumen: 'Semana 1', is_deleted: false },
+      ]);
+      repos.equipoRepo.find.mockResolvedValue([
+        { id: 'equipo-1', codigo: 'EQ-01', nombre: 'Excavadora', is_deleted: false },
+      ]);
+
+      const candidates = await (
+        service as any
+      ).buildCronogramaSemanalAlertCandidates();
+
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toEqual(
+        expect.objectContaining({
+          tipo_alerta: 'EVENTO_A_REALIZAR',
+          equipo_id: 'equipo-1',
+          referencia: 'CRONOGRAMA_SEMANAL:det-1',
+        }),
+      );
+      expect(candidates[0].payload_json.actividad).toBe('Cambio de filtros');
+      expect(candidates[0].payload_json.cronograma_codigo).toBe('CRON-01');
+    });
+
+    it('omite la actividad semanal que ya tiene OT vinculada', async () => {
+      repos.cronogramaSemanalDetRepo.find.mockResolvedValue([
+        {
+          id: 'det-1',
+          cronograma_id: 'crono-1',
+          fecha_actividad: '2026-01-05',
+          actividad: 'Cambio de filtros',
+          equipo_codigo: 'EQ-01',
+          work_order_id: 'wo-9',
+          is_deleted: false,
+        },
+      ]);
+
+      await expect(
+        (service as any).buildCronogramaSemanalAlertCandidates(),
+      ).resolves.toHaveLength(0);
+    });
+  });
+
+  describe('estado En revisión de la orden de trabajo', () => {
+    it('reconoce el estado y lo mantiene editable', () => {
+      expect((service as any).normalizeWorkflowStatus('EN_REVISION')).toBe(
+        'REVIEW',
+      );
+      expect((service as any).normalizeWorkflowStatus('REVIEW')).toBe('REVIEW');
+      expect((service as any).isEditableWorkOrderStatus('REVIEW')).toBe(true);
+      expect((service as any).isEditableWorkOrderStatus('CLOSED')).toBe(false);
+    });
+
+    it('permite registrar consumos con la OT en revisión', () => {
+      expect(() =>
+        (service as any).assertWorkOrderAllowsMaterialReservation({
+          status_workflow: 'REVIEW',
+          valor_json: {},
+          status: 'ACTIVE',
+        }),
+      ).not.toThrow();
+    });
+
+    it('bloquea el registro de consumos con la OT finalizada', () => {
+      expect(() =>
+        (service as any).assertWorkOrderAllowsMaterialReservation({
+          status_workflow: 'CLOSED',
+          valor_json: {},
+          status: 'ACTIVE',
+        }),
+      ).toThrow();
+    });
   });
 
   it('la bitácora conserva su registro pero no sobrescribe el horómetro del equipo', async () => {
