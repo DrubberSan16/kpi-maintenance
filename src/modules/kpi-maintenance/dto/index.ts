@@ -2412,4 +2412,18 @@ export class DailyOperationsReportQueryDto {
   @IsOptional()
   @IsDateString()
   fecha?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fecha inicial del rango a consultar (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  from?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fecha final del rango a consultar (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  to?: string;
 }

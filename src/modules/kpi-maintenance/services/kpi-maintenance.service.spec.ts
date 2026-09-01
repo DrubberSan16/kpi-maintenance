@@ -178,7 +178,7 @@ describe('KpiMaintenanceService alerts', () => {
     ).toBe('EQ-A00011 - GRUA (XCMG 25)');
   });
 
-  it('resume el inventario mensual con nomenclatura clara y corte a la fecha elegida', async () => {
+  it('resume el inventario por rango con nomenclatura clara y corte a las fechas elegidas', async () => {
     (dataSource.query as jest.Mock).mockResolvedValueOnce([
       {
         producto_id: 'product-1',
@@ -203,13 +203,16 @@ describe('KpiMaintenanceService alerts', () => {
     ]);
 
     const result = await service.getMonthlyInventoryReport(
-      { fecha: '2026-08-18' } as any,
+      { from: '2026-07-15', to: '2026-08-18' } as any,
       null,
     );
 
     expect(dataSource.query).toHaveBeenCalledWith(
       expect.stringContaining('kardex.fecha <= $2::date'),
-      ['2026-08-01', '2026-08-18'],
+      ['2026-07-15', '2026-08-18'],
+    );
+    expect((result as any).data.filters).toEqual(
+      expect.objectContaining({ from: '2026-07-15', to: '2026-08-18' }),
     );
     expect((result as any).data.inventory).toEqual([
       expect.objectContaining({

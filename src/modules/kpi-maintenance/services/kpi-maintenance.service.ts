@@ -2597,6 +2597,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private buildDetailedReportDateRange(
+    query?: DailyOperationsReportQueryDto,
+  ) {
+    const targetDate =
+      this.safeDateOnlyString(query?.fecha) ?? this.currentGuayaquilDateString();
+    const defaultFrom = `${targetDate.slice(0, 7)}-01`;
+    const from = this.safeDateOnlyString(query?.from) ?? defaultFrom;
+    const to = this.safeDateOnlyString(query?.to) ?? targetDate;
+    const fromDate =
+      this.parseOilUsageDate(from) ?? new Date(`${from}T00:00:00.000`);
+    const toDate =
+      this.parseOilUsageDate(to, { endOfDay: true }) ??
+      new Date(`${to}T23:59:59.999`);
+
+    if (fromDate.getTime() > toDate.getTime()) {
+      throw new BadRequestException(
+        'La fecha inicial no puede ser mayor que la fecha final.',
+      );
+    }
+
+    return {
+      from,
+      to,
+      fromDate,
+      toDate,
+      label: `${this.formatOilUsageDateLabel(fromDate)} - ${this.formatOilUsageDateLabel(toDate)}`,
+    };
+  }
+
   private buildSystemReportPeriodLabel(date?: Date | null) {
     if (!date) return 'Sin periodo';
     return new Intl.DateTimeFormat('es-EC', {
@@ -21338,8 +21367,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     query: DailyOperationsReportQueryDto,
     sucursalId?: string | null,
   ) {
-    const dateRange = this.buildDailyOperationsDateRange(query);
-    const monthStart = `${dateRange.fecha.slice(0, 7)}-01`;
+    const dateRange = this.buildDetailedReportDateRange(query);
     const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.dataSource.query(
       `
@@ -21397,7 +21425,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
          AND stock.is_deleted = false
         ORDER BY producto.codigo ASC, producto.nombre ASC
       `,
-      [monthStart, dateRange.fecha],
+      [dateRange.from, dateRange.to],
     );
 
     const byProduct = new Map<string, any>();
@@ -21456,13 +21484,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(
       {
         filters: {
-          month: monthStart.slice(0, 7),
-          from: monthStart,
-          to: dateRange.fecha,
+          from: dateRange.from,
+          to: dateRange.to,
+          label: dateRange.label,
         },
         inventory,
       },
-      'Inventario mensual generado',
+      'Inventario del rango generado',
     );
   }
 
