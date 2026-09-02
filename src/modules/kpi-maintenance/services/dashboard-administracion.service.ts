@@ -507,6 +507,11 @@ export class DashboardAdministracionService {
    *
    * Devuelve los registros concretos que produjeron la cifra, para que se pueda
    * ver de donde sale cada numero en lugar de tener que fiarse del agregado.
+   *
+   * Todos los bloques se ordenan de la intervencion mas reciente a la mas
+   * antigua, y el codigo de orden desempata para que el resultado sea estable
+   * entre llamadas. El grafico del detalle respeta ese mismo orden: si la tabla
+   * y el grafico se leyeran al reves uno del otro, comparar seria enganoso.
    */
   async getDetalle(query: {
     bloque?: string;
@@ -539,7 +544,7 @@ export class DashboardAdministracionService {
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
           AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        ORDER BY fecha DESC, wo.code
+        ORDER BY fecha DESC, wo.code DESC
         `,
         [desde, hasta, equipoId],
       );
@@ -563,7 +568,7 @@ export class DashboardAdministracionService {
         WHERE COALESCE(cr.is_deleted, false) = false
           AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        ORDER BY costo DESC
+        ORDER BY fecha DESC, wo.code DESC, costo DESC
         `,
         [desde, hasta, equipoId],
       );
@@ -590,7 +595,7 @@ export class DashboardAdministracionService {
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CORRECTIVO'
           AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        ORDER BY fecha DESC
+        ORDER BY fecha DESC, wo.code DESC
         `,
         [desde, hasta, equipoId],
       );
