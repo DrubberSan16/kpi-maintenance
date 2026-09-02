@@ -8919,6 +8919,45 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
   }
 
+  /**
+   * Horas reales de una OT, medidas de `hora_inicio` a `hora_fin`.
+   *
+   * Es la fuente de verdad para las horas de la OT en los reportes. Devuelve
+   * null cuando la intervencion no tiene ambas marcas, para que quien llame
+   * pueda decidir si cae a otro calculo.
+   */
+  private resolveWorkOrderElapsedHours(
+    workOrder?: Pick<WorkOrderEntity, 'hora_inicio' | 'hora_fin'> | null,
+  ): number | null {
+    const inicio = workOrder?.hora_inicio
+      ? new Date(workOrder.hora_inicio as unknown as string)
+      : null;
+    const fin = workOrder?.hora_fin
+      ? new Date(workOrder.hora_fin as unknown as string)
+      : null;
+    if (!inicio || !fin) return null;
+    if (Number.isNaN(inicio.getTime()) || Number.isNaN(fin.getTime())) return null;
+    const horas = (fin.getTime() - inicio.getTime()) / 3_600_000;
+    if (!Number.isFinite(horas) || horas < 0) return null;
+    return Number(horas.toFixed(2));
+  }
+
+  /**
+   * Horas de la OT para reportes.
+   *
+   * Prioriza la duracion real (`hora_inicio`/`hora_fin`). Si la OT todavia no
+   * tiene esas marcas se cae a la suma de horas por responsable, que era el
+   * calculo anterior: asi el cambio no vacia los reportes historicos mientras
+   * se completa la captura.
+   */
+  private async resolveWorkOrderReportHours(
+    workOrder: Pick<WorkOrderEntity, 'id' | 'hora_inicio' | 'hora_fin'>,
+  ) {
+    const reales = this.resolveWorkOrderElapsedHours(workOrder);
+    if (reales != null) return reales;
+    return this.calculateWorkOrderTaskTotalHours(workOrder.id);
+  }
+
   private async calculateWorkOrderTaskTotalHours(workOrderId: string) {
     const tasks = await this.woTareaRepo.find({
       where: { work_order_id: workOrderId, is_deleted: false },
@@ -14541,7 +14580,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     for (const row of previousOrders) {
       const directHours = this.extractWorkOrderExecutionHours(row);
       if (directHours !== null) return directHours;
-      const taskHours = await this.calculateWorkOrderTaskTotalHours(row.id);
+      const taskHours = await this.resolveWorkOrderReportHours(row);
       if (taskHours > 0) return taskHours;
     }
 
@@ -19289,7 +19328,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           if (!workOrderHoursCache.has(workOrder.id)) {
             workOrderHoursCache.set(
               workOrder.id,
-              await this.calculateWorkOrderTaskTotalHours(workOrder.id),
+              await this.resolveWorkOrderReportHours(workOrder),
             );
           }
           workOrderHours = workOrderHoursCache.get(workOrder.id) ?? 0;
@@ -20122,7 +20161,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           'La orden de trabajo seleccionada no pertenece al equipo del bloque mensual.',
         );
       }
-      const workOrderHours = await this.calculateWorkOrderTaskTotalHours(workOrderId);
+      const workOrderHours = await this.resolveWorkOrderReportHours(workOrder);
       nextPayload.work_order_id = workOrder.id;
       nextPayload.work_order_code = workOrder.code ?? null;
       nextPayload.work_order_title = workOrder.title ?? null;

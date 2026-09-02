@@ -24,6 +24,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { KpiMaintenanceService } from '../services/kpi-maintenance.service';
+import { DashboardAdministracionService } from '../services/dashboard-administracion.service';
 import {
   AnalisisAceiteKpiQueryDto,
   AlertaQueryDto,
@@ -268,7 +269,10 @@ const bodyExamples = {
 
 @Controller()
 export class KpiMaintenanceController {
-  constructor(private readonly service: KpiMaintenanceService) {}
+  constructor(
+    private readonly service: KpiMaintenanceService,
+    private readonly dashboardAdministracion: DashboardAdministracionService,
+  ) {}
 
   @ApiTags('Support')
   @ApiOperation({ summary: 'Registrar incidente tecnico reportado desde cliente' })
@@ -946,6 +950,21 @@ export class KpiMaintenanceController {
   @Delete('programaciones/:id')
   deleteProgramacion(@Param('id') id: string) {
     return this.service.deleteProgramacion(id);
+  }
+
+  @ApiTags('Dashboard Administracion')
+  @ApiOperation({
+    summary:
+      'KPI de mantenimiento: disponibilidad, correctivos y reincidencia, cebado y aceite, repuestos, frecuencia por horometro, proyeccion y MTBF/MTTR',
+  })
+  @ApiQuery({ name: 'desde', required: false, type: String, description: 'YYYY-MM-DD' })
+  @ApiQuery({ name: 'hasta', required: false, type: String, description: 'YYYY-MM-DD' })
+  @Get('dashboard-administracion')
+  getDashboardAdministracion(
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+  ) {
+    return this.dashboardAdministracion.getDashboard({ desde, hasta });
   }
 
   @ApiTags('Alertas')

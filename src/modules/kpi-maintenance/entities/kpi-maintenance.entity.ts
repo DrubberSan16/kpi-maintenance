@@ -25,6 +25,15 @@ export class EquipoEntity {
   intervalo_mantenimiento_valor?: number | null;
   @Column({ type: 'text', nullable: true })
   intervalo_mantenimiento_unidad?: string | null;
+  /**
+   * Margenes del semaforo de mantenimiento por horometro, configurables por
+   * equipo. Anticipacion: % del intervalo antes del objetivo en que pasa a
+   * amarillo. Tolerancia: % que se admite por encima antes de pasar a rojo.
+   */
+  @Column('numeric', { precision: 6, scale: 2, default: 10 })
+  margen_anticipacion_pct: number;
+  @Column('numeric', { precision: 6, scale: 2, default: 0 })
+  margen_tolerancia_pct: number;
   @Column({ type: 'date', nullable: true })
   ultimo_servicio_fecha?: string | null;
   @Column({ type: 'date', nullable: true })
@@ -779,6 +788,15 @@ export class WorkOrderEntity {
   started_at?: Date | null;
   @Column({ type: 'timestamp without time zone', nullable: true })
   closed_at?: Date | null;
+  /**
+   * Inicio y fin reales de la intervencion. `started_at`/`closed_at` marcan el
+   * flujo de la OT; estos dos miden el trabajo efectivo y son la fuente de
+   * verdad para las horas de la OT en los reportes.
+   */
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  hora_inicio?: Date | null;
+  @Column({ type: 'timestamp without time zone', nullable: true })
+  hora_fin?: Date | null;
   @Column({ type: 'uuid', nullable: true }) requested_by?: string | null;
   @Column({ type: 'uuid', nullable: true }) approved_by?: string | null;
   @Column({ type: 'uuid', nullable: true }) assigned_to?: string | null;

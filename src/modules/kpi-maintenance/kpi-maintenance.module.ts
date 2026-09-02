@@ -2,6 +2,7 @@ import { Module, OnModuleInit } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { KpiMaintenanceController } from './controllers/kpi-maintenance.controller';
 import { KpiMaintenanceService } from './services/kpi-maintenance.service';
+import { DashboardAdministracionService } from './services/dashboard-administracion.service';
 import {
   AlertaMantenimientoEntity,
   AnalisisLubricanteDetalleEntity,
@@ -114,7 +115,7 @@ import {
     ]),
   ],
   controllers: [KpiMaintenanceController],
-  providers: [KpiMaintenanceService],
+  providers: [KpiMaintenanceService, DashboardAdministracionService],
 })
 export class KpiMaintenanceModule implements OnModuleInit {
   constructor(private readonly service: KpiMaintenanceService) {}
