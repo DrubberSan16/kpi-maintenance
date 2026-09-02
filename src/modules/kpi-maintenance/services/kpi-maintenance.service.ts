@@ -12818,7 +12818,234 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       estado: 'CERRADA',
       titulo: 'Orden de trabajo desbloqueada',
     },
+    EN_REVISION: {
+      tipo_alerta: 'ORDEN_TRABAJO_EN_REVISION',
+      nivel: 'INFO' as AlertLevel,
+      estado: 'CERRADA',
+      titulo: 'Orden de trabajo en revisión',
+    },
   } as const;
+
+  /** Umbrales de galones de aceite por orden, iguales a los del dashboard. */
+  private readonly CEBADO_VERDE_MAX = 5;
+  private readonly CEBADO_AMARILLO_MAX = 10;
+
+  /**
+   * Semaforo de consumo de aceite de una orden.
+   *
+   * Mide lo que gasto esa orden concreta, no el acumulado del equipo: el aviso
+   * a supervision existe para detectar la orden que se paso, no la unidad que
+   * lleva mucho consumido a lo largo del periodo.
+   */
+  private resolveConsumoAceiteSemaforo(galones: number) {
+    if (galones >= this.CEBADO_AMARILLO_MAX) {
+      return {
+        nivel: 'ROJO',
+        etiqueta: 'Consumo critico',
+        color: '#C62828',
+        detalle: '10 galones o mas en una sola orden',
+      };
+    }
+    if (galones > this.CEBADO_VERDE_MAX) {
+      return {
+        nivel: 'AMARILLO',
+        etiqueta: 'Seguimiento',
+        color: '#E17A00',
+        detalle: 'Entre 5 y 10 galones',
+      };
+    }
+    return {
+      nivel: 'VERDE',
+      etiqueta: 'Normal',
+      color: '#0F8F72',
+      detalle: 'Hasta 5 galones',
+    };
+  }
+
+  /** Galones de aceite consumidos por una orden. */
+  private async resolveWorkOrderOilGallons(workOrderId: string) {
+    const rows = await this.dataSource.query(
+      `
+      SELECT
+        COALESCE(SUM(cr.cantidad), 0)::numeric AS galones,
+        COALESCE(SUM(cr.subtotal), 0)::numeric AS costo,
+        string_agg(DISTINCT p.nombre, ', ') AS productos
+      FROM kpi_maintenance.tb_consumo_repuesto cr
+      INNER JOIN kpi_inventory.tb_producto p
+        ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+      WHERE cr.work_order_id = $1::uuid
+        AND COALESCE(cr.is_deleted, false) = false
+      `,
+      [workOrderId],
+    );
+    return {
+      galones: this.toNumeric(rows?.[0]?.galones, 0),
+      costo: this.toNumeric(rows?.[0]?.costo, 0),
+      productos: this.firstNonEmptyString(rows?.[0]?.productos),
+    };
+  }
+
+  /**
+   * Aviso a supervision cuando la OT pasa a revision.
+   *
+   * Se envia solo a los supervisores activos, no a la lista completa de
+   * destinatarios de alertas: es una revision operativa, no una alerta de
+   * gerencia. El correo dice cuanto aceite se uso y en que nivel cae.
+   */
+  private async sendWorkOrderReviewEmails(
+    workOrder: WorkOrderEntity,
+    actor?: RequestActorContext | null,
+  ) {
+    const consumo = await this.resolveWorkOrderOilGallons(workOrder.id);
+    const semaforo = this.resolveConsumoAceiteSemaforo(consumo.galones);
+
+    const users = await this.fetchSecurityUsers();
+    const supervisores = this.findSecurityUsersByRole(users, (roleName) =>
+      roleName.includes('SUPERVISOR'),
+    ).filter((item) => Boolean(this.normalizeEmail(item.email)));
+
+    if (!supervisores.length) {
+      this.logger.warn(
+        `[RevisionOT:${workOrder.id}] Sin supervisores activos con correo; no se notifica.`,
+      );
+      return { sent: 0, failed: 0, recipients: 0, semaforo, consumo };
+    }
+
+    const equipo = workOrder.equipment_id
+      ? await this.equipoRepo.findOne({
+          where: { id: workOrder.equipment_id, is_deleted: false },
+        })
+      : null;
+    const equipoLabel =
+      this.firstNonEmptyString(equipo?.nombre, equipo?.nombre_real, equipo?.codigo) ??
+      'Equipo';
+
+    const transporter = await this.getAlertMailTransporter();
+    const workOrdersUrl = this.buildAppModuleUrl('work-orders');
+    let sent = 0;
+    let failed = 0;
+
+    if (!transporter) {
+      this.logger.warn(
+        `[RevisionOT:${workOrder.id}] SMTP no configurado; supervisores resueltos=${supervisores.length}.`,
+      );
+    } else {
+      for (const supervisor of supervisores) {
+        const email = this.normalizeEmail(supervisor.email)!;
+        const nombre = this.buildSecurityUserDisplayName(supervisor);
+        try {
+          await transporter.sendMail({
+            from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+            to: email,
+            subject: `[Revision OT ${workOrder.code ?? workOrder.id}] ${equipoLabel} · ${semaforo.etiqueta} · ${consumo.galones.toFixed(2)} gal`,
+            html: this.buildEnterpriseEmailLayout({
+              moduleLabel: 'Justice KPI · Ordenes de trabajo',
+              title: 'Orden de trabajo en revision',
+              summary: `La orden ${workOrder.code ?? workOrder.id} paso a revision. Consumo de aceite: ${consumo.galones.toFixed(2)} galones.`,
+              accent: semaforo.color,
+              contentHtml: `
+                <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+                  Hola <strong>${this.escapeHtml(nombre)}</strong>, esta orden entro en revision y requiere tu validacion.
+                </p>
+                <div style="margin-bottom:18px;padding:14px 16px;border-left:4px solid ${semaforo.color};background:#f7f9fc;border-radius:10px;">
+                  <div style="font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:${semaforo.color};">
+                    ${this.escapeHtml(semaforo.etiqueta)}
+                  </div>
+                  <div style="margin-top:4px;font-size:22px;font-weight:800;color:#17324d;">
+                    ${consumo.galones.toFixed(2)} galones
+                  </div>
+                  <div style="font-size:13px;color:#5a728a;">${this.escapeHtml(semaforo.detalle)}</div>
+                </div>
+                ${this.buildEmailInfoTable([
+                  { label: 'Orden', value: workOrder.code ?? workOrder.id },
+                  { label: 'Titulo', value: workOrder.title },
+                  { label: 'Descripcion', value: workOrder.description },
+                  { label: 'Equipo', value: equipoLabel },
+                  { label: 'Aceite', value: consumo.productos ?? 'Sin consumo registrado' },
+                  { label: 'Costo del aceite', value: consumo.costo.toFixed(2) },
+                  {
+                    label: 'Paso a revision',
+                    value: this.formatAlertEmailDate(new Date()),
+                  },
+                  {
+                    label: 'Responsable',
+                    value:
+                      this.firstNonEmptyString(actor?.displayName, actor?.username) ??
+                      'No disponible',
+                  },
+                ])}
+                ${
+                  workOrdersUrl
+                    ? `<div style="margin-top:22px;text-align:center;">
+                        <a href="${this.escapeHtml(workOrdersUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:${semaforo.color};color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Revisar la orden</a>
+                      </div>`
+                    : ''
+                }`,
+              footer:
+                'Correo automatico del modulo de ordenes de trabajo de Justice KPI.',
+            }),
+            text: [
+              `Hola ${nombre},`,
+              '',
+              `La orden ${workOrder.code ?? workOrder.id} paso a revision.`,
+              '',
+              `Equipo: ${equipoLabel}`,
+              `Consumo de aceite: ${consumo.galones.toFixed(2)} galones`,
+              `Nivel: ${semaforo.etiqueta} (${semaforo.detalle})`,
+              consumo.productos ? `Aceite: ${consumo.productos}` : '',
+              '',
+              workOrdersUrl ? `Revisar la orden: ${workOrdersUrl}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          });
+          sent += 1;
+        } catch (error: any) {
+          failed += 1;
+          this.logger.warn(
+            `[RevisionOT:${workOrder.id}] Fallo envio a ${email}: ${error?.message ?? 'desconocido'}`,
+          );
+        }
+      }
+    }
+
+    await this.writeSecurityLog({
+      typeLog: 'OT_EN_REVISION_NOTIFICADA',
+      description: `[WO:${workOrder.id}] Revision notificada. Aceite=${consumo.galones.toFixed(2)} gal, nivel=${semaforo.nivel}, supervisores=${supervisores.length}, exitosos=${sent}, fallidos=${failed}`,
+      createdBy: this.firstNonEmptyString(actor?.username, actor?.userId),
+    });
+
+    return {
+      sent,
+      failed,
+      recipients: supervisores.length,
+      semaforo,
+      consumo,
+    };
+  }
+
+  /** Registra la alerta de revision y avisa a supervision. */
+  private async handleWorkOrderReview(
+    workOrder: WorkOrderEntity,
+    actor?: RequestActorContext | null,
+  ) {
+    const resultado = await this.sendWorkOrderReviewEmails(workOrder, actor);
+    await this.emitWorkOrderLifecycleAlert(workOrder, 'EN_REVISION', {
+      actor,
+      notify: false,
+      detalle: `${workOrder.code ?? workOrder.id} paso a revision · ${resultado.consumo.galones.toFixed(2)} gal · ${resultado.semaforo.etiqueta}`,
+      payload: {
+        consumo_aceite_galones: resultado.consumo.galones,
+        consumo_aceite_costo: resultado.consumo.costo,
+        semaforo_aceite: resultado.semaforo,
+        supervisores_notificados: resultado.recipients,
+        email_enviados: resultado.sent,
+        email_fallidos: resultado.failed,
+      },
+    });
+    return resultado;
+  }
+
 
   /**
    * Registra y notifica un evento del ciclo de vida de la OT.
@@ -27040,6 +27267,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             payload: { blocked_reason: saved.blocked_reason ?? null },
           }),
         );
+      } else if (normalizedSavedStatus === 'REVIEW') {
+        await safePostCommit('el aviso de OT en revision', () =>
+          this.handleWorkOrderReview(saved, actor),
+        );
       } else if (previousSavedStatus === 'BLOCKED') {
         await safePostCommit('la alerta de OT desbloqueada', async () => {
           await this.closeWorkOrderBlockAlerts(saved.id);
@@ -27650,6 +27881,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           actor,
           payload: { blocked_reason: saved.blocked_reason ?? null },
         });
+      } else if (nextStatus === 'REVIEW') {
+        await this.handleWorkOrderReview(saved, actor);
       } else if (previousStatus === 'BLOCKED') {
         await this.closeWorkOrderBlockAlerts(saved.id);
         await this.emitWorkOrderLifecycleAlert(saved, 'DESBLOQUEADA', {

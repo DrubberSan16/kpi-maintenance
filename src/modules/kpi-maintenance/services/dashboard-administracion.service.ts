@@ -213,57 +213,78 @@ export class DashboardAdministracionService {
   private async getCebado(desde: string, hasta: string, equipoId: string | null) {
     const filas = await this.dataSource.query(
       `
+      WITH por_orden AS (
+        -- El semaforo mide lo que gasto cada orden, asi que primero se totaliza
+        -- por OT y solo despues se agrega por equipo. Sumar todas las lineas del
+        -- periodo y semaforizar ese total mediria otra cosa.
+        SELECT
+          wo.id AS work_order_id,
+          wo.equipment_id,
+          COALESCE(wo.hora_inicio, wo.created_at) AS momento,
+          SUM(cr.cantidad) AS galones,
+          SUM(COALESCE(cr.subtotal, 0)) AS costo
+        FROM kpi_process.tb_work_order wo
+        INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
+          ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
+        INNER JOIN kpi_inventory.tb_producto p
+          ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        WHERE COALESCE(wo.is_deleted, false) = false
+          AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
+          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        GROUP BY wo.id, wo.equipment_id, momento
+      )
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
         COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
         e.nombre_real AS equipo_descripcion,
-        ROUND(COALESCE(SUM(cr.cantidad), 0)::numeric, 2) AS galones_periodo,
-        ROUND(COALESCE(SUM(cr.cantidad) FILTER (
-          WHERE COALESCE(wo.hora_inicio, wo.created_at) >= $2::timestamp - INTERVAL '7 days'
+        ROUND(COALESCE(SUM(o.galones), 0)::numeric, 2) AS galones_periodo,
+        ROUND(COALESCE(SUM(o.galones) FILTER (
+          WHERE o.momento >= $2::timestamp - INTERVAL '7 days'
         ), 0)::numeric, 2) AS galones_semana,
-        ROUND(COALESCE(SUM(cr.cantidad) FILTER (
-          WHERE COALESCE(wo.hora_inicio, wo.created_at) >= $2::timestamp - INTERVAL '30 days'
+        ROUND(COALESCE(SUM(o.galones) FILTER (
+          WHERE o.momento >= $2::timestamp - INTERVAL '30 days'
         ), 0)::numeric, 2) AS galones_mes,
-        COUNT(DISTINCT wo.id) AS ots_cebado,
-        ROUND(COALESCE(SUM(cr.subtotal), 0)::numeric, 2) AS costo_aceite
-      FROM kpi_process.tb_work_order wo
-      INNER JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
-      INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
-        ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
-      INNER JOIN kpi_inventory.tb_producto p
-        ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
-      WHERE COALESCE(wo.is_deleted, false) = false
-        AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
-        AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
-        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        COUNT(o.work_order_id) AS ots_cebado,
+        COUNT(*) FILTER (WHERE o.galones >= 10) AS ots_criticas,
+        COUNT(*) FILTER (WHERE o.galones > 5 AND o.galones < 10) AS ots_seguimiento,
+        ROUND(COALESCE(MAX(o.galones), 0)::numeric, 2) AS galones_max_orden,
+        ROUND(COALESCE(SUM(o.costo), 0)::numeric, 2) AS costo_aceite
+      FROM por_orden o
+      INNER JOIN kpi_maintenance.tb_equipo e ON e.id = o.equipment_id
       GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
-      ORDER BY galones_periodo DESC, e.codigo
+      ORDER BY ots_criticas DESC, galones_periodo DESC, e.codigo
       `,
       [desde, hasta, equipoId],
     );
 
-    return filas.map((row: any) => {
-      const galones = Number(row.galones_periodo ?? 0);
-      const semana = Number(row.galones_semana ?? 0);
-      const mes = Number(row.galones_mes ?? 0);
-      // Tendencia: se compara el ritmo semanal con el ritmo medio mensual. Si la
-      // última semana consume mas que la media, el consumo va en aumento.
-      const ritmoMensualSemanal = mes / 4;
-      let tendencia: 'ESTABLE' | 'AL_ALZA' | 'A_LA_BAJA' = 'ESTABLE';
-      if (ritmoMensualSemanal > 0) {
-        if (semana > ritmoMensualSemanal * 1.15) tendencia = 'AL_ALZA';
-        else if (semana < ritmoMensualSemanal * 0.85) tendencia = 'A_LA_BAJA';
-      }
-      return {
-        ...row,
-        galones_periodo: galones,
-        galones_semana: semana,
-        galones_mes: mes,
-        semaforo: this.resolveCebadoSemaforo(galones),
-        tendencia,
-      };
-    });
+    // El resumen no lleva semaforo ni tendencia propios: ambos son por orden y
+    // viven en el detalle. Aqui se informa cuantas ordenes del equipo cayeron en
+    // cada nivel, que es el agregado honesto de una medida por OT.
+    return filas.map((row: any) => ({
+      ...row,
+      galones_periodo: Number(row.galones_periodo ?? 0),
+      galones_semana: Number(row.galones_semana ?? 0),
+      galones_mes: Number(row.galones_mes ?? 0),
+      galones_max_orden: Number(row.galones_max_orden ?? 0),
+      ots_cebado: Number(row.ots_cebado ?? 0),
+      ots_criticas: Number(row.ots_criticas ?? 0),
+      ots_seguimiento: Number(row.ots_seguimiento ?? 0),
+    }));
+  }
+
+  /**
+   * Tendencia de una orden frente a la anterior del mismo equipo.
+   *
+   * Se usa un margen del 10% para no marcar como cambio lo que es ruido de
+   * medicion: repostar 5.0 y luego 5.2 galones no es una tendencia al alza.
+   */
+  private resolveTendenciaOrden(actual: number, anterior: number | null) {
+    if (anterior == null || anterior <= 0) return 'SIN_REFERENCIA';
+    if (actual > anterior * 1.1) return 'AL_ALZA';
+    if (actual < anterior * 0.9) return 'A_LA_BAJA';
+    return 'ESTABLE';
   }
 
   /** Semaforización de galones del punto 3. */
@@ -532,17 +553,21 @@ export class DashboardAdministracionService {
     const bloque = String(query.bloque ?? '').trim().toLowerCase();
 
     if (bloque === 'cebado') {
+      // Una fila por orden, no por linea de consumo: el semaforo mide lo que
+      // gasto la OT completa, y una orden puede tener varias lineas de aceite.
       const filas = await this.dataSource.query(
         `
         SELECT
           wo.id AS work_order_id,
           wo.code AS orden,
           wo.title AS titulo,
+          wo.equipment_id,
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
-          p.nombre AS producto,
-          ROUND(cr.cantidad::numeric, 2) AS galones,
-          ROUND(COALESCE(cr.subtotal, 0)::numeric, 2) AS costo,
-          cr.observacion
+          COALESCE(wo.hora_inicio, wo.created_at) AS momento,
+          string_agg(DISTINCT p.nombre, ', ') AS producto,
+          ROUND(SUM(cr.cantidad)::numeric, 2) AS galones,
+          ROUND(SUM(COALESCE(cr.subtotal, 0))::numeric, 2) AS costo,
+          COUNT(cr.id) AS lineas
         FROM kpi_process.tb_work_order wo
         INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
           ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
@@ -552,10 +577,33 @@ export class DashboardAdministracionService {
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
           AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        ORDER BY fecha DESC, wo.code DESC
+        GROUP BY wo.id, wo.code, wo.title, wo.equipment_id, fecha, momento
+        ORDER BY momento DESC, wo.code DESC
         `,
         [desde, hasta, equipoId],
       );
+
+      // La tendencia compara cada orden con la anterior del mismo equipo. Las
+      // filas llegan de la mas reciente a la mas antigua, asi que la "anterior"
+      // es la siguiente posicion dentro del grupo.
+      const porEquipo = new Map<string, any[]>();
+      for (const fila of filas) {
+        const clave = String(fila.equipment_id ?? '');
+        if (!porEquipo.has(clave)) porEquipo.set(clave, []);
+        porEquipo.get(clave)!.push(fila);
+      }
+      for (const grupo of porEquipo.values()) {
+        grupo.forEach((fila, indice) => {
+          const actual = Number(fila.galones ?? 0);
+          const anterior = grupo[indice + 1]
+            ? Number(grupo[indice + 1].galones ?? 0)
+            : null;
+          fila.galones_orden_anterior = anterior;
+          fila.tendencia = this.resolveTendenciaOrden(actual, anterior);
+          fila.semaforo = this.resolveCebadoSemaforo(actual);
+        });
+      }
+
       return this.wrap({ bloque: 'cebado', filas }, 'Detalle de cebado');
     }
 
@@ -720,9 +768,14 @@ export class DashboardAdministracionService {
           .reduce((sum, row) => sum + Number(row.galones_periodo ?? 0), 0)
           .toFixed(2),
       ),
-      equipos_cebado_rojo: input.cebado.filter(
-        (row) => row.semaforo?.nivel === 'ROJO',
-      ).length,
+      ordenes_cebado_criticas: input.cebado.reduce(
+        (sum, row) => sum + Number(row.ots_criticas ?? 0),
+        0,
+      ),
+      ordenes_cebado_seguimiento: input.cebado.reduce(
+        (sum, row) => sum + Number(row.ots_seguimiento ?? 0),
+        0,
+      ),
       costo_repuestos: Number(
         input.repuestos
           .reduce((sum, row) => sum + Number(row.costo ?? 0), 0)
