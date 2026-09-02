@@ -6097,12 +6097,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private buildServiceRequestHeaders(url: string, includeJson = false) {
     const headers: Record<string, string> = {};
     if (includeJson) headers['Content-Type'] = 'application/json';
-    if (
-      this.internalServiceToken &&
-      this.securityServiceUrl &&
-      (url === this.securityServiceUrl ||
-        url.startsWith(`${this.securityServiceUrl}/`))
-    ) {
+    // El token interno viaja a los servicios propios de la suite, nunca a
+    // terceros. Desde que el gateway exige identidad tambien en notificaciones,
+    // omitirlo alli hacia que las notificaciones in-app fallaran con 401 y se
+    // perdieran en silencio, porque quien llama solo registra un aviso.
+    const destinosInternos = [this.securityServiceUrl, this.notificationServiceUrl]
+      .map((base) => String(base || '').trim())
+      .filter(Boolean);
+    const esDestinoInterno = destinosInternos.some(
+      (base) => url === base || url.startsWith(`${base}/`),
+    );
+    if (this.internalServiceToken && esDestinoInterno) {
       headers['X-Internal-Service-Token'] = this.internalServiceToken;
     }
     return headers;
@@ -6143,6 +6148,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       });
     } catch (error: any) {
       this.logger.warn(`No se pudo publicar notificación: ${error?.message ?? 'desconocido'}`);
+    }
+  }
+
+  /**
+   * Senal de cambio de datos para las pantallas abiertas.
+   *
+   * Es efimera: no crea notificacion ni alerta, solo hace que un dashboard
+   * abierto se recargue. Va aparte del canal de la campana para no ensuciarla.
+   * Si el servicio de notificaciones no responde, la operacion de origen sigue
+   * su curso: refrescar la pantalla nunca puede bloquear un guardado.
+   */
+  private async broadcastDataChanged(payload: {
+    recurso: string;
+    accion: string;
+    id?: string | null;
+  }) {
+    if (!this.notificationServiceUrl) return;
+    try {
+      await this.postJson(`${this.notificationServiceUrl}/notifications/data-changed`, payload);
+    } catch (error: any) {
+      this.logger.debug(
+        `No se pudo emitir la senal de cambio (${payload.recurso}): ${error?.message ?? 'desconocido'}`,
+      );
     }
   }
 
@@ -13569,6 +13597,155 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return new Date(`${dateOnly}T05:00:00.000Z`);
   }
 
+  /**
+   * Alertas anticipadas de mantenimiento por horometro (punto 6).
+   *
+   * Calcula, a partir del ultimo mantenimiento de cada equipo, el horometro
+   * objetivo del siguiente y las horas que faltan. El semaforo usa los margenes
+   * configurables de la unidad, de modo que MTU 500 h, Cummins 350 h y
+   * Caterpillar 250 h se resuelven solas sin reglas por marca:
+   *
+   *   VERDE     dentro de la frecuencia
+   *   AMARILLO  entra en el margen de anticipacion (por defecto, el ultimo 10%)
+   *   ROJO      supera el objetivo mas la tolerancia (por defecto, 0%)
+   *
+   * Solo se emiten alertas de amarillo y rojo: el verde es el estado normal y
+   * avisar de el seria ruido.
+   *
+   * La referencia incluye el horometro objetivo, asi que al ejecutar el
+   * mantenimiento el objetivo avanza, la alerta anterior queda obsoleta y se
+   * cierra sola en la siguiente pasada del recalculo.
+   *
+   * Es la misma regla que presenta el Dashboard Administracion; si una cambia,
+   * la otra tiene que cambiar con ella.
+   */
+  private async buildHorometroAlertCandidates(): Promise<AlertCandidate[]> {
+    const filas = await this.dataSource.query(
+      `
+      WITH ultimo_mant AS (
+        SELECT DISTINCT ON (wo.equipment_id)
+          wo.equipment_id,
+          wo.code AS work_order_code,
+          COALESCE(wo.hora_fin, wo.closed_at)::date AS fecha,
+          NULLIF((wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro
+        FROM kpi_process.tb_work_order wo
+        WHERE COALESCE(wo.is_deleted, false) = false
+          AND UPPER(COALESCE(wo.status_workflow, '')) IN ('CLOSED', 'CERRADA', 'CERRADO')
+          AND UPPER(COALESCE(wo.maintenance_kind, '')) IN ('PREVENTIVO', 'CEBADO')
+        ORDER BY wo.equipment_id, COALESCE(wo.hora_fin, wo.closed_at) DESC
+      )
+      SELECT
+        e.id AS equipo_id,
+        e.codigo AS equipo_codigo,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
+        m.nombre AS marca,
+        e.horometro_actual::numeric AS horometro_actual,
+        e.intervalo_mantenimiento_valor::numeric AS frecuencia,
+        e.intervalo_mantenimiento_unidad AS frecuencia_unidad,
+        e.margen_anticipacion_pct::numeric AS margen_anticipacion_pct,
+        e.margen_tolerancia_pct::numeric AS margen_tolerancia_pct,
+        u.horometro AS horometro_ultimo_mantenimiento,
+        u.fecha AS fecha_ultimo_mantenimiento,
+        u.work_order_code AS ultima_ot,
+        e.updated_by
+      FROM kpi_maintenance.tb_equipo e
+      LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
+      LEFT JOIN ultimo_mant u ON u.equipment_id = e.id
+      WHERE COALESCE(e.is_deleted, false) = false
+        AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
+        AND COALESCE(e.intervalo_mantenimiento_valor, 0) > 0
+        AND COALESCE(e.horometro_actual, 0) > 0
+      `,
+    );
+
+    return filas.flatMap((row: any): AlertCandidate[] => {
+      const frecuencia = this.toNumeric(row.frecuencia, 0);
+      const horometroActual = this.toNumeric(row.horometro_actual, 0);
+      // La frecuencia en dias la cubre buildEquipmentServiceAlertCandidates.
+      const unidad = String(row.frecuencia_unidad ?? '').trim().toUpperCase();
+      if (unidad && !unidad.startsWith('HORA')) return [];
+      if (frecuencia <= 0 || horometroActual <= 0) return [];
+
+      // Sin una referencia fiable del ultimo mantenimiento no se puede proyectar.
+      // Hay equipos cuya ultima OT quedo con horometro 0: tomarlo al pie de la
+      // letra produciria avisos del tipo "superó por 22.741 h", que son falsos y
+      // arruinan la confianza en el resto de alertas. Se prefiere no avisar y
+      // que el dato se corrija.
+      const referencia = this.toNumeric(row.horometro_ultimo_mantenimiento, 0);
+      const referenciaFiable =
+        row.horometro_ultimo_mantenimiento != null &&
+        referencia > 0 &&
+        referencia <= horometroActual;
+      if (!referenciaFiable) return [];
+
+      const base = referencia;
+      const objetivo = Number((base + frecuencia).toFixed(2));
+      const restantes = Number((objetivo - horometroActual).toFixed(2));
+
+      const anticipacion =
+        (frecuencia * this.toNumeric(row.margen_anticipacion_pct, 10)) / 100;
+      const tolerancia =
+        (frecuencia * this.toNumeric(row.margen_tolerancia_pct, 0)) / 100;
+
+      const vencido = restantes < -tolerancia;
+      const proximo = !vencido && restantes <= anticipacion;
+      // Verde: nada que avisar.
+      if (!vencido && !proximo) return [];
+
+      const equipoLabel =
+        this.firstNonEmptyString(
+          row.equipo_nombre,
+          row.equipo_descripcion,
+          row.equipo_codigo,
+        ) ?? 'Equipo';
+      const detalle = vencido
+        ? `${equipoLabel} · superó el mantenimiento por ${Math.abs(restantes).toFixed(2)} h (objetivo ${objetivo} h, actual ${horometroActual} h)`
+        : `${equipoLabel} · faltan ${restantes.toFixed(2)} h para el mantenimiento (objetivo ${objetivo} h, actual ${horometroActual} h)`;
+
+      return [
+        {
+          equipo_id: row.equipo_id,
+          tipo_alerta: vencido ? 'MANTENIMIENTO_VENCIDO' : 'MANTENIMIENTO_PROXIMO',
+          categoria: 'MANTENIMIENTO' as AlertCategory,
+          nivel: (vencido ? 'CRITICAL' : 'WARNING') as AlertLevel,
+          origen: 'SYSTEM' as AlertOrigin,
+          referencia_tipo: 'HOROMETRO',
+          // El objetivo forma parte de la referencia: al ejecutar el
+          // mantenimiento el objetivo avanza y la alerta previa se cierra sola.
+          referencia: `HOROMETRO:${row.equipo_id}:${objetivo}`,
+          detalle,
+          payload_json: {
+            tipo_alerta_publico: vencido
+              ? 'HOROMETRO_VENCIDO'
+              : 'HOROMETRO_PROXIMO',
+            semaforo: vencido ? 'ROJO' : 'AMARILLO',
+            equipo_id: row.equipo_id,
+            equipo_codigo: row.equipo_codigo ?? null,
+            equipo_nombre: row.equipo_nombre ?? null,
+            equipo_descripcion: row.equipo_descripcion ?? null,
+            marca: row.marca ?? null,
+            horometro_actual: horometroActual,
+            frecuencia_horas: frecuencia,
+            horometro_ultimo_mantenimiento: Number(base.toFixed(2)),
+            fecha_ultimo_mantenimiento: row.fecha_ultimo_mantenimiento ?? null,
+            ultima_ot: row.ultima_ot ?? null,
+            horometro_proximo_mantenimiento: objetivo,
+            horas_restantes: restantes,
+            horas_excedidas: restantes < 0 ? Math.abs(restantes) : 0,
+            umbral_amarillo: Number(anticipacion.toFixed(2)),
+            umbral_rojo: Number(tolerancia.toFixed(2)),
+            margen_anticipacion_pct: this.toNumeric(row.margen_anticipacion_pct, 10),
+            margen_tolerancia_pct: this.toNumeric(row.margen_tolerancia_pct, 0),
+            actor_username: this.firstNonEmptyString(row.updated_by),
+            actor_email: null,
+            actor_user_id: null,
+          },
+        },
+      ];
+    });
+  }
+
   private async buildEquipmentServiceAlertCandidates(): Promise<AlertCandidate[]> {
     const rows = await this.equipoRepo.find({
       where: {
@@ -13759,6 +13936,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    *
    * Solo se mantienen los dos orígenes acordados:
    *  - Equipos con mantenimiento por tiempo (`es_servicio`).
+   *  - Equipos con mantenimiento por horometro, con el semaforo y los margenes
+   *    configurables de cada unidad.
    *  - Programaciones cuya OT asignada lleva 24 h de atraso, más las
    *    actividades del cronograma semanal que aún no tienen OT.
    *
@@ -13771,17 +13950,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    * (`sendDailyLowStockDigest`), no como alerta persistente.
    */
   private async buildAlertCandidates(_options?: { includeInventory?: boolean }) {
-    const [programaciones, cronogramaSemanal, equipmentServices] =
+    const [programaciones, cronogramaSemanal, equipmentServices, horometro] =
       await Promise.all([
         this.buildProgramacionAlertCandidates(),
         this.buildCronogramaSemanalAlertCandidates(),
         this.buildEquipmentServiceAlertCandidates(),
+        this.buildHorometroAlertCandidates(),
       ]);
 
     const candidates = [
       ...programaciones,
       ...cronogramaSemanal,
       ...equipmentServices,
+      ...horometro,
     ];
 
     return this.applyEquipmentIdentityToAlertCandidates(candidates);
@@ -27338,6 +27519,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     // La notificación genérica de "OT actualizada" se retiró: la OT solo avisa
     // en creación, consumos, finalización, bloqueo y desbloqueo.
+    await safePostCommit('la senal de refresco de pantallas', () =>
+      this.broadcastDataChanged({
+        recurso: 'work-order',
+        accion: transactionResult.isNew ? 'created' : 'updated',
+        id: saved.id,
+      }),
+    );
     await this.writeSecurityLog({
       description: `[WO:${saved.id}] Guardado transaccional de OT ${saved.code}`,
       typeLog: 'WORK_ORDER',
@@ -27631,6 +27819,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
     // El aviso de creación lo emite la alerta ORDEN_TRABAJO_GENERADA, que
     // además envía el correo a los destinatarios resueltos.
+    await this.broadcastDataChanged({
+      recurso: 'work-order',
+      accion: 'created',
+      id: created.id,
+    });
     await this.writeSecurityLog({
       description: `[WO:${created.id}] Creación de OT ${created.code}${resolution.codeWasReassigned ? ` (reemplazó ${resolution.requestedCode ?? 'sin código'})` : ''}`,
       typeLog: 'WORK_ORDER',

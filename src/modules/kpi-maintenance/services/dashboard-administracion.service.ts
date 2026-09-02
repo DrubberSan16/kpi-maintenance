@@ -382,11 +382,31 @@ export class DashboardAdministracionService {
         const horometroActual = Number(row.horometro_actual ?? 0);
         // Sin frecuencia configurada no hay proyeccion posible.
         if (!Number.isFinite(frecuencia) || frecuencia <= 0) {
-          return { ...row, aplica: false, semaforo: null };
+          return {
+            ...row,
+            aplica: false,
+            motivo_sin_proyeccion: 'Sin frecuencia configurada',
+            semaforo: null,
+          };
         }
-        const base = Number(
-          row.horometro_ultimo_mantenimiento ?? horometroActual - frecuencia,
-        );
+        // Misma regla que el generador de alertas: sin referencia fiable del
+        // ultimo mantenimiento no se proyecta. Hay equipos cuya ultima OT quedo
+        // con horometro 0 y proyectar sobre eso da cifras absurdas.
+        const referencia = Number(row.horometro_ultimo_mantenimiento ?? 0);
+        const referenciaFiable =
+          row.horometro_ultimo_mantenimiento != null &&
+          referencia > 0 &&
+          referencia <= horometroActual;
+        if (!referenciaFiable) {
+          return {
+            ...row,
+            aplica: false,
+            motivo_sin_proyeccion: 'Sin referencia fiable del último mantenimiento',
+            semaforo: null,
+          };
+        }
+
+        const base = referencia;
         const objetivo = Number((base + frecuencia).toFixed(2));
         const restantes = Number((objetivo - horometroActual).toFixed(2));
 
