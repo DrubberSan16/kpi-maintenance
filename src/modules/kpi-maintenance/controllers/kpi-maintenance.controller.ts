@@ -959,12 +959,73 @@ export class KpiMaintenanceController {
   })
   @ApiQuery({ name: 'desde', required: false, type: String, description: 'YYYY-MM-DD' })
   @ApiQuery({ name: 'hasta', required: false, type: String, description: 'YYYY-MM-DD' })
+  @ApiQuery({ name: 'equipo_id', required: false, type: String })
   @Get('dashboard-administracion')
   getDashboardAdministracion(
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
+    @Query('equipo_id') equipoId?: string,
   ) {
-    return this.dashboardAdministracion.getDashboard({ desde, hasta });
+    return this.dashboardAdministracion.getDashboard({
+      desde,
+      hasta,
+      equipo_id: equipoId,
+    });
+  }
+
+  @ApiTags('Dashboard Administracion')
+  @ApiOperation({
+    summary: 'Serie temporal de consumo de aceite en cebado, por equipo',
+  })
+  @ApiQuery({ name: 'desde', required: false, type: String })
+  @ApiQuery({ name: 'hasta', required: false, type: String })
+  @ApiQuery({ name: 'equipo_id', required: false, type: String })
+  @ApiQuery({
+    name: 'granularidad',
+    required: false,
+    enum: ['semana', 'mes', 'anio'],
+  })
+  @Get('dashboard-administracion/cebado-series')
+  getCebadoSeries(
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+    @Query('equipo_id') equipoId?: string,
+    @Query('granularidad') granularidad?: string,
+  ) {
+    return this.dashboardAdministracion.getCebadoSeries({
+      desde,
+      hasta,
+      equipo_id: equipoId,
+      granularidad,
+    });
+  }
+
+  @ApiTags('Dashboard Administracion')
+  @ApiOperation({
+    summary:
+      'Registros que sustentan un bloque del resumen: cebado, repuestos, correctivos o disponibilidad',
+  })
+  @ApiQuery({
+    name: 'bloque',
+    required: true,
+    enum: ['cebado', 'repuestos', 'correctivos', 'disponibilidad'],
+  })
+  @ApiQuery({ name: 'equipo_id', required: false, type: String })
+  @ApiQuery({ name: 'desde', required: false, type: String })
+  @ApiQuery({ name: 'hasta', required: false, type: String })
+  @Get('dashboard-administracion/detalle')
+  getDashboardDetalle(
+    @Query('bloque') bloque?: string,
+    @Query('equipo_id') equipoId?: string,
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+  ) {
+    return this.dashboardAdministracion.getDetalle({
+      bloque,
+      equipo_id: equipoId,
+      desde,
+      hasta,
+    });
   }
 
   @ApiTags('Alertas')

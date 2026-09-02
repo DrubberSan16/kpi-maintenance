@@ -34,6 +34,16 @@ export class DashboardAdministracionService {
     return { data, meta, message };
   }
 
+  /**
+   * Filtro opcional por equipo. Se resuelve como parametro $3 y la condicion se
+   * escribe siempre igual: `($3::uuid IS NULL OR <col> = $3::uuid)`. Asi la
+   * misma consulta sirve filtrada y sin filtrar, sin concatenar SQL.
+   */
+  private equipoParam(equipoId?: string | null) {
+    const value = String(equipoId ?? '').trim();
+    return value ? value : null;
+  }
+
   private resolvePeriod(desde?: string, hasta?: string) {
     const end = hasta ? new Date(`${hasta}T23:59:59`) : new Date();
     const start = desde
@@ -56,7 +66,7 @@ export class DashboardAdministracionService {
    * Los tramos se recortan al período para que un paro que viene de antes no
    * infle las horas del rango consultado.
    */
-  private async getDisponibilidad(desde: string, hasta: string) {
+  private async getDisponibilidad(desde: string, hasta: string, equipoId: string | null) {
     return this.dataSource.query(
       `
       WITH tramos AS (
@@ -124,9 +134,10 @@ export class DashboardAdministracionService {
       LEFT JOIN agregado a ON a.equipo_id = e.id
       WHERE COALESCE(e.is_deleted, false) = false
         AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
+        AND ($3::uuid IS NULL OR e.id = $3::uuid)
       ORDER BY porcentaje_disponibilidad ASC NULLS LAST, e.codigo
       `,
-      [desde, hasta],
+      [desde, hasta, equipoId],
     );
   }
 
@@ -137,7 +148,7 @@ export class DashboardAdministracionService {
    * fallas cargado, el componente intervenido es el mejor indicador de que la
    * misma avería se repite.
    */
-  private async getCorrectivos(desde: string, hasta: string) {
+  private async getCorrectivos(desde: string, hasta: string, equipoId: string | null) {
     const porEquipo = await this.dataSource.query(
       `
       SELECT
@@ -155,10 +166,11 @@ export class DashboardAdministracionService {
       WHERE COALESCE(wo.is_deleted, false) = false
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CORRECTIVO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
       GROUP BY e.id, e.codigo, equipo_nombre
       ORDER BY total_correctivos DESC, e.codigo
       `,
-      [desde, hasta],
+      [desde, hasta, equipoId],
     );
 
     const reincidencias = await this.dataSource.query(
@@ -177,11 +189,12 @@ export class DashboardAdministracionService {
       WHERE COALESCE(wo.is_deleted, false) = false
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CORRECTIVO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
       GROUP BY e.id, e.codigo, equipo_nombre, wo.equipo_componente_id, componente
       HAVING COUNT(*) > 1
       ORDER BY veces DESC, e.codigo
       `,
-      [desde, hasta],
+      [desde, hasta, equipoId],
     );
 
     return { por_equipo: porEquipo, reincidencias };
@@ -194,7 +207,7 @@ export class DashboardAdministracionService {
    * de cebado. El semáforo es por acumulado del período; además se devuelve el
    * acumulado de los últimos 7 y 30 días para leer la tendencia.
    */
-  private async getCebado(desde: string, hasta: string) {
+  private async getCebado(desde: string, hasta: string, equipoId: string | null) {
     const filas = await this.dataSource.query(
       `
       SELECT
@@ -219,10 +232,11 @@ export class DashboardAdministracionService {
       WHERE COALESCE(wo.is_deleted, false) = false
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
       GROUP BY e.id, e.codigo, equipo_nombre
       ORDER BY galones_periodo DESC, e.codigo
       `,
-      [desde, hasta],
+      [desde, hasta, equipoId],
     );
 
     return filas.map((row: any) => {
@@ -260,7 +274,7 @@ export class DashboardAdministracionService {
   }
 
   /** 4. Consumo de repuestos por equipo: cantidad, costo y OT implicadas. */
-  private async getRepuestos(desde: string, hasta: string) {
+  private async getRepuestos(desde: string, hasta: string, equipoId: string | null) {
     return this.dataSource.query(
       `
       SELECT
@@ -277,10 +291,11 @@ export class DashboardAdministracionService {
       INNER JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
       WHERE COALESCE(cr.is_deleted, false) = false
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
       GROUP BY e.id, e.codigo, equipo_nombre
       ORDER BY costo DESC, e.codigo
       `,
-      [desde, hasta],
+      [desde, hasta, equipoId],
     );
   }
 
@@ -294,7 +309,7 @@ export class DashboardAdministracionService {
    * Los umbrales salen de los márgenes configurables de cada unidad, de modo
    * que MTU 500 h, Cummins 350 h y Caterpillar 250 h se resuelven solas.
    */
-  private async getProyeccion() {
+  private async getProyeccion(equipoId: string | null) {
     const filas = await this.dataSource.query(
       `
       WITH ultimo_mant AS (
@@ -328,8 +343,10 @@ export class DashboardAdministracionService {
       LEFT JOIN ultimo_mant u ON u.equipment_id = e.id
       WHERE COALESCE(e.is_deleted, false) = false
         AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
+        AND ($1::uuid IS NULL OR e.id = $1::uuid)
       ORDER BY e.codigo
       `,
+      [equipoId],
     );
 
     return filas
@@ -389,7 +406,7 @@ export class DashboardAdministracionService {
    * siguiente del mismo equipo, es decir cuánto aguanta entre averías. Necesita
    * al menos dos correctivas para poder medirse.
    */
-  private async getConfiabilidad(desde: string, hasta: string) {
+  private async getConfiabilidad(desde: string, hasta: string, equipoId: string | null) {
     return this.dataSource.query(
       `
       WITH correctivas AS (
@@ -406,6 +423,7 @@ export class DashboardAdministracionService {
           AND wo.hora_inicio IS NOT NULL
           AND wo.hora_fin IS NOT NULL
           AND wo.hora_inicio BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
       )
       SELECT
         e.id AS equipo_id,
@@ -424,27 +442,206 @@ export class DashboardAdministracionService {
       GROUP BY e.id, e.codigo, equipo_nombre
       ORDER BY mtbf_horas ASC NULLS LAST, e.codigo
       `,
-      [desde, hasta],
+      [desde, hasta, equipoId],
     );
   }
 
-  /** Punto de entrada: devuelve los ocho bloques del dashboard. */
-  async getDashboard(query: { desde?: string; hasta?: string }) {
+  /**
+   * Serie temporal de consumo de aceite en cebado, por equipo.
+   *
+   * `granularidad` decide el bucket con `date_trunc`. Se devuelve una fila por
+   * equipo y bucket; el frontend arma las series. Se agrupa en SQL y no en
+   * memoria porque el rango puede abarcar un ano entero.
+   */
+  async getCebadoSeries(query: {
+    desde?: string;
+    hasta?: string;
+    equipo_id?: string;
+    granularidad?: string;
+  }) {
     const { desde, hasta } = this.resolvePeriod(query.desde, query.hasta);
+    const equipoId = this.equipoParam(query.equipo_id);
+    const bucket = this.resolveBucket(query.granularidad);
+
+    const filas = await this.dataSource.query(
+      `
+      SELECT
+        e.id AS equipo_id,
+        e.codigo AS equipo_codigo,
+        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        date_trunc($4, COALESCE(wo.hora_inicio, wo.created_at))::date AS periodo,
+        ROUND(COALESCE(SUM(cr.cantidad), 0)::numeric, 2) AS galones,
+        COUNT(DISTINCT wo.id) AS cebados
+      FROM kpi_process.tb_work_order wo
+      INNER JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
+      INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
+        ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
+      INNER JOIN kpi_inventory.tb_producto p
+        ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+      WHERE COALESCE(wo.is_deleted, false) = false
+        AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
+        AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+      GROUP BY e.id, e.codigo, equipo_nombre, periodo
+      ORDER BY periodo, e.codigo
+      `,
+      [desde, hasta, equipoId, bucket],
+    );
+
+    return this.wrap(
+      { periodo: { desde, hasta }, granularidad: bucket, filas },
+      'Serie de consumo de cebado generada',
+    );
+  }
+
+  /** Traduce la granularidad publica al argumento de `date_trunc`. */
+  private resolveBucket(valor?: string) {
+    const v = String(valor ?? '').trim().toLowerCase();
+    if (v === 'semana' || v === 'week') return 'week';
+    if (v === 'anio' || v === 'ano' || v === 'year') return 'year';
+    return 'month';
+  }
+
+  /**
+   * Detalle que sustenta un bloque del resumen.
+   *
+   * Devuelve los registros concretos que produjeron la cifra, para que se pueda
+   * ver de donde sale cada numero en lugar de tener que fiarse del agregado.
+   */
+  async getDetalle(query: {
+    bloque?: string;
+    equipo_id?: string;
+    desde?: string;
+    hasta?: string;
+  }) {
+    const { desde, hasta } = this.resolvePeriod(query.desde, query.hasta);
+    const equipoId = this.equipoParam(query.equipo_id);
+    const bloque = String(query.bloque ?? '').trim().toLowerCase();
+
+    if (bloque === 'cebado') {
+      const filas = await this.dataSource.query(
+        `
+        SELECT
+          wo.id AS work_order_id,
+          wo.code AS orden,
+          wo.title AS titulo,
+          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
+          p.nombre AS producto,
+          ROUND(cr.cantidad::numeric, 2) AS galones,
+          ROUND(COALESCE(cr.subtotal, 0)::numeric, 2) AS costo,
+          cr.observacion
+        FROM kpi_process.tb_work_order wo
+        INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
+          ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
+        INNER JOIN kpi_inventory.tb_producto p
+          ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        WHERE COALESCE(wo.is_deleted, false) = false
+          AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
+          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        ORDER BY fecha DESC, wo.code
+        `,
+        [desde, hasta, equipoId],
+      );
+      return this.wrap({ bloque: 'cebado', filas }, 'Detalle de cebado');
+    }
+
+    if (bloque === 'repuestos') {
+      const filas = await this.dataSource.query(
+        `
+        SELECT
+          wo.code AS orden,
+          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
+          p.nombre AS producto,
+          ROUND(cr.cantidad::numeric, 2) AS cantidad,
+          ROUND(COALESCE(cr.costo_unitario, 0)::numeric, 2) AS costo_unitario,
+          ROUND(COALESCE(cr.subtotal, 0)::numeric, 2) AS costo
+        FROM kpi_maintenance.tb_consumo_repuesto cr
+        INNER JOIN kpi_process.tb_work_order wo
+          ON wo.id = cr.work_order_id AND COALESCE(wo.is_deleted, false) = false
+        INNER JOIN kpi_inventory.tb_producto p ON p.id = cr.producto_id
+        WHERE COALESCE(cr.is_deleted, false) = false
+          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        ORDER BY costo DESC
+        `,
+        [desde, hasta, equipoId],
+      );
+      return this.wrap({ bloque: 'repuestos', filas }, 'Detalle de repuestos');
+    }
+
+    if (bloque === 'correctivos') {
+      const filas = await this.dataSource.query(
+        `
+        SELECT
+          wo.code AS orden,
+          wo.title AS titulo,
+          COALESCE(c.nombre_oficial, c.nombre, 'Sin compartimiento') AS componente,
+          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
+          wo.hora_inicio,
+          wo.hora_fin,
+          ROUND(
+            (EXTRACT(EPOCH FROM (wo.hora_fin - wo.hora_inicio)) / 3600.0)::numeric, 2
+          ) AS horas,
+          wo.status_workflow AS estado
+        FROM kpi_process.tb_work_order wo
+        LEFT JOIN kpi_maintenance.tb_equipo_componente c ON c.id = wo.equipo_componente_id
+        WHERE COALESCE(wo.is_deleted, false) = false
+          AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CORRECTIVO'
+          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        ORDER BY fecha DESC
+        `,
+        [desde, hasta, equipoId],
+      );
+      return this.wrap({ bloque: 'correctivos', filas }, 'Detalle de correctivos');
+    }
+
+    if (bloque === 'disponibilidad') {
+      const filas = await this.dataSource.query(
+        `
+        SELECT
+          h.estado_anterior,
+          h.estado_nuevo,
+          h.estado_anterior_desde AS desde,
+          h.changed_at AS hasta,
+          ROUND((COALESCE(h.duracion_estado_anterior_segundos, 0) / 3600.0)::numeric, 2) AS horas,
+          h.changed_by
+        FROM kpi_maintenance.tb_equipo_funcionamiento_historial h
+        WHERE h.changed_at BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR h.equipo_id = $3::uuid)
+        ORDER BY h.changed_at DESC
+        `,
+        [desde, hasta, equipoId],
+      );
+      return this.wrap({ bloque: 'disponibilidad', filas }, 'Detalle de disponibilidad');
+    }
+
+    return this.wrap({ bloque, filas: [] }, 'Bloque sin detalle disponible');
+  }
+
+  /** Punto de entrada: devuelve los ocho bloques del dashboard. */
+  async getDashboard(query: {
+    desde?: string;
+    hasta?: string;
+    equipo_id?: string;
+  }) {
+    const { desde, hasta } = this.resolvePeriod(query.desde, query.hasta);
+    const equipoId = this.equipoParam(query.equipo_id);
 
     const [disponibilidad, correctivos, cebado, repuestos, proyeccion, confiabilidad] =
       await Promise.all([
-        this.getDisponibilidad(desde, hasta),
-        this.getCorrectivos(desde, hasta),
-        this.getCebado(desde, hasta),
-        this.getRepuestos(desde, hasta),
-        this.getProyeccion(),
-        this.getConfiabilidad(desde, hasta),
+        this.getDisponibilidad(desde, hasta, equipoId),
+        this.getCorrectivos(desde, hasta, equipoId),
+        this.getCebado(desde, hasta, equipoId),
+        this.getRepuestos(desde, hasta, equipoId),
+        this.getProyeccion(equipoId),
+        this.getConfiabilidad(desde, hasta, equipoId),
       ]);
 
     return this.wrap(
       {
-        periodo: { desde, hasta },
+        periodo: { desde, hasta, equipo_id: equipoId },
         disponibilidad,
         correctivos,
         cebado,
