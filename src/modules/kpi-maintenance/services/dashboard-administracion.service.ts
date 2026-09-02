@@ -290,12 +290,12 @@ export class DashboardAdministracionService {
   /** Semaforización de galones del punto 3. */
   private resolveCebadoSemaforo(galones: number) {
     if (galones >= this.CEBADO_AMARILLO_MAX) {
-      return { nivel: 'ROJO', etiqueta: 'Consumo anormal', detalle: '10 galones o más' };
+      return { nivel: 'ROJO', etiqueta: 'Consumo crítico', detalle: '10 galones o más en la orden' };
     }
     if (galones > this.CEBADO_VERDE_MAX) {
-      return { nivel: 'AMARILLO', etiqueta: 'Seguimiento', detalle: 'Entre 5 y 10 galones' };
+      return { nivel: 'AMARILLO', etiqueta: 'Seguimiento', detalle: 'Entre 5 y 10 galones en la orden' };
     }
-    return { nivel: 'VERDE', etiqueta: 'Normal', detalle: 'Hasta 5 galones' };
+    return { nivel: 'VERDE', etiqueta: 'Normal', detalle: 'Hasta 5 galones en la orden' };
   }
 
   /** 4. Consumo de repuestos por equipo: cantidad, costo y OT implicadas. */
