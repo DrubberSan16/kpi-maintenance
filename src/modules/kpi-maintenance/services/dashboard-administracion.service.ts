@@ -120,7 +120,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         e.estado_funcionamiento,
         ROUND((COALESCE(a.seg_funcionando, 0) / 3600.0)::numeric, 2) AS horas_disponibles,
         ROUND((COALESCE(a.seg_parado, 0) / 3600.0)::numeric, 2) AS horas_fuera_servicio,
@@ -154,7 +155,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         COUNT(*) AS total_correctivos,
         COUNT(*) FILTER (WHERE wo.hora_inicio IS NOT NULL AND wo.hora_fin IS NOT NULL) AS con_horas,
         ROUND(COALESCE(SUM(
@@ -167,7 +169,7 @@ export class DashboardAdministracionService {
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CORRECTIVO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-      GROUP BY e.id, e.codigo, equipo_nombre
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
       ORDER BY total_correctivos DESC, e.codigo
       `,
       [desde, hasta, equipoId],
@@ -178,7 +180,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         wo.equipo_componente_id,
         COALESCE(c.nombre_oficial, c.nombre, 'Sin compartimiento') AS componente,
         COUNT(*) AS veces,
@@ -190,7 +193,7 @@ export class DashboardAdministracionService {
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CORRECTIVO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-      GROUP BY e.id, e.codigo, equipo_nombre, wo.equipo_componente_id, componente
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion, wo.equipo_componente_id, componente
       HAVING COUNT(*) > 1
       ORDER BY veces DESC, e.codigo
       `,
@@ -213,7 +216,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         ROUND(COALESCE(SUM(cr.cantidad), 0)::numeric, 2) AS galones_periodo,
         ROUND(COALESCE(SUM(cr.cantidad) FILTER (
           WHERE COALESCE(wo.hora_inicio, wo.created_at) >= $2::timestamp - INTERVAL '7 days'
@@ -233,7 +237,7 @@ export class DashboardAdministracionService {
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-      GROUP BY e.id, e.codigo, equipo_nombre
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
       ORDER BY galones_periodo DESC, e.codigo
       `,
       [desde, hasta, equipoId],
@@ -280,7 +284,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         COUNT(DISTINCT wo.id) AS ots,
         COUNT(cr.id) AS lineas,
         ROUND(COALESCE(SUM(cr.cantidad), 0)::numeric, 2) AS cantidad,
@@ -292,7 +297,7 @@ export class DashboardAdministracionService {
       WHERE COALESCE(cr.is_deleted, false) = false
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-      GROUP BY e.id, e.codigo, equipo_nombre
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
       ORDER BY costo DESC, e.codigo
       `,
       [desde, hasta, equipoId],
@@ -328,7 +333,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         m.nombre AS marca,
         e.horometro_actual::numeric AS horometro_actual,
         e.intervalo_mantenimiento_valor::numeric AS frecuencia,
@@ -428,7 +434,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         COUNT(*) AS intervenciones,
         ROUND(AVG(
           EXTRACT(EPOCH FROM (c.hora_fin - c.hora_inicio)) / 3600.0
@@ -439,7 +446,7 @@ export class DashboardAdministracionService {
         COUNT(*) FILTER (WHERE c.fin_anterior IS NOT NULL) AS intervalos_medidos
       FROM correctivas c
       INNER JOIN kpi_maintenance.tb_equipo e ON e.id = c.equipment_id
-      GROUP BY e.id, e.codigo, equipo_nombre
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
       ORDER BY mtbf_horas ASC NULLS LAST, e.codigo
       `,
       [desde, hasta, equipoId],
@@ -468,7 +475,8 @@ export class DashboardAdministracionService {
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
-        COALESCE(e.nombre_real, e.nombre) AS equipo_nombre,
+        COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+        e.nombre_real AS equipo_descripcion,
         date_trunc($4, COALESCE(wo.hora_inicio, wo.created_at))::date AS periodo,
         ROUND(COALESCE(SUM(cr.cantidad), 0)::numeric, 2) AS galones,
         COUNT(DISTINCT wo.id) AS cebados
@@ -482,7 +490,7 @@ export class DashboardAdministracionService {
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
         AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-      GROUP BY e.id, e.codigo, equipo_nombre, periodo
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion, periodo
       ORDER BY periodo, e.codigo
       `,
       [desde, hasta, equipoId, bucket],
