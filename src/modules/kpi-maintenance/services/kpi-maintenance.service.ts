@@ -12826,6 +12826,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     },
   } as const;
 
+  /**
+   * Solo las ordenes de cebado notifican por correo.
+   *
+   * El resto de tipos sigue registrando su alerta para que quede trazabilidad
+   * en la pantalla de Alertas, pero no genera correo: la vigilancia por correo
+   * se centro en el consumo de aceite.
+   */
+  private notificaPorCorreo(
+    workOrder?: Pick<WorkOrderEntity, 'maintenance_kind'> | null,
+  ) {
+    return this.normalizeMaintenanceKind(workOrder?.maintenance_kind) === 'CEBADO';
+  }
+
   /** Umbrales de galones de aceite por orden, iguales a los del dashboard. */
   private readonly CEBADO_VERDE_MAX = 5;
   private readonly CEBADO_AMARILLO_MAX = 10;
@@ -13024,11 +13037,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  /** Registra la alerta de revision y avisa a supervision. */
+  /**
+   * Registra la alerta de revision y avisa a supervision.
+   *
+   * Solo aplica a las ordenes de cebado: el aviso existe para vigilar el consumo
+   * de aceite, y en una correctiva o preventiva diria "0.00 galones - Normal",
+   * que es ruido para el supervisor.
+   */
   private async handleWorkOrderReview(
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
   ) {
+    if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) !== 'CEBADO') {
+      return null;
+    }
     const resultado = await this.sendWorkOrderReviewEmails(workOrder, actor);
     await this.emitWorkOrderLifecycleAlert(workOrder, 'EN_REVISION', {
       actor,
@@ -13137,7 +13159,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    if (options?.notify !== false) {
+    // La fila queda siempre para trazabilidad; el correo solo en cebado.
+    if (options?.notify !== false && this.notificaPorCorreo(workOrder)) {
       await this.dispatchAlertTriggeredNotifications(alertRow);
     }
     return alertRow;
@@ -13392,6 +13415,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     if (!consumos.length) return;
+    // Igual que el resto de avisos de OT: solo cebado sale por correo.
+    if (!this.notificaPorCorreo(workOrder)) return;
     const key = workOrder.id;
     const previous = this.consumoEmailBatches.get(key);
     if (previous) clearTimeout(previous.timer);
@@ -27237,7 +27262,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           },
         });
         if (!alertRow) return null;
-        await this.dispatchAlertTriggeredNotifications(alertRow);
+        if (this.notificaPorCorreo(saved)) {
+          await this.dispatchAlertTriggeredNotifications(alertRow);
+        }
         return alertRow.id;
       });
     }
@@ -27585,7 +27612,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     if (
       generatedWorkOrderAlert?.created &&
-      this.normalizeWorkflowStatus(created.status_workflow) !== 'CLOSED'
+      this.normalizeWorkflowStatus(created.status_workflow) !== 'CLOSED' &&
+      this.notificaPorCorreo(created)
     ) {
       await this.dispatchAlertTriggeredNotifications(
         generatedWorkOrderAlert.alert,
@@ -27817,7 +27845,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
     if (
       generatedWorkOrderAlert?.created &&
-      this.normalizeWorkflowStatus(saved.status_workflow) !== 'CLOSED'
+      this.normalizeWorkflowStatus(saved.status_workflow) !== 'CLOSED' &&
+      this.notificaPorCorreo(saved)
     ) {
       await this.dispatchAlertTriggeredNotifications(
         generatedWorkOrderAlert.alert,

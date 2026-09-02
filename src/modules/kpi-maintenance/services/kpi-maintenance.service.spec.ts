@@ -959,6 +959,45 @@ describe('KpiMaintenanceService alerts', () => {
     });
   });
 
+  describe('correos de orden de trabajo restringidos a cebado', () => {
+    it('solo notifica por correo las ordenes de cebado', () => {
+      const notifica = (kind: string) =>
+        (service as any).notificaPorCorreo({ maintenance_kind: kind });
+
+      expect(notifica('CEBADO')).toBe(true);
+      expect(notifica('CORRECTIVO')).toBe(false);
+      expect(notifica('PREVENTIVO')).toBe(false);
+      expect(notifica('PREDICTIVO')).toBe(false);
+    });
+
+    it('no avisa a supervision cuando la OT en revision no es de cebado', async () => {
+      const enviar = jest
+        .spyOn(service as any, 'sendWorkOrderReviewEmails')
+        .mockResolvedValue({ sent: 0, failed: 0, recipients: 0 });
+
+      const resultado = await (service as any).handleWorkOrderReview({
+        id: 'wo-1',
+        code: 'OT-1',
+        maintenance_kind: 'CORRECTIVO',
+      });
+
+      expect(resultado).toBeNull();
+      expect(enviar).not.toHaveBeenCalled();
+    });
+
+    it('el semaforo de aceite se mide sobre lo consumido por la orden', () => {
+      const nivel = (galones: number) =>
+        (service as any).resolveConsumoAceiteSemaforo(galones).nivel;
+
+      expect(nivel(0)).toBe('VERDE');
+      expect(nivel(5)).toBe('VERDE');
+      expect(nivel(5.1)).toBe('AMARILLO');
+      expect(nivel(9.9)).toBe('AMARILLO');
+      expect(nivel(10)).toBe('ROJO');
+      expect(nivel(27)).toBe('ROJO');
+    });
+  });
+
   describe('estado En revisión de la orden de trabajo', () => {
     it('reconoce el estado y lo mantiene editable', () => {
       expect((service as any).normalizeWorkflowStatus('EN_REVISION')).toBe(
