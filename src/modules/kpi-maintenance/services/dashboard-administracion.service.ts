@@ -16,16 +16,13 @@ import { DataSource } from 'typeorm';
  * Convenciones que atraviesan el módulo:
  *  - Las horas de una OT salen de `hora_inicio`/`hora_fin`, no de la duración
  *    del flujo ni del valor tecleado en `horas_a_realizar`.
- *  - Cuenta como equipo parado cualquier intervención: correctiva, preventiva
- *    y de cebado.
+ *  - La disponibilidad sale del historial de funcionamiento del equipo, que es
+ *    la fuente que registra realmente cuándo estuvo parado.
  *  - El semáforo del horómetro usa los márgenes configurables de cada equipo.
  */
 @Injectable()
 export class DashboardAdministracionService {
   private readonly logger = new Logger(DashboardAdministracionService.name);
-
-  /** Tipos de OT que dejan el equipo indisponible. */
-  private readonly DOWNTIME_KINDS = ['CORRECTIVO', 'PREVENTIVO', 'CEBADO'];
 
   /** Umbrales de galones para el semáforo de cebado (punto 3). */
   private readonly CEBADO_VERDE_MAX = 5;
@@ -327,7 +324,7 @@ export class DashboardAdministracionService {
         u.fecha AS fecha_ultimo_mantenimiento,
         u.work_order_code AS ultima_ot
       FROM kpi_maintenance.tb_equipo e
-      LEFT JOIN kpi_maintenance.tb_marca m ON m.id = e.marca_id
+      LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
       LEFT JOIN ultimo_mant u ON u.equipment_id = e.id
       WHERE COALESCE(e.is_deleted, false) = false
         AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
