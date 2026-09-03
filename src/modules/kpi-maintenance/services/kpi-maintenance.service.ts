@@ -23503,6 +23503,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_ordenes: row.total_ordenes,
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
           equipos: [...row._equipos].filter(Boolean).join(' | '),
+          // La etiqueta del equipo ya contiene " | " (marca | nombre), asi que la
+          // cadena unida no se puede volver a partir sin romper nombres. Se manda
+          // tambien como arreglo para quien necesite la lista real.
+          equipos_lista: [...row._equipos].filter(Boolean),
           bodegas: [...row._bodegas].filter(Boolean).join(' | '),
         }))
         .sort((a, b) => b.total_horas - a.total_horas);
@@ -23559,6 +23563,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: row.total_horas,
           total_ordenes: row.total_ordenes,
           equipos: [...row._equipos].filter(Boolean).join(' | '),
+          equipos_lista: [...row._equipos].filter(Boolean),
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
         }))
         .sort((a, b) => b.total_horas - a.total_horas);
@@ -24189,6 +24194,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         total_items: row.total_items,
         total_ordenes: row.total_ordenes,
         equipos: [...row._equipos].filter(Boolean).join(' | '),
+        equipos_lista: [...row._equipos].filter(Boolean),
         bodegas: [...row._bodegas].filter(Boolean).join(' | '),
         ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
       }))
