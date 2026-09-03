@@ -5033,6 +5033,60 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Perfiles que pueden ver importes de materiales.
+   *
+   * El costo de un repuesto es informacion sensible: se restringe a
+   * administracion y gerencia. Se filtra en el servidor y no en la pantalla
+   * porque ocultar una columna en el navegador no evita que el numero haya
+   * viajado hasta el.
+   */
+  private puedeVerCostos(roleName?: string | null) {
+    const rol = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    if (!rol) return false;
+    return (
+      rol.includes('SUPER ADMIN') ||
+      rol.includes('SUPERADMIN') ||
+      rol.includes('ADMINISTRADOR') ||
+      rol.includes('ADMINISTRATIVO') ||
+      rol === 'ADMIN' ||
+      rol.includes('GERENTE GENERAL') ||
+      rol.includes('GERENCIA GENERAL')
+    );
+  }
+
+  /** Campos monetarios que se retiran cuando el perfil no puede verlos. */
+  private esCampoDeCosto(key: string) {
+    return /costo|precio|valor_total|subtotal|monto/i.test(String(key || ''));
+  }
+
+  /**
+   * Retira los importes de una respuesta completa, a cualquier profundidad.
+   *
+   * Recorre el arbol en vez de enumerar campos porque cada reporte arma sus
+   * filas con nombres distintos; una lista fija dejaria fuera cualquier
+   * seccion que se agregue despues.
+   */
+  omitirCostos<T>(payload: T, roleName?: string | null): T {
+    if (this.puedeVerCostos(roleName)) return payload;
+    const limpiar = (valor: any): any => {
+      if (Array.isArray(valor)) return valor.map(limpiar);
+      if (valor && typeof valor === 'object' && !(valor instanceof Date)) {
+        return Object.fromEntries(
+          Object.entries(valor)
+            .filter(([key]) => !this.esCampoDeCosto(key))
+            .map(([key, item]) => [key, limpiar(item)]),
+        );
+      }
+      return valor;
+    };
+    return limpiar(payload) as T;
+  }
+
+  /**
    * Acumula la OT de una fila agregada con lo necesario para explicarla.
    *
    * Las filas resumidas (top de materiales, horas por responsable...) guardaban
@@ -23088,6 +23142,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   async getSystemReports(
     query: SystemReportsQueryDto,
     sucursalId?: string | null,
+    roleName?: string | null,
   ) {
     const dateRange = this.buildSystemReportsDateRange(query);
     const groupBy = this.normalizeSystemReportGroupBy(query?.group_by);
@@ -24265,7 +24320,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         )
       : null;
 
-    return this.wrap(
+    const respuestaSistema = this.wrap(
       {
         generated_at: new Date().toISOString(),
         filters: {
@@ -24516,6 +24571,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       },
       'Reportes del sistema generados',
     );
+
+    return this.omitirCostos(respuestaSistema, roleName);
   }
 
   async getAnalisisAceiteKpi(

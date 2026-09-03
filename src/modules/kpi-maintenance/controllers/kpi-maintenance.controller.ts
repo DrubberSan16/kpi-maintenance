@@ -961,16 +961,18 @@ export class KpiMaintenanceController {
   @ApiQuery({ name: 'hasta', required: false, type: String, description: 'YYYY-MM-DD' })
   @ApiQuery({ name: 'equipo_id', required: false, type: String })
   @Get('dashboard-administracion')
-  getDashboardAdministracion(
+  async getDashboardAdministracion(
+    @Req() req: any,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
     @Query('equipo_id') equipoId?: string,
   ) {
-    return this.dashboardAdministracion.getDashboard({
+    const respuesta = await this.dashboardAdministracion.getDashboard({
       desde,
       hasta,
       equipo_id: equipoId,
     });
+    return this.service.omitirCostos(respuesta, getRequestActor(req).roleName);
   }
 
   @ApiTags('Dashboard Administracion')
@@ -1014,18 +1016,20 @@ export class KpiMaintenanceController {
   @ApiQuery({ name: 'desde', required: false, type: String })
   @ApiQuery({ name: 'hasta', required: false, type: String })
   @Get('dashboard-administracion/detalle')
-  getDashboardDetalle(
+  async getDashboardDetalle(
+    @Req() req: any,
     @Query('bloque') bloque?: string,
     @Query('equipo_id') equipoId?: string,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
   ) {
-    return this.dashboardAdministracion.getDetalle({
+    const respuesta = await this.dashboardAdministracion.getDetalle({
       bloque,
       equipo_id: equipoId,
       desde,
       hasta,
     });
+    return this.service.omitirCostos(respuesta, getRequestActor(req).roleName);
   }
 
   @ApiTags('Alertas')
@@ -1354,14 +1358,15 @@ export class KpiMaintenanceController {
       'Reporte de consumo de aceite por rango, orden de trabajo y equipo',
   })
   @Get('inteligencia/analisis-aceite/kpi')
-  getAnalisisAceiteKpi(
+  async getAnalisisAceiteKpi(
     @Query() query: AnalisisAceiteKpiQueryDto,
     @Req() req: any,
   ) {
-    return this.service.getAnalisisAceiteKpi(
+    const respuesta = await this.service.getAnalisisAceiteKpi(
       query,
       getSucursalScopeId(req),
     );
+    return this.service.omitirCostos(respuesta, getRequestActor(req).roleName);
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1690,7 +1695,11 @@ export class KpiMaintenanceController {
   })
   @Get('inteligencia/reportes-sistema')
   getSystemReports(@Query() query: SystemReportsQueryDto, @Req() req: any) {
-    return this.service.getSystemReports(query, getSucursalScopeId(req));
+    return this.service.getSystemReports(
+      query,
+      getSucursalScopeId(req),
+      getRequestActor(req).roleName,
+    );
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1699,14 +1708,15 @@ export class KpiMaintenanceController {
       'Obtener el reporte diario consolidado de inventario y órdenes de trabajo',
   })
   @Get('inteligencia/reporte-diario')
-  getDailyOperationsReport(
+  async getDailyOperationsReport(
     @Query() query: DailyOperationsReportQueryDto,
     @Req() req: any,
   ) {
-    return this.service.getDailyOperationsReport(
+    const respuesta = await this.service.getDailyOperationsReport(
       query,
       getSucursalScopeId(req),
     );
+    return this.service.omitirCostos(respuesta, getRequestActor(req).roleName);
   }
 
   @ApiTags('Inteligencia Operativa')
@@ -1715,14 +1725,15 @@ export class KpiMaintenanceController {
       'Obtener el inventario mensual resumido para el reporte detallado gerencial',
   })
   @Get('inteligencia/inventario-mensual')
-  getMonthlyInventoryReport(
+  async getMonthlyInventoryReport(
     @Query() query: DailyOperationsReportQueryDto,
     @Req() req: any,
   ) {
-    return this.service.getMonthlyInventoryReport(
+    const respuesta = await this.service.getMonthlyInventoryReport(
       query,
       getSucursalScopeId(req),
     );
+    return this.service.omitirCostos(respuesta, getRequestActor(req).roleName);
   }
 
   @ApiTags('Work Orders')
