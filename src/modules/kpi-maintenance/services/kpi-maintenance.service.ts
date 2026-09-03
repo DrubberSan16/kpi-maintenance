@@ -5033,6 +5033,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Acumula la OT de una fila agregada con lo necesario para explicarla.
+   *
+   * Las filas resumidas (top de materiales, horas por responsable...) guardaban
+   * las ordenes y los equipos en dos listas sueltas, asi que no habia forma de
+   * saber que equipo corresponde a que orden. Aqui se guarda cada OT una sola
+   * vez con su equipo y su tipo, que es lo que la pantalla necesita para
+   * listarlas y enlazar cada numero de orden con su detalle.
+   */
+  private trackWorkOrderDetalle(target: Map<string, any>, row: any) {
+    const key = String(row?.work_order_id || row?.work_order_code || '').trim();
+    if (!key) return;
+    target.set(key, {
+      work_order_id: row?.work_order_id ?? null,
+      work_order_code: row?.work_order_code ?? null,
+      equipment_name: row?.equipment_name ?? row?.equipment_label ?? null,
+      maintenance_kind_label: row?.maintenance_kind_label ?? null,
+    });
+  }
+
+  /**
    * Identidad del equipo para el Dashboard Gerencia: `marca | nombre - modelo
    * (nombre real)`.
    *
@@ -23483,6 +23503,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
           _equipos: new Set<string>(),
           _bodegas: new Set<string>(),
         };
@@ -23490,6 +23511,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           (current.total_horas + this.toNumeric(row.horas, 0)).toFixed(4),
         );
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current._equipos.add(String(row.equipment_label || '').trim());
         current._bodegas.add(String(row.bodega_label || '').trim());
         current.total_ordenes = current._ordenes.size;
@@ -23502,6 +23524,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: row.total_horas,
           total_ordenes: row.total_ordenes,
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
           equipos: [...row._equipos].filter(Boolean).join(' | '),
           // La etiqueta del equipo ya contiene " | " (marca | nombre), asi que la
           // cadena unida no se puede volver a partir sin romper nombres. Se manda
@@ -23519,12 +23542,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
           _bodegas: new Set<string>(),
         };
         current.total_horas = Number(
           (current.total_horas + this.toNumeric(row.total_horas, 0)).toFixed(4),
         );
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current._bodegas.add(String(row.bodega_label || '').trim());
         current.total_ordenes = current._ordenes.size;
         grouped.set(key, current);
@@ -23536,6 +23561,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_ordenes: row.total_ordenes,
           bodegas: [...row._bodegas].filter(Boolean).join(' | '),
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) => b.total_horas - a.total_horas);
     } else if (groupBy === 'BODEGA') {
@@ -23547,12 +23573,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
           _equipos: new Set<string>(),
         };
         current.total_horas = Number(
           (current.total_horas + this.toNumeric(row.total_horas, 0)).toFixed(4),
         );
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current._equipos.add(String(row.equipment_label || '').trim());
         current.total_ordenes = current._ordenes.size;
         grouped.set(key, current);
@@ -23565,6 +23593,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           equipos: [...row._equipos].filter(Boolean).join(' | '),
           equipos_lista: [...row._equipos].filter(Boolean),
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) => b.total_horas - a.total_horas);
     } else if (groupBy === 'MES') {
@@ -23577,11 +23606,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
         };
         current.total_horas = Number(
           (current.total_horas + this.toNumeric(row.total_horas, 0)).toFixed(4),
         );
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current.total_ordenes = current._ordenes.size;
         grouped.set(key, current);
       }
@@ -23591,6 +23622,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: row.total_horas,
           total_ordenes: row.total_ordenes,
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) =>
           String(b.periodo || '').localeCompare(String(a.periodo || '')),
@@ -23725,6 +23757,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
           _materiales: new Set<string>(),
         };
         current.total_costo = Number(
@@ -23737,6 +23770,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
         current.total_items += Number(row.total_items || 0);
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         String(row.materiales || '')
           .split('|')
           .map((value) => value.trim())
@@ -23754,6 +23788,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_ordenes: row.total_ordenes,
           materiales: [...row._materiales].join(' | '),
           ordenes_trabajo: [...row._ordenes].join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) => b.total_costo - a.total_costo);
     } else if (groupBy === 'BODEGA') {
@@ -23767,6 +23802,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
           _materiales: new Set<string>(),
         };
         current.total_costo = Number(
@@ -23779,6 +23815,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
         current.total_items += Number(row.total_items || 0);
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         String(row.materiales || '')
           .split('|')
           .map((value) => value.trim())
@@ -23796,6 +23833,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_ordenes: row.total_ordenes,
           materiales: [...row._materiales].join(' | '),
           ordenes_trabajo: [...row._ordenes].join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) => b.total_costo - a.total_costo);
     } else if (groupBy === 'MES') {
@@ -23810,6 +23848,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
         };
         current.total_costo = Number(
           (current.total_costo + this.toNumeric(row.total_costo, 0)).toFixed(4),
@@ -23821,6 +23860,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
         current.total_items += Number(row.total_items || 0);
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current.total_ordenes = current._ordenes.size;
         grouped.set(key, current);
       }
@@ -23832,6 +23872,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: row.total_items,
           total_ordenes: row.total_ordenes,
           ordenes_trabajo: [...row._ordenes].join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) =>
           String(b.periodo || '').localeCompare(String(a.periodo || '')),
@@ -23857,6 +23898,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_status: row.work_order_status,
         work_order_type: row.work_order_type,
         maintenance_kind_label: row.maintenance_kind_label,
+        work_order_id: row.work_order_id,
         equipment_name: row.equipment_name,
         equipment_label: row.equipment_label,
         plan_name: row.plan_name,
@@ -23888,6 +23930,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
         };
         if (groupBy === 'EQUIPO') {
           key = `${row.equipment_label}|${row.producto_id}`;
@@ -23910,6 +23953,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
         current.total_items += Number(row.total_items || 0);
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current.total_ordenes = current._ordenes.size;
         grouped.set(key, current);
       }
@@ -23924,6 +23968,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: row.total_items,
           total_ordenes: row.total_ordenes,
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) => b.total_costo - a.total_costo);
     }
@@ -23973,6 +24018,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_title: row.work_order_title,
         work_order_status: row.work_order_status,
         work_order_type: row.work_order_type,
+        maintenance_kind_label: row.maintenance_kind_label,
+        work_order_id: row.work_order_id,
         equipment_name: row.equipment_name,
         equipment_label: row.equipment_label,
         plan_name: row.plan_name,
@@ -24001,6 +24048,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: 0,
           total_ordenes: 0,
           _ordenes: new Set<string>(),
+          _detalle: new Map<string, any>(),
         };
         if (groupBy === 'MATERIAL') {
           key = `${row.producto_id}`;
@@ -24011,6 +24059,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             total_items: 0,
             total_ordenes: 0,
             _ordenes: new Set<string>(),
+            _detalle: new Map<string, any>(),
             _bodegas: new Set<string>(),
           };
         } else if (groupBy === 'EQUIPO') {
@@ -24023,6 +24072,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             total_items: 0,
             total_ordenes: 0,
             _ordenes: new Set<string>(),
+            _detalle: new Map<string, any>(),
           };
         } else if (groupBy === 'MES') {
           key = `${String(row.periodo || '')}|${row.producto_id}`;
@@ -24034,6 +24084,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             total_items: 0,
             total_ordenes: 0,
             _ordenes: new Set<string>(),
+            _detalle: new Map<string, any>(),
           };
         }
         const current = grouped.get(key) ?? seed;
@@ -24045,6 +24096,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
         current.total_items += Number(row.total_items || 0);
         current._ordenes.add(String(row.work_order_code || '').trim());
+        this.trackWorkOrderDetalle(current._detalle, row);
         current.total_ordenes = current._ordenes.size;
         if (current._bodegas) {
           current._bodegas.add(String(row.bodega_label || '').trim());
@@ -24065,6 +24117,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_items: row.total_items,
           total_ordenes: row.total_ordenes,
           ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+          detalle_ordenes: [...row._detalle.values()],
         }))
         .sort((a, b) => b.total_costo - a.total_costo);
     }
@@ -24170,6 +24223,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         total_items: 0,
         total_ordenes: 0,
         _ordenes: new Set<string>(),
+        _detalle: new Map<string, any>(),
         _equipos: new Set<string>(),
         _bodegas: new Set<string>(),
       };
@@ -24181,6 +24235,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       current.total_items += Number(row.total_items || 0);
       current._ordenes.add(String(row.work_order_code || '').trim());
+      this.trackWorkOrderDetalle(current._detalle, row);
       current._equipos.add(String(row.equipment_label || '').trim());
       current._bodegas.add(String(row.bodega_label || '').trim());
       current.total_ordenes = current._ordenes.size;
@@ -24197,6 +24252,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipos_lista: [...row._equipos].filter(Boolean),
         bodegas: [...row._bodegas].filter(Boolean).join(' | '),
         ordenes_trabajo: [...row._ordenes].filter(Boolean).join(' | '),
+        detalle_ordenes: [...row._detalle.values()],
       }))
       .sort((a, b) => b.total_cantidad - a.total_cantidad)
       .slice(0, 10);
