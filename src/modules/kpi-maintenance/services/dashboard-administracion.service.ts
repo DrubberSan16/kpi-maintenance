@@ -584,7 +584,10 @@ export class DashboardAdministracionService {
           wo.equipment_id,
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
           COALESCE(wo.hora_inicio, wo.created_at) AS momento,
-          string_agg(DISTINCT p.nombre, ', ') AS producto,
+          string_agg(DISTINCT
+            TRIM(CONCAT_WS(' - ', NULLIF(TRIM(p.codigo), ''), NULLIF(TRIM(p.nombre), ''))
+               || COALESCE(' (' || NULLIF(TRIM(p.descripcion), '') || ')', ''))
+          , ', ') AS producto,
           ROUND(SUM(cr.cantidad)::numeric, 2) AS galones,
           ROUND(SUM(COALESCE(cr.subtotal, 0))::numeric, 2) AS costo,
           COUNT(cr.id) AS lineas
@@ -633,7 +636,8 @@ export class DashboardAdministracionService {
         SELECT
           wo.code AS orden,
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
-          p.nombre AS producto,
+          TRIM(CONCAT_WS(' - ', NULLIF(TRIM(p.codigo), ''), NULLIF(TRIM(p.nombre), ''))
+               || COALESCE(' (' || NULLIF(TRIM(p.descripcion), '') || ')', '')) AS producto,
           ROUND(cr.cantidad::numeric, 2) AS cantidad,
           ROUND(COALESCE(cr.costo_unitario, 0)::numeric, 2) AS costo_unitario,
           ROUND(COALESCE(cr.subtotal, 0)::numeric, 2) AS costo

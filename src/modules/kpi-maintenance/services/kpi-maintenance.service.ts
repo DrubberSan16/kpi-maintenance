@@ -1061,7 +1061,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const codigo = String(producto.codigo || '').trim();
     const nombre = String(producto.nombre || '').trim();
     const descripcion = String(producto.descripcion || '').trim();
-    const material = codigo && nombre ? `${codigo}-${nombre}` : nombre || codigo;
+    // Estandar de material en todos los tableros: `codigo - nombre (descripcion)`.
+    const material = codigo && nombre ? `${codigo} - ${nombre}` : nombre || codigo;
     if (!material) return null;
     return descripcion ? `${material} (${descripcion})` : material;
   }
@@ -5029,6 +5030,83 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!nombre) return 'Sin equipo';
     const base = `${marca} - ${nombre}`;
     return modelo ? `${base} (${modelo})` : base;
+  }
+
+  /**
+   * Identidad del equipo para el Dashboard Gerencia: `marca | nombre - modelo
+   * (nombre real)`.
+   *
+   * Se prefiere sobre el codigo porque el codigo no dice nada a quien lee el
+   * reporte: el nombre (JC - UG07) es como se conoce a la unidad en campo, y el
+   * nombre real (UNIDAD GENERACION) explica que es. Cada parte que falte se
+   * omite en vez de dejar un separador huerfano.
+   */
+  private buildEquipmentManagerLabel(
+    equipment?:
+      | (Pick<EquipoEntity, 'nombre' | 'modelo' | 'nombre_real'> & {
+          marca_nombre?: string | null;
+        })
+      | null,
+  ): string {
+    if (!equipment) return 'Sin equipo';
+    const marca = this.firstNonEmptyString(equipment.marca_nombre);
+    const nombre = this.firstNonEmptyString(equipment.nombre);
+    const modelo = this.firstNonEmptyString(equipment.modelo);
+    const nombreReal = this.firstNonEmptyString(equipment.nombre_real);
+    const identidad = [nombre, modelo].filter(Boolean).join(' - ');
+    if (!identidad) return nombreReal ?? marca ?? 'Sin equipo';
+    const conMarca = marca ? `${marca} | ${identidad}` : identidad;
+    return nombreReal ? `${conMarca} (${nombreReal})` : conMarca;
+  }
+
+  /**
+   * Pares OT+material que completaron el ciclo de reemplazo: salio el repuesto
+   * nuevo de bodega y entro el viejo a chatarra.
+   *
+   * Es la misma regla que el detalle de la orden marca como "flujo completo".
+   * Un consumo sin su chatarra puede ser un insumo, no un repuesto cambiado,
+   * por eso el tab de repuestos cambiados solo cuenta los pares completos.
+   */
+  private async buildReplacedMaterialFlowKeys(
+    workOrderIds: string[],
+  ): Promise<Set<string>> {
+    if (!workOrderIds.length) return new Set<string>();
+    const rows = await this.dataSource.query(
+      `
+      WITH entregado AS (
+        SELECT e.work_order_id, d.producto_id
+        FROM kpi_inventory.tb_entrega_material e
+        JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = e.id
+        WHERE COALESCE(e.is_deleted, false) = false
+          AND COALESCE(d.is_deleted, false) = false
+          AND e.work_order_id = ANY($1::uuid[])
+        GROUP BY 1, 2
+        HAVING SUM(d.cantidad) > 0
+      ),
+      chatarra AS (
+        SELECT s.work_order_id, sd.producto_id
+        FROM kpi_maintenance.tb_work_order_desecho s
+        JOIN kpi_maintenance.tb_work_order_desecho_det sd
+          ON sd.work_order_desecho_id = s.id
+        WHERE COALESCE(s.is_deleted, false) = false
+          AND COALESCE(sd.is_deleted, false) = false
+          AND s.work_order_id = ANY($1::uuid[])
+        GROUP BY 1, 2
+        HAVING SUM(sd.cantidad) > 0
+      )
+      SELECT e.work_order_id, e.producto_id
+      FROM entregado e
+      JOIN chatarra c
+        ON c.work_order_id = e.work_order_id
+       AND c.producto_id = e.producto_id
+      `,
+      [workOrderIds],
+    );
+    return new Set(
+      rows.map(
+        (row: any) => `${String(row.work_order_id)}|${String(row.producto_id)}`,
+      ),
+    );
   }
 
   /**
@@ -23248,15 +23326,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ),
         work_order_type: workOrder.type,
         maintenance_kind: workOrder.maintenance_kind,
+        // El tipo que interesa al lector es la clase de mantenimiento (cebado,
+        // correctivo, preventivo...), no el tipo interno de la OT.
+        maintenance_kind_label: this.buildWorkOrderMaintenanceKindLabel(
+          workOrder.maintenance_kind,
+        ),
         fecha_referencia: referenceDate.toISOString(),
         periodo: this.buildSystemReportPeriodLabel(referenceDate),
         period_key: referenceDate.toISOString().slice(0, 7),
         equipment_id: equipment?.id ?? workOrder.equipment_id ?? null,
         equipment_code: equipment?.codigo ?? null,
-        equipment_name:
-          this.firstNonEmptyString(equipment?.nombre) ??
-          this.buildEquipmentReportLabel(equipment),
-        equipment_label: this.buildEquipmentReportLabel(equipment),
+        equipment_name: this.buildEquipmentManagerLabel(equipment),
+        equipment_label: this.buildEquipmentManagerLabel(equipment),
         plan_id: plan?.id ?? workOrder.plan_id ?? null,
         plan_code: plan?.codigo ?? null,
         plan_name: plan?.nombre ?? procedure?.nombre ?? null,
@@ -23521,6 +23602,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           work_order_status: row.work_order_status,
           work_order_type: row.work_order_type,
           maintenance_kind: row.maintenance_kind,
+          maintenance_kind_label: row.maintenance_kind_label,
           equipment_name: row.equipment_name,
           equipment_label: row.equipment_label,
           plan_name: row.plan_name,
@@ -23751,6 +23833,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
     }
 
+    // Repuestos cambiados = ciclo completo (salio el nuevo de bodega y entro el
+    // viejo a chatarra). Un consumo suelto puede ser un insumo, no un reemplazo.
+    const replacedFlowKeys = await this.buildReplacedMaterialFlowKeys([
+      ...filteredWorkOrderIds,
+    ]);
+    for (const [key, row] of [...replacedBaseMap.entries()]) {
+      const flowKey = `${String(row.work_order_id || '')}|${String(row.producto_id || '')}`;
+      if (!replacedFlowKeys.has(flowKey)) replacedBaseMap.delete(key);
+    }
+
     const replacedBaseRows = sortRowsByDateDesc(
       [...replacedBaseMap.values()].map((row) => ({
         fecha_referencia: row.fecha_referencia,
@@ -23759,6 +23851,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_title: row.work_order_title,
         work_order_status: row.work_order_status,
         work_order_type: row.work_order_type,
+        maintenance_kind_label: row.maintenance_kind_label,
         equipment_name: row.equipment_name,
         equipment_label: row.equipment_label,
         plan_name: row.plan_name,

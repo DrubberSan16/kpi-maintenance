@@ -2235,7 +2235,7 @@ describe('KpiMaintenanceService analisis de lubricante', () => {
       payload_json: {
         source: 'EXCEL',
         producto_id: producto.id,
-        producto_label: 'ACE-15W40-Aceite 15W40 (Motor diesel)',
+        producto_label: 'ACE-15W40 - Aceite 15W40 (Motor diesel)',
         lubricante_codigo: 'ACE-15W40',
         lubricante_descripcion: 'Motor diesel',
       },
