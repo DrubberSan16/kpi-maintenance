@@ -5053,6 +5053,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'ADMIN',
       'SUPER ADMINISTRADOR',
       'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
       'SUPER_ADMIN',
       'SUPER ADMIN',
     ].includes(rol);

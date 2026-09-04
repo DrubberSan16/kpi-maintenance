@@ -170,6 +170,9 @@ describe('KpiMaintenanceService alerts', () => {
       'ADMIN',
       'SUPER ADMINISTRADOR',
       'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER_ADMIN',
+      'SUPER ADMIN',
     ])('permite costos al rol %s', (roleName) => {
       expect((service as any).puedeVerCostos(roleName)).toBe(true);
     });
