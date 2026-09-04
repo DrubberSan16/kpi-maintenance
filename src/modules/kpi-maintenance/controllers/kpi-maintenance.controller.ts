@@ -977,6 +977,26 @@ export class KpiMaintenanceController {
 
   @ApiTags('Dashboard Administracion')
   @ApiOperation({
+    summary: 'Resumen liviano del control de cebado y consumo de aceite',
+  })
+  @ApiQuery({ name: 'desde', required: false, type: String, description: 'YYYY-MM-DD' })
+  @ApiQuery({ name: 'hasta', required: false, type: String, description: 'YYYY-MM-DD' })
+  @ApiQuery({ name: 'equipo_id', required: false, type: String })
+  @Get('dashboard-administracion/cebado')
+  getDashboardCebado(
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+    @Query('equipo_id') equipoId?: string,
+  ) {
+    return this.dashboardAdministracion.getCebadoSummary({
+      desde,
+      hasta,
+      equipo_id: equipoId,
+    });
+  }
+
+  @ApiTags('Dashboard Administracion')
+  @ApiOperation({
     summary: 'Serie temporal de consumo de aceite en cebado, por equipo',
   })
   @ApiQuery({ name: 'desde', required: false, type: String })

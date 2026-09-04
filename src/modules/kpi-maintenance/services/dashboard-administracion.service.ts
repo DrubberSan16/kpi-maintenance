@@ -705,6 +705,24 @@ export class DashboardAdministracionService {
     return this.wrap({ bloque, filas: [] }, 'Bloque sin detalle disponible');
   }
 
+  /** Resumen liviano para reutilizar solo el bloque de cebado. */
+  async getCebadoSummary(query: {
+    desde?: string;
+    hasta?: string;
+    equipo_id?: string;
+  }) {
+    const { desde, hasta } = this.resolvePeriod(query.desde, query.hasta);
+    const equipoId = this.equipoParam(query.equipo_id);
+    const cebado = await this.getCebado(desde, hasta, equipoId);
+    return this.wrap(
+      {
+        periodo: { desde, hasta, equipo_id: equipoId },
+        cebado,
+      },
+      'Control de cebado generado',
+    );
+  }
+
   /** Punto de entrada: devuelve los ocho bloques del dashboard. */
   async getDashboard(query: {
     desde?: string;
