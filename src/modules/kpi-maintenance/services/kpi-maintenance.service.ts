@@ -23046,6 +23046,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           producto.codigo AS producto_codigo,
           producto.nombre AS producto_nombre,
           producto.descripcion AS producto_descripcion,
+          COALESCE(producto.es_aceite, false) AS producto_es_aceite,
+          marca.nombre AS producto_marca,
+          categoria.nombre AS producto_categoria,
+          unidad.nombre AS producto_unidad_medida,
           COALESCE(movimientos.ingresos, 0) AS ingresos,
           COALESCE(movimientos.salidas, 0) AS salidas,
           COALESCE(
@@ -23057,6 +23061,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         INNER JOIN kpi_inventory.tb_producto producto
           ON producto.id = keys.producto_id
          AND producto.is_deleted = false
+        LEFT JOIN kpi_inventory.tb_marca marca
+          ON marca.id = producto.marca_id
+         AND marca.is_deleted = false
+        LEFT JOIN kpi_inventory.tb_categoria categoria
+          ON categoria.id = producto.categoria_id
+         AND categoria.is_deleted = false
+        LEFT JOIN kpi_inventory.tb_unidad_medida unidad
+          ON unidad.id = producto.unidad_medida_id
+         AND unidad.is_deleted = false
         INNER JOIN kpi_inventory.tb_bodega bodega
           ON bodega.id = keys.bodega_id
          AND bodega.is_deleted = false
@@ -23090,6 +23103,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.firstNonEmptyString(row?.producto_nombre) ?? 'Material sin nombre',
         producto_descripcion:
           this.firstNonEmptyString(row?.producto_descripcion) ?? null,
+        // Atributos del material: el tablero gerencial filtra la tabla por
+        // marca, categoria, unidad y si es aceite, y necesita el dato crudo
+        // (no la etiqueta) para poder comparar.
+        producto_marca: this.firstNonEmptyString(row?.producto_marca) ?? null,
+        producto_categoria:
+          this.firstNonEmptyString(row?.producto_categoria) ?? null,
+        producto_unidad_medida:
+          this.firstNonEmptyString(row?.producto_unidad_medida) ?? null,
+        producto_es_aceite: row?.producto_es_aceite === true,
         inventario_inicial: 0,
         ingresos: 0,
         salidas: 0,
@@ -23257,6 +23279,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const equipmentMap = new Map(
       equipmentsWithBrands.map((row) => [row.id, row]),
     );
+    // El tablero gerencial separa el costo de mantenimiento en una pestana por
+    // tipo de equipo, asi que cada fila viaja con el tipo ya resuelto: la
+    // pantalla no tiene forma de deducirlo desde el identificador del equipo.
+    const equipmentTypeIds = [
+      ...new Set(
+        equipmentsWithBrands
+          .map((row) => String(row.equipo_tipo_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const equipmentTypes = equipmentTypeIds.length
+      ? await this.equipoTipoRepo.find({
+          where: { id: In(equipmentTypeIds), is_deleted: false },
+        })
+      : [];
+    const equipmentTypeMap = new Map(
+      equipmentTypes.map((row) => [String(row.id), row]),
+    );
+    const resolveEquipmentTypeLabel = (equipment?: EquipoEntity | null) => {
+      const typeId = String(equipment?.equipo_tipo_id || '').trim();
+      const type = typeId ? equipmentTypeMap.get(typeId) : null;
+      return (
+        this.firstNonEmptyString(type?.nombre, type?.codigo) ??
+        'Sin tipo de equipo'
+      );
+    };
     const procedureIds = new Set<string>();
     for (const workOrder of datedWorkOrders) {
       const payload =
@@ -23413,6 +23461,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment_code: equipment?.codigo ?? null,
         equipment_name: this.buildEquipmentManagerLabel(equipment),
         equipment_label: this.buildEquipmentManagerLabel(equipment),
+        equipment_type_id: equipment?.equipo_tipo_id ?? null,
+        equipment_type_label: resolveEquipmentTypeLabel(equipment),
         plan_id: plan?.id ?? workOrder.plan_id ?? null,
         plan_code: plan?.codigo ?? null,
         plan_name: plan?.nombre ?? procedure?.nombre ?? null,
