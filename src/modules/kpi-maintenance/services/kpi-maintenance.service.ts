@@ -23282,18 +23282,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     // El tablero gerencial separa el costo de mantenimiento en una pestana por
     // tipo de equipo, asi que cada fila viaja con el tipo ya resuelto: la
     // pantalla no tiene forma de deducirlo desde el identificador del equipo.
-    const equipmentTypeIds = [
-      ...new Set(
-        equipmentsWithBrands
-          .map((row) => String(row.equipo_tipo_id || '').trim())
-          .filter(Boolean),
-      ),
-    ];
-    const equipmentTypes = equipmentTypeIds.length
-      ? await this.equipoTipoRepo.find({
-          where: { id: In(equipmentTypeIds), is_deleted: false },
-        })
-      : [];
+    //
+    // Se trae el catalogo COMPLETO, no solo los tipos de los equipos que
+    // aparecen en el rango: las pestanas se abren desde el catalogo, de modo
+    // que un tipo recien creado (o uno que todavia no acumula costo) tambien
+    // tiene la suya, vacia, en vez de desaparecer del tablero.
+    const equipmentTypes = await this.equipoTipoRepo.find({
+      where: { is_deleted: false },
+      order: { nombre: 'ASC', codigo: 'ASC' } as any,
+    });
     const equipmentTypeMap = new Map(
       equipmentTypes.map((row) => [String(row.id), row]),
     );
@@ -24403,6 +24400,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               label: this.buildEquipmentReportLabel(row),
             }))
             .sort((a, b) => a.label.localeCompare(b.label)),
+          // Catalogo completo: el costo de mantenimiento abre una pestana por
+          // tipo, tenga o no movimiento en el rango consultado.
+          tipos_equipo: equipmentTypes.map((row) => ({
+            id: row.id,
+            codigo: row.codigo ?? null,
+            nombre: row.nombre ?? null,
+            label:
+              this.firstNonEmptyString(row.nombre, row.codigo) ??
+              'Sin tipo de equipo',
+          })),
         },
         summary: [
           {
