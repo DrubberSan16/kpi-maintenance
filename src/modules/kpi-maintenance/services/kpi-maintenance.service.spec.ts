@@ -150,6 +150,54 @@ describe('KpiMaintenanceService alerts', () => {
     service = createService(repos, dataSource);
   });
 
+  describe('visibilidad de costos de materiales', () => {
+    const costItems = [
+      {
+        producto_label: 'MAT-001 - Filtro',
+        bodega_label: 'BOD-01 - Principal',
+        cantidad: 2,
+        costo_unitario: 15,
+        subtotal: 30,
+        observacion: null,
+      },
+    ];
+
+    it.each([
+      'GERENTE GENERAL',
+      'GERENCIA GENERAL',
+      'ADMINISTRADOR',
+      'ADMINISTRADOR DEL SISTEMA',
+      'ADMIN',
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+    ])('permite costos al rol %s', (roleName) => {
+      expect((service as any).puedeVerCostos(roleName)).toBe(true);
+    });
+
+    it.each(['SUPERVISOR', 'OPERADOR', 'BODEGUERO', 'ADMINISTRATIVO', ''])(
+      'oculta costos al rol %s',
+      (roleName) => {
+        expect((service as any).puedeVerCostos(roleName)).toBe(false);
+      },
+    );
+
+    it('el correo sin permiso conserva cantidades y omite importes', () => {
+      const html = (service as any).buildConsumoEmailTableHtml(costItems, false);
+      expect(html).toContain('Cantidad');
+      expect(html).toContain('2.00');
+      expect(html).not.toContain('Costo unit.');
+      expect(html).not.toContain('Subtotal');
+      expect(html).not.toContain('30.00');
+    });
+
+    it('el correo autorizado incluye importes', () => {
+      const html = (service as any).buildConsumoEmailTableHtml(costItems, true);
+      expect(html).toContain('Costo unit.');
+      expect(html).toContain('Subtotal');
+      expect(html).toContain('30.00');
+    });
+  });
+
   it('incluye el nombre de la marca en el catálogo de equipos', async () => {
     const equipment = {
       id: 'equipment-1',

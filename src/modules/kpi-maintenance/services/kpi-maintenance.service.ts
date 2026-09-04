@@ -286,7 +286,6 @@ type InventoryAlertItem = {
   stock_disponible_minimo: number;
   stock_min_bodega: number;
   stock_max_bodega: number;
-  costo_promedio_bodega: number;
   nivel: AlertLevel;
   observacion: string;
   actor_username: string | null;
@@ -5046,21 +5045,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .replace(/[\u0300-\u036f]/g, '')
       .trim()
       .toUpperCase();
-    if (!rol) return false;
-    return (
-      rol.includes('SUPER ADMIN') ||
-      rol.includes('SUPERADMIN') ||
-      rol.includes('ADMINISTRADOR') ||
-      rol.includes('ADMINISTRATIVO') ||
-      rol === 'ADMIN' ||
-      rol.includes('GERENTE GENERAL') ||
-      rol.includes('GERENCIA GENERAL')
-    );
+    return [
+      'GERENTE GENERAL',
+      'GERENCIA GENERAL',
+      'ADMINISTRADOR',
+      'ADMINISTRADOR DEL SISTEMA',
+      'ADMIN',
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMIN',
+      'SUPER ADMIN',
+    ].includes(rol);
   }
 
   /** Campos monetarios que se retiran cuando el perfil no puede verlos. */
   private esCampoDeCosto(key: string) {
-    return /costo|precio|valor_total|subtotal|monto/i.test(String(key || ''));
+    return /costo|precio|valor_total|subtotal|monto|utilidad/i.test(String(key || ''));
+  }
+
+  private destinatarioPuedeVerCostos(
+    recipient: AlertNotificationRecipient,
+  ) {
+    return this.puedeVerCostos(recipient.roleName);
   }
 
   /**
@@ -12424,7 +12430,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           stock_disponible_minimo: stockDisponibleMinimo,
           stock_min_bodega: stockMinimo,
           stock_max_bodega: this.toNumeric(row.stock_max_bodega),
-          costo_promedio_bodega: this.toNumeric(row.costo_promedio_bodega),
           nivel: isCritical ? 'CRITICAL' : 'WARNING',
           observacion: isCritical
             ? 'Sin stock disponible fuera de la reserva critica. Gestionar reposicion inmediata o traslado entre bodegas.'
@@ -13383,6 +13388,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       subtotal: number;
       observacion: string | null;
     }>,
+    showCosts: boolean,
   ) {
     const rows = items
       .map(
@@ -13391,8 +13397,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.producto_label)}</td>
             <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.bodega_label)}</td>
             <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.cantidad.toFixed(2)}</td>
-            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.costo_unitario.toFixed(2)}</td>
-            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.subtotal.toFixed(2)}</td>
+            ${showCosts ? `<td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;">${item.costo_unitario.toFixed(2)}</td>
+            <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.subtotal.toFixed(2)}</td>` : ''}
             <td style="padding:9px 10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.observacion || '-')}</td>
           </tr>`,
       )
@@ -13406,19 +13412,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               <th style="padding:10px;text-align:left;">Material</th>
               <th style="padding:10px;text-align:left;">Bodega</th>
               <th style="padding:10px;text-align:right;">Cantidad</th>
-              <th style="padding:10px;text-align:right;">Costo unit.</th>
-              <th style="padding:10px;text-align:right;">Subtotal</th>
+              ${showCosts ? '<th style="padding:10px;text-align:right;">Costo unit.</th><th style="padding:10px;text-align:right;">Subtotal</th>' : ''}
               <th style="padding:10px;text-align:left;">Observación</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
-          <tfoot>
+          ${showCosts ? `<tfoot>
             <tr>
               <td colspan="4" style="padding:11px 10px;text-align:right;font-weight:700;background:#f6f9fc;">Total consumido</td>
               <td style="padding:11px 10px;text-align:right;font-weight:800;background:#f6f9fc;">${total.toFixed(2)}</td>
               <td style="background:#f6f9fc;"></td>
             </tr>
-          </tfoot>
+          </tfoot>` : ''}
         </table>
       </div>`;
   }
@@ -13494,6 +13499,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       for (const recipient of recipients) {
         const recipientLabel =
           recipient.displayName || recipient.username || 'usuario';
+        const showCosts = this.destinatarioPuedeVerCostos(recipient);
         try {
           await transporter.sendMail({
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
@@ -13520,7 +13526,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                   },
                   { label: 'Materiales', value: items.length },
                 ])}
-                ${this.buildConsumoEmailTableHtml(items)}
+                ${this.buildConsumoEmailTableHtml(items, showCosts)}
                 ${
                   workOrdersUrl
                     ? `<div style="margin-top:22px;text-align:center;">
@@ -13534,10 +13540,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             text: [
               `Consumos registrados en la OT ${workOrder.code ?? workOrder.id}.`,
               '',
-              ...items.map(
-                (item) =>
-                  `- ${item.producto_label} | ${item.bodega_label} | cantidad ${item.cantidad.toFixed(2)} | subtotal ${item.subtotal.toFixed(2)}${item.observacion ? ` | ${item.observacion}` : ''}`,
-              ),
+              ...items.map((item) => {
+                const costoText = showCosts
+                  ? ` | costo unit. ${item.costo_unitario.toFixed(2)} | subtotal ${item.subtotal.toFixed(2)}`
+                  : '';
+                return `- ${item.producto_label} | ${item.bodega_label} | cantidad ${item.cantidad.toFixed(2)}${costoText}${item.observacion ? ` | ${item.observacion}` : ''}`;
+              }),
               '',
               workOrdersUrl ? `Órdenes de trabajo: ${workOrdersUrl}` : '',
             ]
@@ -13559,11 +13567,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       notify: false,
       detalle: `${workOrder.code ?? workOrder.id} · ${items.length} material(es) consumido(s)`,
       payload: {
-        consumo_items: items,
+        consumo_items: items.map((item) => ({
+          producto_label: item.producto_label,
+          bodega_label: item.bodega_label,
+          cantidad: item.cantidad,
+          observacion: item.observacion,
+        })),
         total_materiales: items.length,
-        total_consumido: Number(
-          items.reduce((sum, item) => sum + item.subtotal, 0).toFixed(4),
-        ),
         email_sent: sent,
         email_failed: failed,
       },
