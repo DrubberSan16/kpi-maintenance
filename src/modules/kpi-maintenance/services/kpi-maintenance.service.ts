@@ -26513,11 +26513,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const movimientoDetRepo =
       manager.getRepository(MovimientoInventarioDetEntity);
     const kardexRepo = manager.getRepository(KardexEntity);
-    const documentCode = await this.generateMaintenanceInventoryDocumentCode(
-      manager,
-      'EB',
-    );
-    const referenceCode = this.buildWorkOrderInventoryReference(workOrder);
+    const issuedAt = new Date();
     const movementObservation = this.buildWorkOrderMaterialIssueObservation(
       workOrder,
       dto.observacion,
@@ -26525,16 +26521,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const movementUser =
       this.firstNonEmptyString(workOrder.updated_by, workOrder.created_by) ||
       'SYSTEM';
-    const sourceWarehouseId = (() => {
-      const ids = [
-        ...new Set(
-          dto.items
-            .map((item) => this.firstNonEmptyString(item?.bodega_id))
-            .filter(Boolean),
-        ),
-      ];
-      return ids.length === 1 ? ids[0] : null;
-    })();
 
     const entrega = await entregaRepo.save(
       entregaRepo.create({
@@ -26543,23 +26529,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         observacion: dto.observacion,
       }),
     );
-    const movimiento = await movimientoRepo.save(
-      movimientoRepo.create({
-        status: 'ACTIVE',
-        tipo_movimiento: 'SALIDA',
-        fecha_movimiento: new Date(),
-        tipo_documento: 'EGRESO_BODEGA',
-        numero_documento: documentCode,
-        referencia: referenceCode,
-        observacion: movementObservation,
-        bodega_origen_id: sourceWarehouseId,
-        tipo_cambio: 1,
-        work_order_id: workOrder.id,
-        total_costos: 0,
-        estado: 'CONFIRMADO',
-        created_by: movementUser,
-        updated_by: movementUser,
-      }),
+    const movimiento = await this.resolveWorkOrderIssueMovement(
+      manager,
+      workOrder,
+      dto,
+      movementUser,
+      issuedAt,
     );
 
     let total = 0;
@@ -26651,7 +26626,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await kardexRepo.save(
         kardexRepo.create({
           status: 'ACTIVE',
-          fecha: movimiento.fecha_movimiento,
+          // El egreso se reutiliza, asi que su fecha es la de apertura; cada
+          // linea del kardex tiene que llevar el momento en que salio.
+          fecha: issuedAt,
           bodega_id: item.bodega_id,
           producto_id: item.producto_id,
           movimiento_id: movimiento.id,
@@ -26671,7 +26648,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    movimiento.total_costos = total;
+    movimiento.total_costos = this.toNumeric(movimiento.total_costos, 0) + total;
     await movimientoRepo.save(movimiento);
     return {
       entrega_id: entrega.id,
@@ -30606,16 +30583,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     const scope = await this.buildSucursalScopeContext(sucursalId);
 
-    const movimientos = await this.dataSource
-      .getRepository(MovimientoInventarioEntity)
-      .find({
-        where: {
-          work_order_id: workOrderId,
-          tipo_documento: 'EGRESO_BODEGA',
-          is_deleted: false,
-        },
-        order: { fecha_movimiento: 'ASC', created_at: 'ASC' } as any,
-      });
+    const movimientos = await this.findWorkOrderIssueMovements(
+      this.dataSource.manager,
+      workOrderId,
+    );
     const movimientoIds = movimientos.map((item) => item.id);
     if (!movimientoIds.length) {
       return this.wrap([], 'Egresos de bodega listados');
@@ -30631,12 +30602,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }),
     ]);
 
-    // El detalle del movimiento no guarda la bodega: quien la conoce linea a
-    // linea es el kardex que ese mismo egreso genero.
+    // El detalle del movimiento no guarda la bodega, y el egreso crece con la
+    // OT: su fecha es la de apertura, no la de cada salida. Ambas cosas las
+    // sabe el kardex que registro la linea.
     const warehouseByDetail = new Map(
       kardexRows
         .filter((row) => row.movimiento_det_id)
         .map((row) => [String(row.movimiento_det_id), row.bodega_id]),
+    );
+    const dateByDetail = new Map(
+      kardexRows
+        .filter((row) => row.movimiento_det_id)
+        .map((row) => [String(row.movimiento_det_id), row.fecha]),
     );
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       detalles.map((item) => item.producto_id),
@@ -30678,6 +30655,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 bodega_id: bodegaId,
                 bodega_label: this.buildBodegaLabel(bodega) ?? bodegaId,
                 unidad_medida_id: detalle.unidad_medida_id ?? null,
+                fecha:
+                  dateByDetail.get(String(detalle.id)) ??
+                  detalle.created_at ??
+                  movimiento.fecha_movimiento ??
+                  null,
                 condicion_material:
                   this.normalizeMaterialCondition(detalle.condicion_material),
                 cantidad,
@@ -30763,11 +30745,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'registrar salidas de materiales',
       );
       this.assertWorkOrderAllowsMaterialIssue(workOrder);
-      const documentCode = await this.generateMaintenanceInventoryDocumentCode(
-        qr.manager,
-        'EB',
-      );
-      const referenceCode = this.buildWorkOrderInventoryReference(workOrder);
+      const issuedAt = new Date();
       const movementObservation = this.buildWorkOrderMaterialIssueObservation(
         workOrder,
         dto.observacion,
@@ -30779,16 +30757,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           workOrder.updated_by,
           workOrder.created_by,
         ) || 'SYSTEM';
-      const sourceWarehouseId = (() => {
-        const ids = [
-          ...new Set(
-            dto.items
-              .map((item) => this.firstNonEmptyString(item?.bodega_id))
-              .filter(Boolean),
-          ),
-        ];
-        return ids.length === 1 ? ids[0] : null;
-      })();
       const em = await qr.manager.save(
         EntregaMaterialEntity,
         qr.manager.create(EntregaMaterialEntity, {
@@ -30797,24 +30765,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           observacion: dto.observacion,
         }),
       );
-      const mov = await qr.manager.save(
-        MovimientoInventarioEntity,
-        qr.manager.create(MovimientoInventarioEntity, {
-          status: 'ACTIVE',
-          tipo_movimiento: 'SALIDA',
-          fecha_movimiento: new Date(),
-          tipo_documento: 'EGRESO_BODEGA',
-          numero_documento: documentCode,
-          referencia: referenceCode,
-          observacion: movementObservation,
-          bodega_origen_id: sourceWarehouseId,
-          tipo_cambio: 1,
-          work_order_id: workOrderId,
-          total_costos: 0,
-          estado: 'CONFIRMADO',
-          created_by: movementUser,
-          updated_by: movementUser,
-        }),
+      const mov = await this.resolveWorkOrderIssueMovement(
+        qr.manager,
+        workOrder,
+        dto,
+        movementUser,
+        issuedAt,
       );
       let total = 0;
       for (const item of dto.items) {
@@ -30895,7 +30851,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           KardexEntity,
           qr.manager.create(KardexEntity, {
             status: 'ACTIVE',
-            fecha: mov.fecha_movimiento,
+            // El egreso se reutiliza, asi que su fecha es la de apertura; cada
+            // linea del kardex tiene que llevar el momento en que salio.
+            fecha: issuedAt,
             bodega_id: item.bodega_id,
             producto_id: item.producto_id,
             movimiento_id: mov.id,
@@ -30914,7 +30872,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }),
         );
       }
-      mov.total_costos = total;
+      mov.total_costos = this.toNumeric(mov.total_costos, 0) + total;
       await qr.manager.save(mov);
       this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
       workOrder.updated_by =
@@ -31706,8 +31664,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     manager: EntityManager,
     prefix: 'IB' | 'EB',
   ) {
+    // Se miran tambien los borrados: un documento anulado o consolidado ya
+    // gasto su numero y volver a emitirlo duplicaria el codigo en papel.
     const rows = await manager.find(MovimientoInventarioEntity, {
-      where: { is_deleted: false },
       select: { numero_documento: true } as any,
       take: 500,
       order: { created_at: 'DESC' } as any,
@@ -31720,6 +31679,150 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return numeric > max ? numeric : max;
     }, 0);
     return `${prefix}-${String(maxNumber + 1).padStart(8, '0')}`;
+  }
+
+  /**
+   * Los egresos que respaldan la salida de material de una OT.
+   *
+   * No todo EGRESO_BODEGA con `work_order_id` es una entrega al tecnico: el
+   * traslado a chatarra genera su propia transferencia, y esa transferencia
+   * abre un egreso que tambien lleva la OT. Ese documento tiene vida propia
+   * (se anula con la transferencia), asi que ni se imprime en la constancia ni
+   * se reutiliza para acumular material.
+   */
+  private async findWorkOrderIssueMovements(
+    manager: EntityManager,
+    workOrderId: string,
+  ) {
+    const movimientos = await manager.find(MovimientoInventarioEntity, {
+      where: {
+        work_order_id: workOrderId,
+        tipo_documento: 'EGRESO_BODEGA',
+        is_deleted: false,
+      },
+      order: { fecha_movimiento: 'ASC', created_at: 'ASC' } as any,
+    });
+    if (!movimientos.length) return movimientos;
+
+    const ids = movimientos.map((item) => item.id);
+    const transferencias = await manager.find(TransferenciaBodegaEntity, {
+      where: [
+        { movimiento_salida_id: In(ids) },
+        { movimiento_ingreso_id: In(ids) },
+      ],
+    });
+    const ligados = new Set(
+      transferencias
+        .flatMap((item) => [item.movimiento_salida_id, item.movimiento_ingreso_id])
+        .filter((value): value is string => Boolean(value)),
+    );
+    return movimientos.filter((item) => !ligados.has(item.id));
+  }
+
+  /**
+   * El egreso de bodega de una OT es uno solo.
+   *
+   * La orden puede sacar material en varias tandas, pero bodega firma un unico
+   * documento: si la orden ya tiene un EB abierto se reutiliza y solo se le
+   * agregan las lineas nuevas. El numero de documento y la fecha de apertura no
+   * se vuelven a tocar; lo que cambia queda en `updated_by`.
+   */
+  private async resolveWorkOrderIssueMovement(
+    manager: EntityManager,
+    workOrder: WorkOrderEntity,
+    dto: IssueMaterialsDto,
+    movementUser: string,
+    issuedAt: Date,
+  ) {
+    const movimientoRepo = manager.getRepository(MovimientoInventarioEntity);
+    const sourceWarehouseId = (() => {
+      const ids = [
+        ...new Set(
+          dto.items
+            .map((item) => this.firstNonEmptyString(item?.bodega_id))
+            .filter(Boolean),
+        ),
+      ];
+      return ids.length === 1 ? ids[0] : null;
+    })();
+
+    const [existing] = await this.findWorkOrderIssueMovements(
+      manager,
+      workOrder.id,
+    );
+
+    if (existing) {
+      existing.observacion = this.appendWorkOrderIssueNote(
+        existing.observacion,
+        workOrder,
+        dto.observacion,
+      );
+      existing.bodega_origen_id = this.mergeIssueMovementWarehouse(
+        existing.bodega_origen_id,
+        sourceWarehouseId,
+      );
+      existing.referencia =
+        this.firstNonEmptyString(existing.referencia) ??
+        this.buildWorkOrderInventoryReference(workOrder);
+      existing.estado = 'CONFIRMADO';
+      existing.status = 'ACTIVE';
+      existing.updated_by = movementUser;
+      existing.updated_at = issuedAt;
+      return movimientoRepo.save(existing);
+    }
+
+    return movimientoRepo.save(
+      movimientoRepo.create({
+        status: 'ACTIVE',
+        tipo_movimiento: 'SALIDA',
+        fecha_movimiento: issuedAt,
+        tipo_documento: 'EGRESO_BODEGA',
+        numero_documento: await this.generateMaintenanceInventoryDocumentCode(
+          manager,
+          'EB',
+        ),
+        referencia: this.buildWorkOrderInventoryReference(workOrder),
+        observacion: this.buildWorkOrderMaterialIssueObservation(
+          workOrder,
+          dto.observacion,
+        ),
+        bodega_origen_id: sourceWarehouseId,
+        tipo_cambio: 1,
+        work_order_id: workOrder.id,
+        total_costos: 0,
+        estado: 'CONFIRMADO',
+        created_by: movementUser,
+        updated_by: movementUser,
+      }),
+    );
+  }
+
+  /**
+   * `bodega_origen_id` solo tiene sentido cuando todo el egreso salio de la
+   * misma bodega; en cuanto entra material de otra, el documento deja de tener
+   * una bodega unica y la resuelve linea a linea el kardex.
+   */
+  private mergeIssueMovementWarehouse(
+    current?: string | null,
+    incoming?: string | null,
+  ) {
+    const currentId = this.firstNonEmptyString(current) ?? null;
+    const incomingId = this.firstNonEmptyString(incoming) ?? null;
+    if (!currentId || !incomingId) return null;
+    return currentId === incomingId ? currentId : null;
+  }
+
+  /** Acumula en el egreso abierto la nota de cada nueva salida, sin repetirla. */
+  private appendWorkOrderIssueNote(
+    current: string | null | undefined,
+    workOrder: WorkOrderEntity,
+    observacion?: string | null,
+  ) {
+    const base = this.buildWorkOrderMaterialIssueObservation(workOrder, null);
+    const currentText = this.trimNullableText(current) || base;
+    const extra = this.trimNullableText(observacion);
+    if (!extra || currentText.includes(extra)) return currentText;
+    return `${currentText}. ${extra}`;
   }
 
   private buildWorkOrderInventoryReference(workOrder: WorkOrderEntity) {
