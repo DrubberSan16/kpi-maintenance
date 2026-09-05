@@ -2323,6 +2323,25 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({
+    summary:
+      'Listar los egresos de bodega (EB) generados por las salidas de materiales de una OT',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Get('work-orders/:id/issue-documents')
+  listIssueDocuments(@Param('id') id: string, @Req() req: any) {
+    return this.service.listWorkOrderIssueDocuments(
+      id,
+      getSucursalScopeId(req),
+      getRequestActor(req),
+    );
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Eliminar fisicamente las salidas de materiales de una OT' })
   @Delete('work-orders/:id/issue-materials/purge-all')
   purgeIssueMaterialsByWorkOrder(

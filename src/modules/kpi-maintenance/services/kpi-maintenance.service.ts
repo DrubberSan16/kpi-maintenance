@@ -30583,6 +30583,166 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * Documentos EB (egreso de bodega) que respaldan las salidas de material de
+   * una OT.
+   *
+   * La entrega de material y el egreso son dos registros distintos: la entrega
+   * vive en el detalle de la OT y el egreso es el movimiento que realmente
+   * descarga el stock, con su propio numero de documento. Bodega firma el
+   * egreso, asi que la constancia imprimible se arma desde el movimiento y no
+   * desde la entrega.
+   */
+  async listWorkOrderIssueDocuments(
+    workOrderId: string,
+    sucursalId?: string | null,
+    actor?: RequestActorContext | null,
+  ) {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+    await this.assertWorkOrderVisibleForSucursal(workOrder, sucursalId);
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    const scope = await this.buildSucursalScopeContext(sucursalId);
+
+    const movimientos = await this.dataSource
+      .getRepository(MovimientoInventarioEntity)
+      .find({
+        where: {
+          work_order_id: workOrderId,
+          tipo_documento: 'EGRESO_BODEGA',
+          is_deleted: false,
+        },
+        order: { fecha_movimiento: 'ASC', created_at: 'ASC' } as any,
+      });
+    const movimientoIds = movimientos.map((item) => item.id);
+    if (!movimientoIds.length) {
+      return this.wrap([], 'Egresos de bodega listados');
+    }
+
+    const [detalles, kardexRows] = await Promise.all([
+      this.dataSource.getRepository(MovimientoInventarioDetEntity).find({
+        where: { movimiento_id: In(movimientoIds), is_deleted: false },
+        order: { created_at: 'ASC' } as any,
+      }),
+      this.kardexRepo.find({
+        where: { movimiento_id: In(movimientoIds), is_deleted: false },
+      }),
+    ]);
+
+    // El detalle del movimiento no guarda la bodega: quien la conoce linea a
+    // linea es el kardex que ese mismo egreso genero.
+    const warehouseByDetail = new Map(
+      kardexRows
+        .filter((row) => row.movimiento_det_id)
+        .map((row) => [String(row.movimiento_det_id), row.bodega_id]),
+    );
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      detalles.map((item) => item.producto_id),
+      [
+        ...movimientos.map((item) => item.bodega_origen_id ?? ''),
+        ...kardexRows.map((item) => item.bodega_id),
+      ],
+    );
+    const detailMap = detalles.reduce(
+      (acc, item) => {
+        (acc[item.movimiento_id] ??= []).push(item);
+        return acc;
+      },
+      {} as Record<string, MovimientoInventarioDetEntity[]>,
+    );
+
+    return this.wrap(
+      movimientos
+        .map((movimiento) => {
+          const items = (detailMap[movimiento.id] ?? [])
+            .map((detalle) => {
+              const producto = productMap.get(detalle.producto_id);
+              const bodegaId =
+                this.firstNonEmptyString(
+                  warehouseByDetail.get(String(detalle.id)),
+                  movimiento.bodega_origen_id,
+                ) ?? null;
+              const bodega = bodegaId ? warehouseMap.get(bodegaId) : null;
+              const cantidad = this.toNumeric(detalle.cantidad, 0);
+              const costoUnitario = this.toNumeric(detalle.costo_unitario, 0);
+              return {
+                id: detalle.id,
+                producto_id: detalle.producto_id,
+                producto_codigo: producto?.codigo ?? null,
+                producto_nombre: producto?.nombre ?? null,
+                producto_descripcion: producto?.descripcion ?? null,
+                producto_label:
+                  this.buildProductoLabel(producto) ?? detalle.producto_id,
+                bodega_id: bodegaId,
+                bodega_label: this.buildBodegaLabel(bodega) ?? bodegaId,
+                unidad_medida_id: detalle.unidad_medida_id ?? null,
+                condicion_material:
+                  this.normalizeMaterialCondition(detalle.condicion_material),
+                cantidad,
+                costo_unitario: costoUnitario,
+                subtotal: this.toNumeric(
+                  detalle.subtotal_costo,
+                  cantidad * costoUnitario,
+                ),
+                observacion: detalle.observacion ?? null,
+              };
+            })
+            .filter((item) =>
+              !scope
+                ? true
+                : scope.warehouseIds.has(String(item.bodega_id || '').trim()),
+            );
+          if (!items.length && scope) return null;
+
+          const totalCantidad = items.reduce(
+            (acc, item) => acc + item.cantidad,
+            0,
+          );
+          const totalCostos = items.reduce(
+            (acc, item) => acc + item.subtotal,
+            0,
+          );
+          const headerWarehouseId =
+            this.firstNonEmptyString(
+              movimiento.bodega_origen_id,
+              items[0]?.bodega_id,
+            ) ?? null;
+          const headerWarehouse = headerWarehouseId
+            ? warehouseMap.get(headerWarehouseId)
+            : null;
+
+          return {
+            id: movimiento.id,
+            numero_documento: movimiento.numero_documento ?? null,
+            tipo_documento: movimiento.tipo_documento ?? null,
+            tipo_movimiento: movimiento.tipo_movimiento ?? null,
+            fecha_movimiento: movimiento.fecha_movimiento ?? null,
+            referencia: movimiento.referencia ?? null,
+            observacion: movimiento.observacion ?? null,
+            estado: movimiento.estado ?? null,
+            status: movimiento.status ?? null,
+            work_order_id: movimiento.work_order_id ?? workOrderId,
+            work_order_code: workOrder.code ?? null,
+            bodega_id: headerWarehouseId,
+            bodega_label:
+              this.buildBodegaLabel(headerWarehouse) ?? headerWarehouseId,
+            total_items: items.length,
+            total_cantidad: totalCantidad,
+            total_costos: this.toNumeric(movimiento.total_costos, totalCostos),
+            created_by: movimiento.created_by ?? null,
+            created_at: movimiento.created_at ?? null,
+            updated_by: movimiento.updated_by ?? null,
+            updated_at: movimiento.updated_at ?? null,
+            detalles: items,
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+      'Egresos de bodega listados',
+    );
+  }
+
   async issueMaterials(
     workOrderId: string,
     dto: IssueMaterialsDto,
