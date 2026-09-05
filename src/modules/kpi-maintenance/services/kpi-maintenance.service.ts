@@ -3044,12 +3044,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       order: { fecha: 'DESC', id: 'DESC' },
     });
 
-    const costoUnitario = this.toNumeric(
-      kardex?.costo_unitario ?? producto?.ultimo_costo ?? 0,
+    // El kardex de esa bodega es lo mas preciso; si no hay movimientos todavia
+    // vale el costo de la bodega y, en ultimo termino, el del material.
+    const stock = await (
+      manager?.getRepository(StockBodegaEntity) ?? this.stockRepo
+    ).findOne({ where: { producto_id: productoId, bodega_id: bodegaId } });
+    const fallbackCost = this.resolveMaintenanceInventoryUnitCost(
+      producto as ProductoEntity,
+      stock,
     );
-    const saldoCostoPromedio = this.toNumeric(
-      kardex?.saldo_costo_promedio ?? producto?.ultimo_costo ?? 0,
-    );
+    const costoUnitario =
+      this.toNumeric(kardex?.costo_unitario, 0) || fallbackCost;
+    const saldoCostoPromedio =
+      this.toNumeric(kardex?.saldo_costo_promedio, 0) || fallbackCost;
 
     return {
       producto_id: productoId,
@@ -24243,7 +24250,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const unitCost =
           this.toNumeric(row.costo_promedio_bodega, 0) > 0
             ? this.toNumeric(row.costo_promedio_bodega, 0)
-            : this.toNumeric(product?.ultimo_costo, 0);
+            : this.resolveMaterialDefaultCost(product);
         const totalCost = Number((stockActual * unitCost).toFixed(4));
         return {
           bodega_id: row.bodega_id,
@@ -26580,7 +26587,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         item.condicion_material,
       );
 
-      const costo = Number(producto.ultimo_costo);
+      const costo = this.resolveMaintenanceInventoryUnitCost(producto, stock);
       const subtotal = item.cantidad * costo;
       total += subtotal;
 
@@ -30808,7 +30815,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           stock,
           item.condicion_material,
         );
-        const costo = Number(producto.ultimo_costo);
+        const costo = this.resolveMaintenanceInventoryUnitCost(producto, stock);
         const subtotal = item.cantidad * costo;
         total += subtotal;
         const sourceStockActual = this.toNumeric(stock.stock_actual, 0);
@@ -31189,7 +31196,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           {
             bodegaId: sourceWarehouse.id,
             productoId: product.id,
-            costoPromedio: this.toNumeric(product.ultimo_costo, 0),
+            costoPromedio: this.resolveMaterialDefaultCost(product),
             userName: actorName,
           },
         );
@@ -31630,14 +31637,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * Precio por defecto del material: el que se le asigno al crearlo. Es lo que
+   * usa una bodega que todavia no tiene precio propio.
+   *
+   * Se miran los dos campos porque un material puede traer el importe en
+   * cualquiera de ellos y el otro en cero.
+   */
+  private resolveMaterialDefaultCost(product?: Partial<ProductoEntity> | null) {
+    const averageCost = this.toNumeric(product?.costo_promedio, 0);
+    if (averageCost > 0) return averageCost;
+
+    const lastCost = this.toNumeric(product?.ultimo_costo, 0);
+    return lastCost > 0 ? lastCost : 0;
+  }
+
+  /**
+   * El mismo material puede costar distinto en cada bodega, asi que manda el
+   * costo de la bodega y el del material queda de respaldo. Es la misma regla
+   * que aplica el kardex en kpi-inventory.
+   */
   private resolveMaintenanceInventoryUnitCost(
     product: ProductoEntity,
-    stock: StockBodegaEntity,
+    stock?: StockBodegaEntity | null,
   ) {
-    const stockCost = this.toNumeric(stock.costo_promedio_bodega, 0);
+    const stockCost = this.toNumeric(stock?.costo_promedio_bodega, 0);
     if (stockCost > 0) return stockCost;
-    const productCost = this.toNumeric(product.ultimo_costo, 0);
-    return productCost > 0 ? productCost : 0;
+    return this.resolveMaterialDefaultCost(product);
   }
 
   private async generateMaintenanceTransferCode(

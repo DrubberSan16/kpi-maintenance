@@ -1139,6 +1139,10 @@ export class ProductoEntity {
   @Column({ type: 'boolean', default: false }) es_aceite: boolean;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   ultimo_costo: number;
+  // Mantenimiento solo lee el catalogo de inventario: necesita los dos campos
+  // de costo porque un material puede traer el precio en cualquiera de ellos.
+  @Column('numeric', { precision: 14, scale: 4, default: 0 })
+  costo_promedio: number;
   @Column({ default: false }) is_deleted: boolean;
 }
 
