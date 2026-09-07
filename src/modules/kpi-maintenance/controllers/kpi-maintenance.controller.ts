@@ -1528,8 +1528,11 @@ export class KpiMaintenanceController {
       'Eliminar físicamente toda la información de análisis de lubricante, incluyendo detalles, alertas derivadas, eventos y archivos de importación',
   })
   @Post('inteligencia/analisis-lubricante/purge')
-  purgeAnalisisLubricante(@Body() dto: PurgeAnalisisLubricanteDto) {
-    return this.service.purgeAnalisisLubricante(dto);
+  purgeAnalisisLubricante(
+    @Body() dto: PurgeAnalisisLubricanteDto,
+    @Headers('x-role-name') roleName?: string,
+  ) {
+    return this.service.purgeAnalisisLubricante(dto, roleName);
   }
 
   @ApiTags('Inteligencia Operativa')

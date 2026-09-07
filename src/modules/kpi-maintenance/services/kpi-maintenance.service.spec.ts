@@ -2203,6 +2203,33 @@ describe('KpiMaintenanceService analisis de lubricante', () => {
     service = createService(repos, createDataSourceMock());
   });
 
+  it.each(['ADMINISTRADOR', 'ADMINISTRADOR DEL SISTEMA', 'ADMIN'])(
+    'impide la eliminacion masiva al rol administrador %s aunque suplante el rol en el cuerpo',
+    async (roleName) => {
+      await expect(
+        service.purgeAnalisisLubricante(
+          {
+            confirmation: 'ELIMINAR TODO',
+            requested_role: 'SUPER ADMINISTRADOR',
+          } as any,
+          roleName,
+        ),
+      ).rejects.toThrow(
+        'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
+      );
+    },
+  );
+
+  it.each([
+    'SUPER ADMINISTRADOR',
+    'SUPERADMINISTRADOR',
+    'SUPER_ADMINISTRADOR',
+    'SUPER ADMIN',
+    'SUPER_ADMIN',
+  ])('reconoce el alias autorizado de eliminacion masiva %s', (roleName) => {
+    expect(() => (service as any).assertCanPurge(roleName)).not.toThrow();
+  });
+
   it('exige seleccionar un aceite para anexar el analisis', async () => {
     await expect(
       (service as any).resolveAnalisisOilProduct(null),

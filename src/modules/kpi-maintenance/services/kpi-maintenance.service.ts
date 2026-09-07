@@ -8169,6 +8169,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'SUPERADMINISTRADOR',
       'SUPER_ADMINISTRADOR',
       'SUPER ADMIN',
+      'SUPER_ADMIN',
     ].includes(normalized);
   }
 
@@ -18858,7 +18859,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Análisis de lubricante eliminado');
   }
 
-  async purgeAnalisisLubricante(dto: PurgeAnalisisLubricanteDto) {
+  async purgeAnalisisLubricante(
+    dto: PurgeAnalisisLubricanteDto,
+    roleName?: string,
+  ) {
     const confirmation = String(dto.confirmation ?? '').trim().toUpperCase();
     if (confirmation !== 'ELIMINAR TODO') {
       throw new BadRequestException(
@@ -18866,12 +18870,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const requestedRole = String(dto.requested_role ?? '').trim();
-    if (!this.isSuperAdministratorRoleName(requestedRole)) {
-      throw new ForbiddenException(
-        'Solo el Super Administrador puede ejecutar eliminacion real masiva.',
-      );
-    }
+    this.assertCanPurge(roleName);
 
     const purgeImportJobs = dto.purge_import_jobs !== false;
 

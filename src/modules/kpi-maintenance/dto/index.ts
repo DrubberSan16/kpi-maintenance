@@ -1832,13 +1832,6 @@ export class PurgeAnalisisLubricanteDto {
   requested_by?: string;
 
   @ApiPropertyOptional({
-    description: 'Rol del usuario que solicita la purga masiva',
-  })
-  @IsOptional()
-  @IsString()
-  requested_role?: string;
-
-  @ApiPropertyOptional({
     description:
       'Si es true, elimina también los archivos y logs de importación guardados en servidor',
   })
