@@ -90,6 +90,7 @@ import {
   WorkOrderEntity,
   WorkOrderTareaEntity,
 } from '../entities/kpi-maintenance.entity';
+import { MaterialPriceTimeline } from '../../../common/pricing/material-price-history.util';
 import {
   AnalisisAceiteKpiQueryDto,
   AlertaQueryDto,
@@ -2978,11 +2979,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     row: EntregaMaterialDetEntity,
     productMap: Map<string, ProductoEntity>,
     warehouseMap: Map<string, BodegaEntity>,
+    priceTimeline?: MaterialPriceTimeline | null,
+    fecha?: Date | string | null,
   ) {
     const producto = productMap.get(row.producto_id);
     const bodega = warehouseMap.get(row.bodega_id);
+    const costoUnitario = priceTimeline
+      ? this.resolveDatedMaterialUnitCost(priceTimeline, {
+          productoId: row.producto_id,
+          bodegaId: row.bodega_id,
+          fecha,
+          fallback: this.toNumeric(row.costo_unitario, 0),
+        })
+      : this.toNumeric(row.costo_unitario, 0);
     return {
       ...row,
+      costo_unitario: costoUnitario,
       producto_codigo: producto?.codigo ?? null,
       producto_nombre: producto?.nombre ?? null,
       producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
@@ -3053,10 +3065,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       producto as ProductoEntity,
       stock,
     );
+    // Manda el precio vigente hoy segun compras e ingresos; el kardex y el
+    // costo de la bodega quedan de respaldo.
+    const timeline = await this.loadMaterialPriceTimeline(
+      [productoId],
+      manager,
+    );
+    const precioVigente = timeline.priceAt(productoId, new Date(), bodegaId);
     const costoUnitario =
-      this.toNumeric(kardex?.costo_unitario, 0) || fallbackCost;
+      precioVigente ?? (this.toNumeric(kardex?.costo_unitario, 0) || fallbackCost);
     const saldoCostoPromedio =
-      this.toNumeric(kardex?.saldo_costo_promedio, 0) || fallbackCost;
+      precioVigente ??
+      (this.toNumeric(kardex?.saldo_costo_promedio, 0) || fallbackCost);
 
     return {
       producto_id: productoId,
@@ -23372,6 +23392,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       [...inventoryWarehouseIds],
     );
 
+    // El tablero gerencial valoriza cada consumo con el precio que regia el
+    // dia de su OT y el inventario con el vigente al cierre del rango.
+    const priceTimeline = await this.loadMaterialPriceTimeline([
+      ...inventoryProductIds,
+    ]);
+
     const scopedConsumos = consumos.filter((row) => {
       const warehouseId = String(row.bodega_id || '').trim();
       if (warehouseId && scope && !visibleWarehouseIds.has(warehouseId)) {
@@ -23801,8 +23827,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         warehouseId ??
         'Sin bodega';
       const quantity = this.toNumeric(row.cantidad, 0);
-      const subtotal = this.toNumeric(row.subtotal, 0);
-      const unitCost = this.toNumeric(row.costo_unitario, 0);
+      const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
+        productoId: row.producto_id,
+        bodegaId: warehouseId,
+        fecha: context.fecha_referencia,
+        fallback:
+          this.toNumeric(row.costo_unitario, 0) ||
+          (quantity > 0 ? this.toNumeric(row.subtotal, 0) / quantity : 0),
+      });
+      const subtotal = quantity * unitCost;
 
       if (context.is_maintenance) {
         const maintenanceRow = maintenanceOtMap.get(context.work_order_id);
@@ -24246,10 +24279,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const product = productMap.get(String(row.producto_id || '').trim());
         const warehouse = warehouseMap.get(String(row.bodega_id || '').trim());
         const stockActual = this.toNumeric(row.stock_actual, 0);
-        const unitCost =
-          this.toNumeric(row.costo_promedio_bodega, 0) > 0
-            ? this.toNumeric(row.costo_promedio_bodega, 0)
-            : this.resolveMaterialDefaultCost(product);
+        const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
+          productoId: String(row.producto_id || '').trim(),
+          bodegaId: String(row.bodega_id || '').trim(),
+          fecha: dateRange.toDate,
+          fallback:
+            this.toNumeric(row.costo_promedio_bodega, 0) > 0
+              ? this.toNumeric(row.costo_promedio_bodega, 0)
+              : this.resolveMaterialDefaultCost(product),
+        });
         const totalCost = Number((stockActual * unitCost).toFixed(4));
         return {
           bodega_id: row.bodega_id,
@@ -24754,6 +24792,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       consumos.map((row) => row.bodega_id || '').filter(Boolean),
     );
 
+    const oilPriceTimeline = await this.loadMaterialPriceTimeline([
+      selectedProductId,
+    ]);
+
     const groupedByOrder = new Map<
       string,
       {
@@ -24798,8 +24840,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           movimientos: 0,
         };
 
-      current.cantidad += this.toNumeric(row.cantidad, 0);
-      current.subtotal += this.toNumeric(row.subtotal, 0);
+      const cantidad = this.toNumeric(row.cantidad, 0);
+      // El aceite se valoriza al precio que regia el dia de la OT, la misma
+      // regla que usan el kardex y el tablero gerencial.
+      const precio = this.resolveDatedMaterialUnitCost(oilPriceTimeline, {
+        productoId: row.producto_id,
+        bodegaId: row.bodega_id,
+        fecha: referenceDate,
+        fallback:
+          this.toNumeric(row.costo_unitario, 0) ||
+          (cantidad > 0 ? this.toNumeric(row.subtotal, 0) / cantidad : 0),
+      });
+      current.cantidad += cantidad;
+      current.subtotal += cantidad * precio;
       current.movimientos += 1;
       if (row.bodega_id) {
         current.bodega_ids.add(String(row.bodega_id).trim());
@@ -26520,6 +26573,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       manager.getRepository(MovimientoInventarioDetEntity);
     const kardexRepo = manager.getRepository(KardexEntity);
     const issuedAt = new Date();
+    // La salida se cobra al precio que rige el dia que sale, no al promedio
+    // acumulado de la bodega.
+    const priceTimeline = await this.loadMaterialPriceTimeline(
+      dto.items.map((item) => item.producto_id),
+      manager,
+      issuedAt,
+    );
     const movementObservation = this.buildWorkOrderMaterialIssueObservation(
       workOrder,
       dto.observacion,
@@ -26586,7 +26646,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         item.condicion_material,
       );
 
-      const costo = this.resolveMaintenanceInventoryUnitCost(producto, stock);
+      const costo = this.resolveDatedMaterialUnitCost(priceTimeline, {
+        productoId: item.producto_id,
+        bodegaId: item.bodega_id,
+        fecha: issuedAt,
+        fallback: this.resolveMaintenanceInventoryUnitCost(producto, stock),
+      });
       const subtotal = item.cantidad * costo;
       total += subtotal;
 
@@ -30537,6 +30602,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       detalles.map((item) => item.bodega_id),
     );
 
+    // Cada salida se muestra al precio que regia el dia de la entrega, para
+    // que la pantalla, el PDF y el Excel de la OT digan lo mismo.
+    const priceTimeline = await this.loadMaterialPriceTimeline(
+      detalles.map((item) => item.producto_id),
+    );
+
     return this.wrap(
       entregas
         .map((entrega) => {
@@ -30548,7 +30619,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 : scope.warehouseIds.has(String(detalle.bodega_id || '').trim()),
             )
             .map((detalle) =>
-              this.mapIssueItemWithCatalogs(detalle, productMap, warehouseMap),
+              this.mapIssueItemWithCatalogs(
+                detalle,
+                productMap,
+                warehouseMap,
+                priceTimeline,
+                entrega.fecha,
+              ),
             );
           if (!items.length && scope) return null;
           return {
@@ -30752,6 +30829,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       this.assertWorkOrderAllowsMaterialIssue(workOrder);
       const issuedAt = new Date();
+      // Igual que el egreso directo: el material sale al precio vigente hoy
+      // segun compras e ingresos, no al promedio guardado en la bodega.
+      const priceTimeline = await this.loadMaterialPriceTimeline(
+        dto.items.map((item) => item.producto_id),
+        qr.manager,
+        issuedAt,
+      );
       const movementObservation = this.buildWorkOrderMaterialIssueObservation(
         workOrder,
         dto.observacion,
@@ -30814,7 +30898,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           stock,
           item.condicion_material,
         );
-        const costo = this.resolveMaintenanceInventoryUnitCost(producto, stock);
+        const costo = this.resolveDatedMaterialUnitCost(priceTimeline, {
+          productoId: item.producto_id,
+          bodegaId: item.bodega_id,
+          fecha: issuedAt,
+          fallback: this.resolveMaintenanceInventoryUnitCost(producto, stock),
+        });
         const subtotal = item.cantidad * costo;
         total += subtotal;
         const sourceStockActual = this.toNumeric(stock.stock_actual, 0);
@@ -31082,6 +31171,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'IB',
       );
       const movementDate = new Date();
+      // El repuesto viejo se descarga al mismo precio con el que se valoriza
+      // hoy ese material, para que el egreso de chatarra cuadre con el resto.
+      const priceTimeline = await this.loadMaterialPriceTimeline(
+        items.map((item) => item.producto_id),
+        qr.manager,
+        movementDate,
+      );
       const baseObservation =
         this.firstNonEmptyString(
           dto.observacion,
@@ -31208,10 +31304,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
-        const unitCost = this.resolveMaintenanceInventoryUnitCost(
-          product,
-          sourceStock,
-        );
+        const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
+          productoId: product.id,
+          bodegaId: sourceWarehouse.id,
+          fecha: movementDate,
+          fallback: this.resolveMaintenanceInventoryUnitCost(
+            product,
+            sourceStock,
+          ),
+        });
         const subtotal = quantity * unitCost;
         totalCost += subtotal;
         totalQuantity += quantity;
@@ -31663,6 +31764,51 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const stockCost = this.toNumeric(stock?.costo_promedio_bodega, 0);
     if (stockCost > 0) return stockCost;
     return this.resolveMaterialDefaultCost(product);
+  }
+
+  /**
+   * Linea de tiempo de precios (ordenes de compra e ingresos de bodega) para
+   * los materiales pedidos. Mantenimiento lee las tablas de inventario
+   * directamente, asi que consulta la misma fuente que el kardex.
+   */
+  private async loadMaterialPriceTimeline(
+    productIds: Iterable<string | null | undefined>,
+    runner?: DataSource | EntityManager,
+    hasta?: Date | string | null,
+  ) {
+    const ids = [...productIds]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+    if (!ids.length) return MaterialPriceTimeline.empty();
+    return MaterialPriceTimeline.load(runner ?? this.dataSource, ids, {
+      hasta: hasta ?? null,
+    });
+  }
+
+  /**
+   * Precio de un material en una fecha concreta. Manda lo que costaba ese dia
+   * segun compras e ingresos; el respaldo (costo de bodega o del catalogo)
+   * solo entra cuando el material nunca se compro ni ingreso.
+   */
+  private resolveDatedMaterialUnitCost(
+    timeline: MaterialPriceTimeline,
+    args: {
+      productoId?: string | null;
+      fecha?: Date | string | null;
+      bodegaId?: string | null;
+      fallback?: number;
+    },
+  ) {
+    const productoId = String(args.productoId || '').trim();
+    if (productoId) {
+      const historico = timeline.priceAt(
+        productoId,
+        args.fecha ?? null,
+        args.bodegaId ?? null,
+      );
+      if (historico != null && historico > 0) return historico;
+    }
+    return this.toNumeric(args.fallback, 0);
   }
 
   private async generateMaintenanceTransferCode(
