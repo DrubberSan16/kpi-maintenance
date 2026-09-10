@@ -65,6 +65,14 @@ export class EquipoQueryDto {
   @IsOptional()
   @IsUUID()
   equipo_tipo_id?: string;
+  @ApiPropertyOptional({
+    description:
+      'GENERACION lista solo las unidades de generacion; RESTO las excluye. El grupo se resuelve por el nombre del tipo, no por un id fijo.',
+    enum: ['GENERACION', 'RESTO'],
+  })
+  @IsOptional()
+  @IsString()
+  grupo?: string;
   @ApiPropertyOptional({ description: 'ID de la marca', format: 'uuid' })
   @IsOptional()
   @IsUUID()

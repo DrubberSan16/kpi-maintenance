@@ -36,6 +36,7 @@ import {
   IsNull,
   ObjectLiteral,
   Repository,
+  SelectQueryBuilder,
 } from 'typeorm';
 import {
   AlertaMantenimientoEntity,
@@ -16063,6 +16064,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       qb.andWhere('e.equipo_tipo_id = :equipo_tipo_id', {
         equipo_tipo_id: query.equipo_tipo_id,
       });
+    this.applyEquipoGrupoFilter(qb, query.grupo);
     if (estadoOperativo)
       qb.andWhere('e.estado_operativo = :estado_operativo', {
         estado_operativo: estadoOperativo,
@@ -16082,6 +16084,45 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       limit,
       total,
     });
+  }
+
+  /**
+   * Separa la flota de generacion del resto de equipos.
+   *
+   * El grupo se resuelve por el NOMBRE del tipo, no por un id fijo: el
+   * catalogo tiene los tipos escritos de varias formas y crear uno nuevo no
+   * puede obligar a tocar codigo. Se comparan sin tildes por el mismo motivo.
+   */
+  private applyEquipoGrupoFilter(
+    qb: SelectQueryBuilder<EquipoEntity>,
+    grupo?: string | null,
+  ) {
+    const normalizado = String(grupo || '')
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .trim()
+      .toUpperCase();
+    if (normalizado !== 'GENERACION' && normalizado !== 'RESTO') return;
+
+    const tiposDeGeneracion = `(
+      SELECT tipo.id
+      FROM kpi_maintenance.tb_equipo_tipo tipo
+      WHERE COALESCE(tipo.is_deleted, false) = false
+        AND (
+          TRANSLATE(UPPER(COALESCE(tipo.nombre, '')), 'ÁÉÍÓÚÜÑ', 'AEIOUUN') LIKE '%GENERACION%'
+          OR TRANSLATE(UPPER(COALESCE(tipo.nombre, '')), 'ÁÉÍÓÚÜÑ', 'AEIOUUN') LIKE '%GENERADOR%'
+        )
+    )`;
+
+    if (normalizado === 'GENERACION') {
+      qb.andWhere(`e.equipo_tipo_id IN ${tiposDeGeneracion}`);
+      return;
+    }
+    // El equipo sin tipo asignado cuenta como resto: no es una unidad de
+    // generacion mientras nadie diga lo contrario.
+    qb.andWhere(
+      `(e.equipo_tipo_id IS NULL OR e.equipo_tipo_id NOT IN ${tiposDeGeneracion})`,
+    );
   }
 
   async getEquipo(id: string, sucursalId?: string | null) {
