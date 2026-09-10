@@ -24770,19 +24770,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       filteredWorkOrders.map((row) => [row.id, row]),
     );
 
-    const equipmentIds = [
-      ...new Set(
-        filteredWorkOrders
-          .map((row) => String(row.equipment_id || '').trim())
-          .filter(Boolean),
-      ),
-    ];
-    const equipments = equipmentIds.length
-      ? await this.equipoRepo.find({
-          where: { id: In(equipmentIds), is_deleted: false },
-        })
-      : [];
-    const equipmentsWithBrands = await this.attachEquipmentBrandNames(equipments);
+    // Se trae el catalogo COMPLETO de equipos, no solo los que consumieron:
+    // un equipo en cero tambien es informacion para gerencia -- puede estar
+    // parado, recien entregado o consumiendo por otro lado -- y desaparecer de
+    // la lista lo deja fuera del radar sin que nadie lo note.
+    const equipments = await this.equipoRepo.find({
+      where: { is_deleted: false } as any,
+      order: { codigo: 'ASC' } as any,
+    });
+    const scopedEquipments = scope
+      ? equipments.filter((row) =>
+          this.matchesScopedEquipment(row.id, row.codigo, scope),
+        )
+      : equipments;
+    const equipmentsWithBrands =
+      await this.attachEquipmentBrandNames(scopedEquipments);
     const equipmentMap = new Map(
       equipmentsWithBrands.map((row) => [row.id, row]),
     );
@@ -24953,6 +24955,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         fechas: Date[];
       }
     >();
+    // Todos los equipos arrancan en cero para que la lista este completa; los
+    // consumos de abajo solo suman sobre lo que ya existe.
+    for (const equipment of equipmentsWithBrands) {
+      const equipmentKey = String(equipment.id || '').trim();
+      if (!equipmentKey) continue;
+      byEquipmentMap.set(equipmentKey, {
+        equipment_id: equipment.id,
+        equipment_label:
+          this.buildEquipmentManagerLabel(equipment) ?? equipment.id,
+        equipment_code: equipment.codigo ?? null,
+        equipment_name: equipment.nombre ?? equipment.nombre_real ?? null,
+        total_cantidad: 0,
+        total_costo: 0,
+        work_order_ids: new Set<string>(),
+        fechas: [],
+      });
+    }
+
     for (const row of workOrderRows) {
       const equipmentKey =
         String(row.equipment_id || '').trim() ||
@@ -25000,7 +25020,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 ?.toISOString() ?? null
             : null,
       }))
-      .sort((a, b) => b.total_cantidad - a.total_cantidad);
+      // Primero los que mas consumieron; entre los que estan en cero manda el
+      // codigo, para que buscar uno concreto sea previsible.
+      .sort(
+        (a, b) =>
+          b.total_cantidad - a.total_cantidad ||
+          String(a.equipment_code || a.equipment_label || '').localeCompare(
+            String(b.equipment_code || b.equipment_label || ''),
+            'es',
+          ),
+      );
 
     const trendMap = new Map<
       string,
@@ -25097,9 +25126,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     const totalOrdenes = new Set(workOrderRows.map((row) => row.work_order_id))
       .size;
-    const totalEquipos = new Set(
-      byEquipment.map((row) => row.equipment_id || row.equipment_label),
-    ).size;
+    // Los equipos que de verdad consumieron: la lista ahora incluye tambien
+    // los que estan en cero, y contarlos aqui bajaria el promedio por equipo
+    // repartiendo el consumo entre maquinas que no gastaron nada.
+    const totalEquipos = byEquipment.filter(
+      (row) => row.total_cantidad > 0,
+    ).length;
+    const totalEquiposListados = byEquipment.length;
 
     const selectedProduct = oilCatalogMap.get(selectedProductId) ?? null;
 
@@ -25114,6 +25147,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_costo: Number(totalCosto.toFixed(2)),
           total_ordenes: totalOrdenes,
           total_equipos: totalEquipos,
+          total_equipos_listados: totalEquiposListados,
           promedio_por_orden:
             totalOrdenes > 0
               ? Number((totalCantidad / totalOrdenes).toFixed(4))

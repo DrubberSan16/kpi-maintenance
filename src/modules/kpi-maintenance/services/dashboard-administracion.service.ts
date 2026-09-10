@@ -584,6 +584,11 @@ export class DashboardAdministracionService {
           wo.equipment_id,
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
           COALESCE(wo.hora_inicio, wo.created_at) AS momento,
+          -- El horometro con el que llego la maquina y el que se anoto en el
+          -- cebado. Sin los dos no se sabe cuantas horas corrio entre uno y
+          -- otro, que es lo que explica si el consumo fue alto o normal.
+          NULLIF(TRIM(wo.valor_json ->> 'horometro_anterior'), '')::numeric AS horometro_anterior,
+          NULLIF(TRIM(wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro_actual,
           string_agg(DISTINCT
             TRIM(CONCAT_WS(' - ', NULLIF(TRIM(p.codigo), ''), NULLIF(TRIM(p.nombre), ''))
                || COALESCE(' (' || NULLIF(TRIM(p.descripcion), '') || ')', ''))
@@ -600,7 +605,8 @@ export class DashboardAdministracionService {
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
           AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        GROUP BY wo.id, wo.code, wo.title, wo.equipment_id, fecha, momento
+        GROUP BY wo.id, wo.code, wo.title, wo.equipment_id, fecha, momento,
+                 horometro_anterior, horometro_actual
         ORDER BY momento DESC, wo.code DESC
         `,
         [desde, hasta, equipoId],
