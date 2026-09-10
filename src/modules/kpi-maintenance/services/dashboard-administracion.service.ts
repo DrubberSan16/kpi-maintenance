@@ -329,8 +329,10 @@ export class DashboardAdministracionService {
    * 5, 6 y 7. Frecuencia por horómetro, semáforo anticipado y proyección.
    *
    * El horómetro del último mantenimiento se toma de la última OT preventiva o
-   * de cebado cerrada del equipo; si no hay ninguna, se cae al horómetro actual
-   * menos la frecuencia, para no dejar el equipo fuera de la proyección.
+   * de cebado cerrada del equipo. Si esa referencia no sirve — no hay OT, quedó
+   * en cero o es mayor al horómetro actual — se cae al horómetro actual menos
+   * la frecuencia y la fila viaja con `referencia_estimada`, para no dejar el
+   * equipo fuera de la proyección sin que nadie lo note.
    *
    * Los umbrales salen de los márgenes configurables de cada unidad, de modo
    * que MTU 500 h, Cummins 350 h y Caterpillar 250 h se resuelven solas.
@@ -389,24 +391,29 @@ export class DashboardAdministracionService {
             semaforo: null,
           };
         }
-        // Misma regla que el generador de alertas: sin referencia fiable del
-        // ultimo mantenimiento no se proyecta. Hay equipos cuya ultima OT quedo
-        // con horometro 0 y proyectar sobre eso da cifras absurdas.
+        // Hay equipos cuya ultima OT quedo registrada con horometro 0 (o con
+        // uno mayor al actual): proyectar sobre eso da cifras absurdas. Pero
+        // dejarlos fuera de la tabla es peor -- fue lo que hizo desaparecer a
+        // UG24 y UG25 sin que nadie lo notara -- asi que se proyecta desde el
+        // horometro actual menos la frecuencia y la fila viaja marcada como
+        // estimada, para que quien la lea sepa que la base es un supuesto y no
+        // un dato.
         const referencia = Number(row.horometro_ultimo_mantenimiento ?? 0);
         const referenciaFiable =
           row.horometro_ultimo_mantenimiento != null &&
           referencia > 0 &&
           referencia <= horometroActual;
-        if (!referenciaFiable) {
-          return {
-            ...row,
-            aplica: false,
-            motivo_sin_proyeccion: 'Sin referencia fiable del último mantenimiento',
-            semaforo: null,
-          };
-        }
 
-        const base = referencia;
+        const base = referenciaFiable
+          ? referencia
+          : Math.max(horometroActual - frecuencia, 0);
+        const motivoEstimacion = referenciaFiable
+          ? null
+          : row.horometro_ultimo_mantenimiento == null
+            ? 'Sin mantenimiento cerrado registrado'
+            : referencia <= 0
+              ? `La última OT (${row.ultima_ot ?? 'sin código'}) quedó con horómetro en cero`
+              : `La última OT (${row.ultima_ot ?? 'sin código'}) tiene un horómetro mayor al actual`;
         const objetivo = Number((base + frecuencia).toFixed(2));
         const restantes = Number((objetivo - horometroActual).toFixed(2));
 
@@ -425,6 +432,8 @@ export class DashboardAdministracionService {
         return {
           ...row,
           aplica: true,
+          referencia_estimada: !referenciaFiable,
+          motivo_referencia_estimada: motivoEstimacion,
           horometro_ultimo_mantenimiento: Number(base.toFixed(2)),
           horometro_proximo_mantenimiento: objetivo,
           horas_restantes: restantes,
