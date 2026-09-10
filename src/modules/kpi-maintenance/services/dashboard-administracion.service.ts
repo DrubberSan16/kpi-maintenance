@@ -649,6 +649,9 @@ export class DashboardAdministracionService {
       const filas = await this.dataSource.query(
         `
         SELECT
+          -- El identificador viaja para que el tablero pueda abrir la orden
+          -- sin tener que buscarla por codigo.
+          wo.id AS work_order_id,
           wo.code AS orden,
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
           TRIM(CONCAT_WS(' - ', NULLIF(TRIM(p.codigo), ''), NULLIF(TRIM(p.nombre), ''))
@@ -674,6 +677,7 @@ export class DashboardAdministracionService {
       const filas = await this.dataSource.query(
         `
         SELECT
+          wo.id AS work_order_id,
           wo.code AS orden,
           wo.title AS titulo,
           COALESCE(c.nombre_oficial, c.nombre, 'Sin compartimiento') AS componente,
