@@ -1133,6 +1133,39 @@ describe('KpiMaintenanceService alerts', () => {
     expect(result).not.toHaveProperty('horometro_equipo_referencia');
   });
 
+  it('al leer, el horómetro anterior es el que guardó la OT y no la lectura de hoy', () => {
+    // El equipo ya va por 15286 porque siguió trabajando con OT posteriores;
+    // esta OT cerró con 15226 -> 15228 y así tiene que releerse.
+    const auditPayload = (service as any).buildWorkOrderHorometerPayload(
+      { horometro_actual: 15228, horometro_anterior: 15226 },
+      { horometro_actual: 15286 },
+      null,
+    );
+    expect(auditPayload.horometro_anterior).toBe(15286);
+
+    (service as any).restoreStoredPreviousHorometer(auditPayload, {
+      horometro_actual: 15228,
+      horometro_anterior: 15226,
+    });
+
+    expect(auditPayload.horometro_anterior).toBe(15226);
+    expect(auditPayload.horometro_actual).toBe(15228);
+  });
+
+  it('sin horómetro anterior guardado se conserva la referencia del equipo', () => {
+    const auditPayload = (service as any).buildWorkOrderHorometerPayload(
+      { horometro_actual: 999 },
+      { horometro_actual: 150 },
+      null,
+    );
+
+    (service as any).restoreStoredPreviousHorometer(auditPayload, {
+      horometro_actual: 999,
+    });
+
+    expect(auditPayload.horometro_anterior).toBe(150);
+  });
+
   it('sincroniza el horómetro editado en la OT con el equipo y su historial', async () => {
     const equipment = {
       id: 'equipo-1',

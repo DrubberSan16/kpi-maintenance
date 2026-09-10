@@ -2341,6 +2341,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /**
+   * Devuelve al payload leido el horometro anterior que guardo la OT.
+   *
+   * `buildWorkOrderHorometerPayload` lo recalcula contra la lectura VIVA del
+   * equipo, que es lo que hace falta al guardar. Al leer una OT ya cerrada eso
+   * reescribe la historia: el equipo siguio avanzando con las OT posteriores y
+   * el par salia como "15286 -> 15228", un horometro que retrocede. Si la OT
+   * dejo el suyo escrito, ese manda; si no lo dejo, se conserva la referencia
+   * del equipo como unica pista disponible.
+   */
+  private restoreStoredPreviousHorometer(
+    auditPayload: Record<string, unknown>,
+    storedPayload: Record<string, unknown> | null | undefined,
+  ) {
+    const storedPreviousHorometer = this.extractNumericRecordValue(
+      storedPayload,
+      'horometro_anterior',
+    );
+    if (storedPreviousHorometer != null) {
+      auditPayload.horometro_anterior = storedPreviousHorometer;
+    }
+    return auditPayload;
+  }
+
   private extractWorkOrderHorometerSnapshot(
     payload: Record<string, unknown> | null | undefined,
   ) {
@@ -15821,6 +15845,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipo,
       procedimiento,
     );
+    this.restoreStoredPreviousHorometer(auditPayload, workOrderPayload);
     const horometerSnapshot =
       this.extractWorkOrderHorometerSnapshot(auditPayload);
 
