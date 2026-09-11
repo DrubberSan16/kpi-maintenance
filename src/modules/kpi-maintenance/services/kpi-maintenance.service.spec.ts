@@ -5122,6 +5122,61 @@ describe('KpiMaintenanceService reservas de bodega', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('el rechazo lleva codigo y el detalle con nombres, para que la pantalla pueda pedir el motivo', async () => {
+      repos.consumoRepo.find.mockResolvedValue([
+        {
+          work_order_id: 'wo-9',
+          producto_id: 'producto-9',
+          bodega_id: 'bodega-9',
+          cantidad: 10,
+          is_deleted: false,
+        },
+      ]);
+      repos.reservaRepo.find.mockResolvedValue([
+        {
+          id: 'reserva-9',
+          work_order_id: 'wo-9',
+          producto_id: 'producto-9',
+          bodega_id: 'bodega-9',
+          cantidad: 10,
+          estado: 'RESERVADO',
+          is_deleted: false,
+        },
+      ]);
+      entregaRepo.find.mockResolvedValue([
+        { id: 'entrega-9', work_order_id: 'wo-9', is_deleted: false },
+      ]);
+      entregaDetRepo.find.mockResolvedValue([
+        { entrega_id: 'entrega-9', producto_id: 'producto-9', bodega_id: 'bodega-9', cantidad: 4 },
+      ]);
+      repos.productoRepo.find.mockResolvedValue([
+        { id: 'producto-9', codigo: 'ACT-MOTOR-15W40', nombre: 'ACEITE GULF' },
+      ]);
+      repos.bodegaRepo.find.mockResolvedValue([
+        { id: 'bodega-9', codigo: 'BOD-002', nombre: 'TIPUTINI TPTA' },
+      ]);
+
+      const error = await (service as any)
+        .assertMaterialShortfallAcknowledged(undefined, 'wo-9', {})
+        .catch((e: any) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      const body = error.getResponse();
+      // La pantalla compara el codigo, no el texto del mensaje.
+      expect(body.code).toBe('MATERIAL_SHORTFALL_REASON_REQUIRED');
+      expect(body.shortfalls).toEqual([
+        {
+          producto_id: 'producto-9',
+          bodega_id: 'bodega-9',
+          producto_label: 'ACT-MOTOR-15W40 - ACEITE GULF',
+          bodega_label: 'BOD-002 - TIPUTINI TPTA',
+          cantidad_reservada: 10,
+          cantidad_emitida: 4,
+          diferencia: 6,
+        },
+      ]);
+    });
+
     it('no exige motivo cuando lo entregado iguala o supera lo solicitado', async () => {
       repos.consumoRepo.find.mockResolvedValue([
         {

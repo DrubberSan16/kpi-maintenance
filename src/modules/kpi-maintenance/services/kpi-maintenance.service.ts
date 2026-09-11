@@ -525,6 +525,17 @@ const DEFAULT_PROGRAMACION_MONTHLY_COLOR_PALETTE = {
   DEFAULT: '#D7E0EA',
 } as const;
 
+/**
+ * Codigo del rechazo por cerrar una OT que gasto menos de lo reservado sin
+ * decir por que.
+ *
+ * Viaja en el cuerpo del error para que la pantalla lo reconozca sin comparar
+ * el texto del mensaje, que cambia en cuanto alguien corrige una tilde. El
+ * mismo literal esta en `WorkOrdersView.vue`.
+ */
+export const MATERIAL_SHORTFALL_REASON_REQUIRED =
+  'MATERIAL_SHORTFALL_REASON_REQUIRED';
+
 const EQUIPO_CRITICIDAD_VALUES = Object.values(EquipoCriticidadEnum);
 const EQUIPO_ESTADO_OPERATIVO_VALUES = Object.values(EquipoEstadoOperativoEnum);
 const EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES = Object.values(
@@ -3261,15 +3272,75 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (valorJson as Record<string, unknown> | null)?.observacion_menor_uso_reserva ?? '',
     ).trim();
     if (!reason) {
-      throw new BadRequestException(
-        'Debe registrar el motivo del menor uso de material reservado antes de finalizar la orden de trabajo.',
-      );
+      // Se devuelve un codigo estable y el detalle de lo que falto: la
+      // pantalla necesita saber QUE pedir, no solo que algo falta, y no
+      // siempre tiene las reservas cargadas para calcularlo por su cuenta.
+      // Sin esto la unica salida era un mensaje que no decia donde escribir.
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'Bad Request',
+        code: MATERIAL_SHORTFALL_REASON_REQUIRED,
+        message:
+          'Debe registrar el motivo del menor uso de material reservado antes de finalizar la orden de trabajo.',
+        shortfalls: await this.describeMaterialShortfalls(shortfalls),
+      });
     }
     if (reason.length > 500) {
       throw new BadRequestException(
         'El motivo del menor uso de material reservado no puede superar 500 caracteres.',
       );
     }
+  }
+
+  /**
+   * Pone nombre a lo que falto para que la pantalla pueda listarlo tal cual.
+   * Una fila con dos identificadores no le dice nada a quien cierra la orden.
+   */
+  private async describeMaterialShortfalls(
+    shortfalls: Array<{
+      productoId: string;
+      bodegaId: string;
+      plannedQty: number;
+      issuedQty: number;
+      shortfallQty: number;
+    }>,
+  ) {
+    if (!shortfalls.length) return [];
+
+    const productIds = [
+      ...new Set(shortfalls.map((row) => row.productoId).filter(Boolean)),
+    ];
+    const warehouseIds = [
+      ...new Set(shortfalls.map((row) => row.bodegaId).filter(Boolean)),
+    ];
+    const [productos, bodegas] = await Promise.all([
+      productIds.length
+        ? this.productoRepo.find({ where: { id: In(productIds) } })
+        : Promise.resolve([] as ProductoEntity[]),
+      warehouseIds.length
+        ? this.bodegaRepo.find({ where: { id: In(warehouseIds) } })
+        : Promise.resolve([] as BodegaEntity[]),
+    ]);
+    const productMap = new Map(productos.map((item) => [item.id, item]));
+    const warehouseMap = new Map(bodegas.map((item) => [item.id, item]));
+
+    return shortfalls.map((row) => {
+      const producto = productMap.get(row.productoId);
+      const bodega = warehouseMap.get(row.bodegaId);
+      return {
+        producto_id: row.productoId,
+        bodega_id: row.bodegaId,
+        producto_label: [producto?.codigo, producto?.nombre]
+          .filter(Boolean)
+          .join(' - ') || row.productoId,
+        bodega_label: [bodega?.codigo, bodega?.nombre]
+          .filter(Boolean)
+          .join(' - ') || row.bodegaId,
+        cantidad_reservada: Number(row.plannedQty.toFixed(4)),
+        cantidad_emitida: Number(row.issuedQty.toFixed(4)),
+        diferencia: Number(row.shortfallQty.toFixed(4)),
+      };
+    });
   }
 
   private async upsertReservedMaterial(
