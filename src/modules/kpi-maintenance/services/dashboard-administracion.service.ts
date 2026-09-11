@@ -221,6 +221,8 @@ export class DashboardAdministracionService {
           wo.id AS work_order_id,
           wo.equipment_id,
           COALESCE(wo.hora_inicio, wo.created_at) AS momento,
+          NULLIF(TRIM(wo.valor_json ->> 'horometro_anterior'), '')::numeric AS horometro_anterior,
+          NULLIF(TRIM(wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro_actual,
           SUM(cr.cantidad) AS galones,
           SUM(COALESCE(cr.subtotal, 0)) AS costo
         FROM kpi_process.tb_work_order wo
@@ -250,7 +252,14 @@ export class DashboardAdministracionService {
         COUNT(*) FILTER (WHERE o.galones >= 10) AS ots_criticas,
         COUNT(*) FILTER (WHERE o.galones > 5 AND o.galones < 10) AS ots_seguimiento,
         ROUND(COALESCE(MAX(o.galones), 0)::numeric, 2) AS galones_max_orden,
-        ROUND(COALESCE(SUM(o.costo), 0)::numeric, 2) AS costo_aceite
+        ROUND(COALESCE(SUM(o.costo), 0)::numeric, 2) AS costo_aceite,
+        -- Con que horometro llego la maquina al primer cebado del periodo y con
+        -- cual quedo tras el ultimo. Se descartan los nulos: hay ordenes que se
+        -- cerraron sin anotarlo y tomar ese hueco daria un recorrido falso.
+        (array_agg(o.horometro_anterior ORDER BY o.momento ASC)
+           FILTER (WHERE o.horometro_anterior IS NOT NULL))[1] AS horometro_inicial,
+        (array_agg(o.horometro_actual ORDER BY o.momento DESC)
+           FILTER (WHERE o.horometro_actual IS NOT NULL))[1] AS horometro_final
       FROM por_orden o
       INNER JOIN kpi_maintenance.tb_equipo e ON e.id = o.equipment_id
       GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
@@ -271,6 +280,10 @@ export class DashboardAdministracionService {
       ots_cebado: Number(row.ots_cebado ?? 0),
       ots_criticas: Number(row.ots_criticas ?? 0),
       ots_seguimiento: Number(row.ots_seguimiento ?? 0),
+      horometro_inicial:
+        row.horometro_inicial == null ? null : Number(row.horometro_inicial),
+      horometro_final:
+        row.horometro_final == null ? null : Number(row.horometro_final),
     }));
   }
 
