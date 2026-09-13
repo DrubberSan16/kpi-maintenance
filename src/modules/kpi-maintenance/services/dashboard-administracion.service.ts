@@ -20,6 +20,20 @@ import { DataSource } from 'typeorm';
  *    la fuente que registra realmente cuándo estuvo parado.
  *  - El semáforo del horómetro usa los márgenes configurables de cada equipo.
  */
+/**
+ * Lectura de horometro normalizada: entero o `null`.
+ *
+ * El horometro cuenta horas enteras; los decimales que llegan son relleno de la
+ * columna `numeric(18, 2)` en que se guarda, no precision.
+ */
+function normalizeHorometro(value: unknown): number | null {
+  if (value === null || value === undefined || String(value).trim() === '') {
+    return null;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? Math.round(num) : null;
+}
+
 @Injectable()
 export class DashboardAdministracionService {
   private readonly logger = new Logger(DashboardAdministracionService.name);
@@ -280,10 +294,10 @@ export class DashboardAdministracionService {
       ots_cebado: Number(row.ots_cebado ?? 0),
       ots_criticas: Number(row.ots_criticas ?? 0),
       ots_seguimiento: Number(row.ots_seguimiento ?? 0),
-      horometro_inicial:
-        row.horometro_inicial == null ? null : Number(row.horometro_inicial),
-      horometro_final:
-        row.horometro_final == null ? null : Number(row.horometro_final),
+      // Contador de horas: entero. La columna es numeric(18,2) por herencia y
+      // devolvia "15286.00", que la pantalla pintaba tal cual.
+      horometro_inicial: normalizeHorometro(row.horometro_inicial),
+      horometro_final: normalizeHorometro(row.horometro_final),
     }));
   }
 
@@ -428,7 +442,7 @@ export class DashboardAdministracionService {
               ? `La última OT (${row.ultima_ot ?? 'sin código'}) quedó con horómetro en cero`
               : `La última OT (${row.ultima_ot ?? 'sin código'}) tiene un horómetro mayor al actual`;
         const objetivo = Number((base + frecuencia).toFixed(2));
-        const restantes = Number((objetivo - horometroActual).toFixed(2));
+        const restantes = Math.round(objetivo - horometroActual);
 
         const anticipacion = (frecuencia * Number(row.margen_anticipacion_pct ?? 10)) / 100;
         const tolerancia = (frecuencia * Number(row.margen_tolerancia_pct ?? 0)) / 100;
@@ -444,11 +458,12 @@ export class DashboardAdministracionService {
 
         return {
           ...row,
+          horometro_actual: Math.round(horometroActual),
           aplica: true,
           referencia_estimada: !referenciaFiable,
           motivo_referencia_estimada: motivoEstimacion,
-          horometro_ultimo_mantenimiento: Number(base.toFixed(2)),
-          horometro_proximo_mantenimiento: objetivo,
+          horometro_ultimo_mantenimiento: Math.round(base),
+          horometro_proximo_mantenimiento: Math.round(objetivo),
           horas_restantes: restantes,
           horas_excedidas: restantes < 0 ? Math.abs(restantes) : 0,
           umbral_amarillo: Number(anticipacion.toFixed(2)),
@@ -650,6 +665,8 @@ export class DashboardAdministracionService {
             ? Number(grupo[indice + 1].galones ?? 0)
             : null;
           fila.galones_orden_anterior = anterior;
+          fila.horometro_anterior = normalizeHorometro(fila.horometro_anterior);
+          fila.horometro_actual = normalizeHorometro(fila.horometro_actual);
           fila.tendencia = this.resolveTendenciaOrden(actual, anterior);
           fila.semaforo = this.resolveCebadoSemaforo(actual);
         });

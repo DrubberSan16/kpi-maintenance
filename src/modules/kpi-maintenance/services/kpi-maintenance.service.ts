@@ -2289,6 +2289,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Igual que `extractNumericRecordValue`, pero para lecturas de horometro: el
+   * generico redondea a dos decimales porque sirve tambien a `horas_a_realizar`,
+   * que si los tiene.
+   */
+  private normalizeHorometroRecordValue(
+    source: Record<string, unknown> | null | undefined,
+    ...keys: string[]
+  ) {
+    return this.normalizeHorometro(
+      this.extractNumericRecordValue(source, ...keys),
+    );
+  }
+
   private buildWorkOrderHorometerPayload(
     payload: Record<string, unknown> | null | undefined,
     equipment?: EquipoEntity | null,
@@ -2304,7 +2318,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       basePayload.horometro_actual !== null &&
       basePayload.horometro_actual !== undefined &&
       String(basePayload.horometro_actual).trim() !== '';
-    const requestedHorometer = this.extractNumericRecordValue(
+    const requestedHorometer = this.normalizeHorometroRecordValue(
       basePayload,
       'horometro_actual',
     );
@@ -2316,9 +2330,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     const horometroActual = hasRequestedHorometer
       ? requestedHorometer
-      : equipment?.horometro_actual != null
-        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
-        : null;
+      : this.normalizeHorometro(equipment?.horometro_actual);
     const horasARealizar =
       this.extractNumericRecordValue(
         basePayload,
@@ -2328,11 +2340,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (procedure?.frecuencia_horas != null
         ? Number(this.toNumeric(procedure.frecuencia_horas, 0).toFixed(2))
         : null);
-    const equipmentHorometer =
-      equipment?.horometro_actual != null
-        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
-        : null;
-    const storedPreviousHorometer = this.extractNumericRecordValue(
+    const equipmentHorometer = this.normalizeHorometro(
+      equipment?.horometro_actual,
+    );
+    const storedPreviousHorometer = this.normalizeHorometroRecordValue(
       basePayload,
       'horometro_anterior',
     );
@@ -2366,7 +2377,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     auditPayload: Record<string, unknown>,
     storedPayload: Record<string, unknown> | null | undefined,
   ) {
-    const storedPreviousHorometer = this.extractNumericRecordValue(
+    const storedPreviousHorometer = this.normalizeHorometroRecordValue(
       storedPayload,
       'horometro_anterior',
     );
@@ -2380,11 +2391,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     payload: Record<string, unknown> | null | undefined,
   ) {
     return {
-      horometro_actual: this.extractNumericRecordValue(
+      horometro_actual: this.normalizeHorometroRecordValue(
         payload,
         'horometro_actual',
       ),
-      horometro_anterior: this.extractNumericRecordValue(
+      horometro_anterior: this.normalizeHorometroRecordValue(
         payload,
         'horometro_anterior',
       ),
@@ -2403,7 +2414,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private formatHorometerHistoryValue(value: number | null) {
-    return value == null ? 'N/D' : Number(value.toFixed(2)).toString();
+    const normalized = this.normalizeHorometro(value);
+    return normalized == null ? 'N/D' : String(normalized);
   }
 
   private async syncEquipmentHorometerFromWorkOrder(
@@ -2525,10 +2537,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: equipmentId,
       is_deleted: false,
     } as FindOptionsWhere<EquipoEntity>);
-    const currentHorometer =
-      equipment.horometro_actual != null
-        ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
-        : null;
+    const currentHorometer = this.normalizeHorometro(
+      equipment.horometro_actual,
+    );
     if (currentHorometer == null) return [] as string[];
 
     const actorSnapshot = this.resolveAuditActorSnapshot(options.actor);
@@ -5052,6 +5063,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private toNumeric(value: unknown, fallback = 0) {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
+  }
+
+  /**
+   * Lectura de HOROMETRO normalizada: entero, nunca negativa.
+   *
+   * El horometro es un contador de horas enteras. La columna es
+   * `numeric(18, 2)` por herencia, asi que todo lo que sale de la base vuelve
+   * como "15286.00" y todo lo que se calculaba aqui se redondeaba a dos
+   * decimales "por si acaso". Ni el instrumento ni el usuario tienen medias
+   * horas: se redondea al entero mas cercano en cada entrada y en cada lectura.
+   *
+   * Devuelve `null` cuando no hay dato, que NO es lo mismo que cero: un equipo
+   * sin lectura anotada no esta en cero, es que no se sabe. Tampoco recorta los
+   * negativos: quien llama ya los rechaza con un mensaje propio, y convertirlos
+   * en cero aqui dejaria esa validacion muerta.
+   */
+  private normalizeHorometro(value: unknown): number | null {
+    if (value === null || value === undefined || String(value).trim() === "") {
+      return null;
+    }
+    const num = Number(value);
+    return Number.isFinite(num) ? Math.round(num) : null;
   }
 
   private isUnauthorizedServiceError(error: unknown) {
@@ -16468,8 +16501,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const serviceSchedule = this.resolveEquipmentServiceSchedule(dto, current);
     const requestedHorometer =
       dto.horometro_actual !== undefined
-        ? this.toNumeric(dto.horometro_actual)
-        : this.toNumeric(current.horometro_actual, 0);
+        ? (this.normalizeHorometro(dto.horometro_actual) ??
+          this.toNumeric(dto.horometro_actual))
+        : (this.normalizeHorometro(current.horometro_actual) ?? 0);
     if (requestedHorometer < 0) {
       throw new BadRequestException('El horometro actual no puede ser negativo.');
     }

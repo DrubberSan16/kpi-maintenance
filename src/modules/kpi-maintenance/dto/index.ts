@@ -18,6 +18,23 @@ import {
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+/**
+ * Lectura de HOROMETRO: contador de horas enteras.
+ *
+ * Redondea en vez de rechazar. Un 400 por un decimal romperia a cualquier
+ * cliente que todavia no se haya desplegado, y "15286.5" tiene una lectura
+ * obvia. Los negativos pasan tal cual para que el servicio los rechace con su
+ * propio mensaje.
+ */
+const TransformHorometro = () =>
+  Transform(({ value }) => {
+    if (value === null || value === undefined || String(value).trim() === '') {
+      return value;
+    }
+    const num = Number(value);
+    return Number.isFinite(num) ? Math.round(num) : value;
+  });
+
 export enum EquipoCriticidadEnum {
   BAJA = 'BAJA',
   MEDIA = 'MEDIA',
@@ -218,6 +235,7 @@ export class CreateEquipoDto {
     minimum: 0,
   })
   @IsDefined()
+  @TransformHorometro()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
@@ -296,6 +314,7 @@ export class UpdateEquipoHorometroDto {
     minimum: 0,
   })
   @IsDefined()
+  @TransformHorometro()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
@@ -417,6 +436,7 @@ export class CreateBitacoraDto {
   @IsDateString()
   fecha: string;
   @ApiProperty({ description: 'Lectura del horómetro', type: Number })
+  @TransformHorometro()
   @Type(() => Number)
   @IsNumber()
   horometro: number;
