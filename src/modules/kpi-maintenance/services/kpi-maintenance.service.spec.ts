@@ -1316,7 +1316,7 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 
-  it('permite corregir el horómetro hacia abajo y usa la lectura menor como nueva base', async () => {
+  it('el módulo de Equipos permite corregir el horómetro hacia abajo y usa la lectura menor como nueva base', async () => {
     const current = {
       id: 'equipo-1',
       codigo: 'EQ-1',
@@ -1338,9 +1338,11 @@ describe('KpiMaintenanceService alerts', () => {
       .spyOn(service, 'triggerAlertRecalculation')
       .mockResolvedValue({ data: { accepted: true }, message: 'OK' } as any);
 
-    await service.updateEquipoHorometro(
+    // Por el módulo administrativo de Equipos, que es donde se corrige un dato
+    // mal cargado y queda el motivo en la bitácora.
+    await service.updateEquipo(
       'equipo-1',
-      { horometro_actual: 90 },
+      { horometro_actual: 90 } as any,
       { username: 'supervisor' },
     );
 
@@ -1362,6 +1364,12 @@ describe('KpiMaintenanceService alerts', () => {
   });
 
   it('el endpoint dedicado de horómetro reutiliza la actualización manual auditada', async () => {
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      codigo: 'EQ-1',
+      horometro_actual: 125,
+      is_deleted: false,
+    });
     const updateSpy = jest
       .spyOn(service, 'updateEquipo')
       .mockResolvedValue({ data: { horometro_actual: 140 }, message: 'OK' } as any);
@@ -1378,6 +1386,73 @@ describe('KpiMaintenanceService alerts', () => {
       { horometro_actual: 140 },
       actor,
     );
+  });
+
+  it('el control de equipos del Dashboard rechaza una lectura que no avanza', async () => {
+    // Es un contador físico: que baje significa que alguien tecleó mal, y ese
+    // error se propaga al par "anterior -> actual" de todos los informes.
+    repos.equipoRepo.findOne.mockResolvedValue({
+      id: 'equipo-1',
+      codigo: 'EQ-1',
+      horometro_actual: 125,
+      is_deleted: false,
+    });
+    const updateSpy = jest.spyOn(service, 'updateEquipo');
+
+    await expect(
+      service.updateEquipoHorometro('equipo-1', { horometro_actual: 90 }, null),
+    ).rejects.toThrow(/debe ser mayor que la lectura vigente/i);
+
+    // Repetir la misma lectura tampoco avanza.
+    await expect(
+      service.updateEquipoHorometro('equipo-1', { horometro_actual: 125 }, null),
+    ).rejects.toThrow(/debe ser mayor que la lectura vigente/i);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('la OT nueva exige que el horómetro avance sobre la lectura del equipo', () => {
+    const equipo = { horometro_actual: 15286 } as any;
+
+    // Al crear: la lectura tiene que avanzar, o el par del informe se lee como
+    // un horómetro que retrocede.
+    expect(() =>
+      (service as any).buildWorkOrderHorometerPayload(
+        { horometro_actual: 15200 },
+        equipo,
+        null,
+        { requireIncrease: true },
+      ),
+    ).toThrow(/debe ser mayor que la lectura vigente/i);
+
+    expect(() =>
+      (service as any).buildWorkOrderHorometerPayload(
+        { horometro_actual: 15286 },
+        equipo,
+        null,
+        { requireIncrease: true },
+      ),
+    ).toThrow(/debe ser mayor que la lectura vigente/i);
+
+    const payload = (service as any).buildWorkOrderHorometerPayload(
+      { horometro_actual: 15300 },
+      equipo,
+      null,
+      { requireIncrease: true },
+    );
+    expect(payload.horometro_anterior).toBe(15286);
+    expect(payload.horometro_actual).toBe(15300);
+
+    // Editar una OT ya guardada no exige avance: el equipo siguió trabajando
+    // con órdenes posteriores y comparar contra la lectura viva rechazaría una
+    // edición legítima.
+    expect(() =>
+      (service as any).buildWorkOrderHorometerPayload(
+        { horometro_actual: 15200 },
+        equipo,
+        null,
+      ),
+    ).not.toThrow();
   });
 
   it('el recordatorio diario se envía únicamente a usuarios supervisores activos', async () => {

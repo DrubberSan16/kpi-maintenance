@@ -2310,6 +2310,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     payload: Record<string, unknown> | null | undefined,
     equipment?: EquipoEntity | null,
     procedure?: ProcedimientoPlantillaEntity | null,
+    options?: { requireIncrease?: boolean },
   ) {
     const {
       horometro_proyectado: _horometroProyectado,
@@ -2330,6 +2331,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     if (requestedHorometer != null && requestedHorometer < 0) {
       throw new BadRequestException('El horometro actual no puede ser negativo.');
+    }
+    // Al CREAR la OT la lectura tiene que avanzar sobre la del equipo. Es lo
+    // que hace que el par "anterior -> actual" del informe signifique algo: el
+    // anterior es la lectura con la que llego la maquina y el actual el que se
+    // anota al abrir la orden. Con una lectura igual o menor el par se lee como
+    // un horometro que retrocede.
+    //
+    // Solo al crear: en una OT ya guardada el campo queda bloqueado, y el
+    // equipo pudo avanzar con OT posteriores, asi que comparar contra la
+    // lectura viva rechazaria una edicion legitima.
+    const lecturaVigente = this.normalizeHorometro(equipment?.horometro_actual);
+    if (
+      options?.requireIncrease &&
+      hasRequestedHorometer &&
+      requestedHorometer != null &&
+      lecturaVigente != null &&
+      requestedHorometer <= lecturaVigente
+    ) {
+      throw new BadRequestException(
+        `El horometro de la OT debe ser mayor que la lectura vigente del equipo (${lecturaVigente}). Se recibio ${requestedHorometer}.`,
+      );
     }
     const horometroActual = hasRequestedHorometer
       ? requestedHorometer
@@ -17094,14 +17116,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     return this.wrap(saved, 'Equipo actualizado');
   }
+  /**
+   * Lectura manual del horometro desde el control de equipos del Dashboard.
+   *
+   * Aqui la lectura solo puede avanzar. Es un contador fisico: que baje
+   * significa que alguien se equivoco tecleando, y ese error se propaga al par
+   * "anterior -> actual" de todos los informes que lo leen.
+   *
+   * La correccion descendente sigue existiendo, pero por el modulo de Equipos,
+   * que es administrativo y deja rastro con su motivo. Este control es de uso
+   * diario y no es el sitio para corregir un dato mal cargado.
+   */
   async updateEquipoHorometro(
     id: string,
     dto: { horometro_actual: number },
     actor?: RequestActorContext | null,
   ) {
+    const current = await this.findEquipoOrFail(id);
+    const lecturaVigente = this.normalizeHorometro(current.horometro_actual);
+    const lecturaNueva = this.normalizeHorometro(dto.horometro_actual);
+
+    if (lecturaNueva == null) {
+      throw new BadRequestException('El horometro actual no es valido.');
+    }
+    if (lecturaVigente != null && lecturaNueva <= lecturaVigente) {
+      throw new BadRequestException(
+        `El horometro debe ser mayor que la lectura vigente (${lecturaVigente}). Se recibio ${lecturaNueva}.`,
+      );
+    }
+
     return this.updateEquipo(
       id,
-      { horometro_actual: dto.horometro_actual } as UpdateEquipoDto,
+      { horometro_actual: lecturaNueva } as UpdateEquipoDto,
       actor,
     );
   }
@@ -28707,6 +28753,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         (entity.valor_json as Record<string, unknown> | null) ?? {},
         equipment,
         resolvedProcedure,
+        { requireIncrease: true },
       );
       entity.requested_by =
         entity.requested_by ??
