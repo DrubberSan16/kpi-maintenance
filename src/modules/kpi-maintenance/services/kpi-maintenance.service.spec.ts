@@ -1443,6 +1443,15 @@ describe('KpiMaintenanceService alerts', () => {
     expect(payload.horometro_anterior).toBe(15286);
     expect(payload.horometro_actual).toBe(15300);
 
+    const emergencyPayload = (service as any).buildWorkOrderHorometerPayload(
+      { horometro_actual: 15200 },
+      equipo,
+      null,
+      { requireIncrease: false },
+    );
+    expect(emergencyPayload.horometro_anterior).toBe(15286);
+    expect(emergencyPayload.horometro_actual).toBe(15200);
+
     // Editar una OT ya guardada no exige avance: el equipo siguió trabajando
     // con órdenes posteriores y comparar contra la lectura viva rechazaría una
     // edición legítima.
@@ -1453,6 +1462,40 @@ describe('KpiMaintenanceService alerts', () => {
         null,
       ),
     ).not.toThrow();
+  });
+
+  it('acepta inspeccion como tipo de mantenimiento de una OT', () => {
+    expect((service as any).resolveWorkOrderMaintenanceKind('inspeccion')).toBe(
+      'INSPECCION',
+    );
+    expect((service as any).buildWorkOrderMaintenanceKindLabel('INSPECCION')).toBe(
+      'Inspección',
+    );
+  });
+
+  it('solo una OT emergente permite horas reales manuales', () => {
+    const start = '2026-09-13T08:00:00-05:00';
+    const end = '2026-09-13T10:00:00-05:00';
+
+    expect(() =>
+      (service as any).resolveEmergencyWorkOrderHours(false, start, end),
+    ).toThrow(/solo se pueden registrar manualmente en una orden emergente/i);
+
+    const resolved = (service as any).resolveEmergencyWorkOrderHours(
+      true,
+      start,
+      end,
+    );
+    expect(resolved.hora_inicio).toEqual(new Date(start));
+    expect(resolved.hora_fin).toEqual(new Date(end));
+
+    expect(() =>
+      (service as any).resolveEmergencyWorkOrderHours(
+        true,
+        end,
+        start,
+      ),
+    ).toThrow(/hora de fin no puede ser anterior/i);
   });
 
   it('el recordatorio diario se envía únicamente a usuarios supervisores activos', async () => {

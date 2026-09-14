@@ -1229,6 +1229,18 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsString()
   emergency_reason?: string;
+  @ApiPropertyOptional({
+    description: 'Hora real de inicio para una OT emergente (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hora_inicio?: string;
+  @ApiPropertyOptional({
+    description: 'Hora real de fin para una OT emergente (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hora_fin?: string;
   @ApiPropertyOptional({ description: 'Requiere permiso de seguridad' })
   @IsOptional()
   @IsBoolean()
@@ -1298,6 +1310,18 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsString()
   emergency_reason?: string;
+  @ApiPropertyOptional({
+    description: 'Hora real de inicio para una OT emergente (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hora_inicio?: string;
+  @ApiPropertyOptional({
+    description: 'Hora real de fin para una OT emergente (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hora_fin?: string;
   @ApiPropertyOptional({ description: 'Prioridad', type: Number })
   @IsOptional()
   @Type(() => Number)

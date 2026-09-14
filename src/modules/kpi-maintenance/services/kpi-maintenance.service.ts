@@ -879,6 +879,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     'PREVENTIVO',
     'PREDICTIVO',
     'CEBADO',
+    'INSPECCION',
   ] as const;
   private readonly PLAN_MAINTENANCE_TYPE_VALUES = [
     'CORRECTIVO',
@@ -2310,7 +2311,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     payload: Record<string, unknown> | null | undefined,
     equipment?: EquipoEntity | null,
     procedure?: ProcedimientoPlantillaEntity | null,
-    options?: { requireIncrease?: boolean },
+    options?: { requireIncrease?: boolean; previousHorometer?: unknown },
   ) {
     const {
       horometro_proyectado: _horometroProyectado,
@@ -2342,8 +2343,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     // equipo pudo avanzar con OT posteriores, asi que comparar contra la
     // lectura viva rechazaria una edicion legitima.
     const lecturaVigente = this.normalizeHorometro(equipment?.horometro_actual);
+    const previousHorometer = this.normalizeHorometro(options?.previousHorometer);
+    const requestedHorometerChanged =
+      previousHorometer == null ||
+      (requestedHorometer != null &&
+        this.haveDifferentNumericValue(requestedHorometer, previousHorometer));
     if (
       options?.requireIncrease &&
+      requestedHorometerChanged &&
       hasRequestedHorometer &&
       requestedHorometer != null &&
       lecturaVigente != null &&
@@ -2771,6 +2778,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (normalized === 'PREVENTIVO') return 'Preventivo';
     if (normalized === 'PREDICTIVO') return 'Predictivo';
     if (normalized === 'CEBADO') return 'Cebado';
+    if (normalized === 'INSPECCION') return 'Inspección';
     return normalized || 'Sin definir';
   }
 
@@ -2969,6 +2977,62 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return {
       is_emergency: resolvedIsEmergency,
       emergency_reason: resolvedIsEmergency ? resolvedEmergencyReason : null,
+    };
+  }
+
+  private resolveEmergencyWorkOrderHours(
+    isEmergency: boolean,
+    horaInicio: unknown,
+    horaFin: unknown,
+    previous?: Pick<WorkOrderEntity, 'hora_inicio' | 'hora_fin'> | null,
+  ) {
+    const hasStart =
+      horaInicio !== undefined &&
+      horaInicio !== null &&
+      String(horaInicio).trim() !== '';
+    const hasEnd =
+      horaFin !== undefined &&
+      horaFin !== null &&
+      String(horaFin).trim() !== '';
+
+    if (!isEmergency && (hasStart || hasEnd)) {
+      throw new BadRequestException(
+        'Hora inicio y hora fin solo se pueden registrar manualmente en una orden emergente.',
+      );
+    }
+
+    const parseDate = (value: unknown, label: string) => {
+      const parsed = new Date(String(value));
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException(`${label} no es valida.`);
+      }
+      return parsed;
+    };
+    const resolvedStart = hasStart
+      ? parseDate(horaInicio, 'La hora de inicio')
+      : previous?.hora_inicio ?? null;
+    const resolvedEnd = hasEnd
+      ? parseDate(horaFin, 'La hora de fin')
+      : previous?.hora_fin ?? null;
+
+    if (hasEnd && !resolvedStart) {
+      throw new BadRequestException(
+        'Debes registrar la hora de inicio antes de la hora de fin.',
+      );
+    }
+    if (
+      resolvedStart &&
+      resolvedEnd &&
+      new Date(resolvedEnd).getTime() < new Date(resolvedStart).getTime()
+    ) {
+      throw new BadRequestException(
+        'La hora de fin no puede ser anterior a la hora de inicio.',
+      );
+    }
+
+    return {
+      hora_inicio: resolvedStart,
+      hora_fin: resolvedEnd,
     };
   }
 
@@ -28057,6 +28121,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           workOrder?.is_emergency ?? false,
           workOrder?.emergency_reason,
         );
+    const emergencyHours = this.resolveEmergencyWorkOrderHours(
+      emergencyState.is_emergency,
+      header.hora_inicio,
+      header.hora_fin,
+      workOrder,
+    );
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
@@ -28109,6 +28179,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
         equipment,
         resolvedProcedure,
+        {
+          requireIncrease: !emergencyState.is_emergency,
+          previousHorometer: previousHeaderPayload?.horometro_actual,
+        },
       );
       this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
       cebadoProgramacionDate = this.applyCebadoProgramacionDate(
@@ -28156,6 +28230,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         maintenance_kind: resolvedMaintenanceKind,
         is_emergency: emergencyState.is_emergency,
         emergency_reason: emergencyState.emergency_reason,
+        hora_inicio: emergencyHours.hora_inicio,
+        hora_fin: emergencyHours.hora_fin,
         safety_permit_required:
           header.safety_permit_required ??
           entity.safety_permit_required ??
@@ -28794,6 +28870,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.is_emergency ?? false,
       dto.emergency_reason,
     );
+    const emergencyHours = this.resolveEmergencyWorkOrderHours(
+      emergencyState.is_emergency,
+      dto.hora_inicio,
+      dto.hora_fin,
+    );
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     if (normalizedStatus === 'IN_PROGRESS') {
       await this.assertWorkOrderCanMoveToInProgress({
@@ -28842,6 +28923,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         maintenance_kind: resolvedMaintenanceKind,
         is_emergency: emergencyState.is_emergency,
         emergency_reason: emergencyState.emergency_reason,
+        hora_inicio: emergencyHours.hora_inicio,
+        hora_fin: emergencyHours.hora_fin,
         safety_permit_required: dto.safety_permit_required ?? false,
         safety_permit_code: dto.safety_permit_code ?? null,
         vendor_id: dto.vendor_id ?? null,
@@ -28854,7 +28937,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         (entity.valor_json as Record<string, unknown> | null) ?? {},
         equipment,
         resolvedProcedure,
-        { requireIncrease: true },
+        { requireIncrease: !emergencyState.is_emergency },
       );
       entity.requested_by =
         entity.requested_by ??
@@ -29099,6 +29182,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.is_emergency,
       wo.emergency_reason,
     );
+    const emergencyHours = this.resolveEmergencyWorkOrderHours(
+      emergencyState.is_emergency,
+      dto.hora_inicio,
+      dto.hora_fin,
+      wo,
+    );
     const nextHeaderPayload = {
       ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
       ...(dto.valor_json ?? {}),
@@ -29144,6 +29233,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         componentContext.legacyComponentOfficialName,
       is_emergency: emergencyState.is_emergency,
       emergency_reason: emergencyState.emergency_reason,
+      hora_inicio: emergencyHours.hora_inicio,
+      hora_fin: emergencyHours.hora_fin,
       blocked_reason:
         dto.blocked_reason !== undefined
           ? String(dto.blocked_reason || '').trim() || null
@@ -29158,6 +29249,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (wo.valor_json as Record<string, unknown> | null) ?? {},
       equipment,
       resolvedProcedure,
+      {
+        requireIncrease: !emergencyState.is_emergency,
+        previousHorometer: previousPayload?.horometro_actual,
+      },
     );
     wo.maintenance_kind = nextMaintenanceKind;
     wo.requested_by =

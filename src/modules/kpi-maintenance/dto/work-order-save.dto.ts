@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
+  IsDateString,
   IsObject,
   IsOptional,
   IsString,
@@ -79,6 +80,20 @@ export class SaveWorkOrderHeaderDto {
   @IsOptional()
   @IsString()
   emergency_reason?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Hora real de inicio para una OT emergente (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hora_inicio?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Hora real de fin para una OT emergente (ISO 8601)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hora_fin?: string | null;
 
   @ApiPropertyOptional({ description: 'ID del plan', format: 'uuid' })
   @IsOptional()
