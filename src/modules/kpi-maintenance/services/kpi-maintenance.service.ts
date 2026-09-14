@@ -15527,6 +15527,71 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return parsed.toISOString().slice(0, 10);
   }
 
+  /** Hoy en la zona horaria de la operacion, como `YYYY-MM-DD`. */
+  private todayDateOnly() {
+    return this.getGuayaquilDateTimeParts().dateKey;
+  }
+
+  /**
+   * Una fecha programada debe ser hoy o futura. La unica excepcion es la fecha
+   * capturada al guardar una OT emergente, que puede documentar un trabajo ya
+   * ocurrido. Al editar se permite conservar una fecha historica sin cambiarla.
+   */
+  private assertFechaProgramadaNoPasada(
+    value: unknown,
+    label: string,
+    options?: { previous?: unknown; allowPast?: boolean },
+  ) {
+    const normalized = this.normalizeDateOnlyInput(value);
+    if (!normalized) return null;
+    if (options?.allowPast) return normalized;
+
+    const previous = this.normalizeDateOnlyInput(options?.previous);
+    if (previous && previous === normalized) return normalized;
+
+    const today = this.todayDateOnly();
+    if (normalized < today) {
+      throw new BadRequestException(
+        `${label} no puede ser anterior a hoy (${today}). Se recibio ${normalized}.`,
+      );
+    }
+    return normalized;
+  }
+
+  private assertCronogramaSemanalFechasNoPasadas(
+    details: Array<{ fecha_actividad?: unknown }> | null | undefined,
+    previousDates: unknown[] = [],
+  ) {
+    if (!details?.length) return;
+
+    // Permite conservar bloques historicos, pero no aumentar su cantidad ni
+    // agregar bloques nuevos en una fecha pasada que ya tenia otra actividad.
+    const availablePreviousDates = new Map<string, number>();
+    for (const value of previousDates) {
+      const normalized = this.normalizeDateOnlyInput(value);
+      if (!normalized) continue;
+      availablePreviousDates.set(
+        normalized,
+        (availablePreviousDates.get(normalized) ?? 0) + 1,
+      );
+    }
+
+    const today = this.todayDateOnly();
+    for (const detail of details) {
+      const normalized = this.normalizeDateOnlyInput(detail.fecha_actividad);
+      if (!normalized || normalized >= today) continue;
+
+      const available = availablePreviousDates.get(normalized) ?? 0;
+      if (available > 0) {
+        availablePreviousDates.set(normalized, available - 1);
+        continue;
+      }
+      throw new BadRequestException(
+        `La fecha de la actividad semanal no puede ser anterior a hoy (${today}). Se recibio ${normalized}.`,
+      );
+    }
+  }
+
   private readWorkOrderProgramacionDate(
     payload: Record<string, unknown> | null | undefined,
   ) {
@@ -15544,6 +15609,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private applyCebadoProgramacionDate(
     maintenanceKind: unknown,
     payload: Record<string, unknown> | null | undefined,
+    options?: { previous?: unknown; allowPast?: boolean },
   ) {
     if (this.normalizeMaintenanceKind(maintenanceKind) !== 'CEBADO') {
       return null;
@@ -15560,6 +15626,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         `La fecha de programacion "${rawValue}" no es una fecha valida.`,
       );
     }
+    this.assertFechaProgramadaNoPasada(
+      normalized,
+      'La fecha de programacion de la orden de trabajo',
+      {
+        previous: options?.previous,
+        allowPast: options?.allowPast,
+      },
+    );
     if (payload && typeof payload === 'object') {
       payload.fecha_programacion = normalized;
     }
@@ -17785,6 +17859,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
     const nextDate = this.safeDateOnlyString(dto.proxima_fecha);
+    this.assertFechaProgramadaNoPasada(nextDate, 'La fecha programada');
     await this.ensureProgramacionWorkOrderDateAvailability({
       workOrderId: linkedWorkOrder.id,
       proximaFecha: nextDate,
@@ -17934,6 +18009,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const nextDate = this.safeDateOnlyString(
       dto.proxima_fecha ?? p.proxima_fecha ?? null,
     );
+    this.assertFechaProgramadaNoPasada(nextDate, 'La fecha programada', {
+      previous: p.proxima_fecha,
+    });
     await this.ensureProgramacionWorkOrderDateAvailability({
       workOrderId: linkedWorkOrder.id,
       proximaFecha: nextDate,
@@ -21442,6 +21520,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     const currentFechaProgramada = this.toDateOnlyString(current?.fecha_programada);
+    this.assertFechaProgramadaNoPasada(
+      fechaProgramada,
+      'La fecha del bloque mensual',
+      { previous: currentFechaProgramada },
+    );
     if (
       current &&
       !options?.allowScheduleDateChange &&
@@ -21712,6 +21795,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'El bloque mensual no tiene una fecha base para reprogramar.',
       );
     }
+    this.assertFechaProgramadaNoPasada(
+      nextDate,
+      'La nueva fecha de reprogramacion',
+    );
     if (nextDate === previousDate) {
       throw new BadRequestException(
         'Debes seleccionar una fecha distinta a la actual para reprogramar.',
@@ -22497,6 +22584,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: CreateCronogramaSemanalDto,
     scopedSucursalId?: string | null,
   ) {
+    this.assertCronogramaSemanalFechasNoPasadas(dto.detalles);
     const sucursal = await this.resolveSucursalForWrite(
       dto.sucursal_id,
       scopedSucursalId,
@@ -22625,6 +22713,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const current = await detalleRepo.find({
           where: { cronograma_id: row.id, is_deleted: false },
         });
+        this.assertCronogramaSemanalFechasNoPasadas(
+          dto.detalles,
+          current.map((item) => item.fecha_actividad),
+        );
         for (const item of current) item.is_deleted = true;
         if (current.length) await detalleRepo.save(current);
 
@@ -28022,6 +28114,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       cebadoProgramacionDate = this.applyCebadoProgramacionDate(
         resolvedMaintenanceKind,
         nextHeaderPayload,
+        {
+          previous: isNew
+            ? null
+            : this.readWorkOrderProgramacionDate(
+                entity.valor_json as Record<string, unknown> | null,
+              ),
+          allowPast: emergencyState.is_emergency,
+        },
       );
 
       Object.assign(entity, {
@@ -28720,6 +28820,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       cebadoProgramacionDate = this.applyCebadoProgramacionDate(
         resolvedMaintenanceKind,
         nextHeaderPayload,
+        { allowPast: emergencyState.is_emergency },
       );
       const entity = this.woRepo.create({
         code: resolution.resolvedCode,
@@ -29027,6 +29128,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const cebadoProgramacionDate = this.applyCebadoProgramacionDate(
       nextMaintenanceKind,
       nextHeaderPayload,
+      {
+        previous: this.readWorkOrderProgramacionDate(
+          wo.valor_json as Record<string, unknown> | null,
+        ),
+        allowPast: emergencyState.is_emergency,
+      },
     );
     Object.assign(wo, {
       ...dto,

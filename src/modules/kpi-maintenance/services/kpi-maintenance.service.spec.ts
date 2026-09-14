@@ -3267,6 +3267,7 @@ describe('KpiMaintenanceService work orders', () => {
   });
 
   it('crea la OT de Cebado y su programacion cuando tiene equipo, plantilla y fecha', async () => {
+    const today = (service as any).todayDateOnly();
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',
       nombre: 'UG 03',
@@ -3308,7 +3309,7 @@ describe('KpiMaintenanceService work orders', () => {
       plan_id: 'plan-1',
       status_workflow: 'PLANNED',
       valor_json: {
-        fecha_programacion: '2026-09-04',
+        fecha_programacion: today,
         causa: 'Cebado programado',
         accion: 'Cebado de graseras',
         prevencion: 'Cumplir plan de lubricacion',
@@ -3323,7 +3324,7 @@ describe('KpiMaintenanceService work orders', () => {
         equipo_id: 'equipo-1',
         plan_id: 'plan-1',
         work_order_id: 'wo-1',
-        proxima_fecha: '2026-09-04',
+        proxima_fecha: today,
       }),
     );
   });
@@ -4413,15 +4414,99 @@ describe('KpiMaintenanceService programacion automatica de OT de Cebado', () => 
   });
 
   it('normaliza la fecha dentro del payload de la cabecera', () => {
+    const today = (service as any).todayDateOnly();
     const payload: Record<string, unknown> = {
-      fecha_programacion: '2026-09-04T05:00:00.000Z',
+      fecha_programacion: `${today}T05:00:00.000Z`,
     };
     const resolved = (service as any).applyCebadoProgramacionDate(
       'CEBADO',
       payload,
     );
-    expect(resolved).toBe('2026-09-04');
-    expect(payload.fecha_programacion).toBe('2026-09-04');
+    expect(resolved).toBe(today);
+    expect(payload.fecha_programacion).toBe(today);
+  });
+
+  it('rechaza una fecha pasada cuando la OT se guarda como normal', () => {
+    const today = (service as any).todayDateOnly();
+    const previousDay = new Date(`${today}T00:00:00.000Z`);
+    previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+    const pastDate = previousDay.toISOString().slice(0, 10);
+
+    expect(() =>
+      (service as any).applyCebadoProgramacionDate(
+        'CEBADO',
+        { fecha_programacion: pastDate },
+        { allowPast: false },
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('solo conserva la excepcion de fecha pasada mientras la OT se guarda como emergente', () => {
+    const today = (service as any).todayDateOnly();
+    const previousDay = new Date(`${today}T00:00:00.000Z`);
+    previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+    const pastDate = previousDay.toISOString().slice(0, 10);
+
+    expect(
+      (service as any).applyCebadoProgramacionDate(
+        'CEBADO',
+        { fecha_programacion: pastDate },
+        { allowPast: true },
+      ),
+    ).toBe(pastDate);
+
+    expect(() =>
+      (service as any).applyCebadoProgramacionDate(
+        'CEBADO',
+        { fecha_programacion: pastDate },
+        { allowPast: false },
+      ),
+    ).toThrow(BadRequestException);
+  });
+
+  it('permite conservar una fecha historica sin cambiarla al editar', () => {
+    const today = (service as any).todayDateOnly();
+    const previousDay = new Date(`${today}T00:00:00.000Z`);
+    previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+    const pastDate = previousDay.toISOString().slice(0, 10);
+
+    expect(
+      (service as any).assertFechaProgramadaNoPasada(
+        pastDate,
+        'La fecha programada',
+        { previous: pastDate },
+      ),
+    ).toBe(pastDate);
+  });
+
+  it('bloquea bloques semanales nuevos en el pasado sin impedir los historicos existentes', () => {
+    const today = (service as any).todayDateOnly();
+    const previousDay = new Date(`${today}T00:00:00.000Z`);
+    previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+    const pastDate = previousDay.toISOString().slice(0, 10);
+
+    expect(() =>
+      (service as any).assertCronogramaSemanalFechasNoPasadas([
+        { fecha_actividad: pastDate },
+      ]),
+    ).toThrow(BadRequestException);
+
+    expect(() =>
+      (service as any).assertCronogramaSemanalFechasNoPasadas(
+        [{ fecha_actividad: pastDate }],
+        [pastDate],
+      ),
+    ).not.toThrow();
+
+    expect(() =>
+      (service as any).assertCronogramaSemanalFechasNoPasadas(
+        [
+          { fecha_actividad: pastDate },
+          { fecha_actividad: pastDate },
+        ],
+        [pastDate],
+      ),
+    ).toThrow(BadRequestException);
   });
 
   it('rechaza una fecha inexistente', () => {
