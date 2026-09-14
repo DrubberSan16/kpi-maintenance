@@ -133,6 +133,7 @@ import {
   IntelligencePeriodQueryDto,
   ImportAnalisisLubricanteBatchDto,
   IssueMaterialsDto,
+  RequestMaterialFromMatrizDto,
   SystemReportsQueryDto,
   PurgeAnalisisLubricanteDto,
   ProgramacionMensualQueryDto,
@@ -335,6 +336,8 @@ type InventoryReservationEmailItem = {
   bodega_label: string;
   sucursal_id: string | null;
   cantidad_reservada: number;
+  /** Existencia de esa bodega al momento de enviar el aviso. */
+  stock_actual: number;
   observacion: string | null;
 };
 
@@ -3087,16 +3090,95 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return { producto, bodega, stock };
   }
 
-  private async resolveInventoryCostReference(
+  /**
+   * Producto y bodega para una RESERVA, donde el stock puede no existir.
+   *
+   * `validateProductoEnBodega` exige que exista la fila de stock, y con razon
+   * para cualquier movimiento real: no se puede sacar lo que la bodega no
+   * tiene. Pero reservar es otra cosa -- es declarar una necesidad --, y
+   * rechazar la reserva por falta de stock dejaba la necesidad sin registrar en
+   * ninguna parte: nadie se enteraba de que habia que comprar ese material.
+   *
+   * Aqui el stock puede venir `null`; quien llama decide que hacer con eso.
+   */
+  private async resolveProductoBodegaParaReserva(
     productoId: string,
     bodegaId: string,
     manager?: EntityManager,
   ) {
-    const { producto, bodega } = await this.validateProductoEnBodega(
+    const productRepo =
+      manager?.getRepository(ProductoEntity) ?? this.productoRepo;
+    const warehouseRepo =
+      manager?.getRepository(BodegaEntity) ?? this.bodegaRepo;
+    const stockRepo =
+      manager?.getRepository(StockBodegaEntity) ?? this.stockRepo;
+    const [producto, bodega, stock] = await Promise.all([
+      productRepo.findOne({ where: { id: productoId } }),
+      warehouseRepo.findOne({ where: { id: bodegaId } }),
+      stockRepo.findOne({
+        where: { producto_id: productoId, bodega_id: bodegaId },
+      }),
+    ]);
+
+    if (!producto) throw new NotFoundException('Producto no encontrado');
+    if (!bodega) throw new NotFoundException('Bodega no encontrada');
+
+    return { producto, bodega, stock: stock ?? null };
+  }
+
+  /**
+   * Cuanto hay, cuanto esta comprometido y cuanto falta para lo que se pide.
+   *
+   * No lanza por insuficiencia: la reserva de una falta es informacion valida.
+   * Devuelve el faltante para que el aviso por correo lo pueda contar.
+   */
+  private async resolveReservationAvailability(
+    productoId: string,
+    bodegaId: string,
+    requestedQuantity: number,
+    manager?: EntityManager,
+  ) {
+    const normalizedRequested = this.toNumeric(requestedQuantity, 0);
+    if (!(normalizedRequested > 0)) {
+      throw new BadRequestException(
+        'La cantidad a reservar debe ser mayor a cero.',
+      );
+    }
+
+    const { producto, bodega, stock } =
+      await this.resolveProductoBodegaParaReserva(productoId, bodegaId, manager);
+    const stockActual = stock ? this.getOperationalStockAmount(stock) : 0;
+    const reservedQty = await this.getActiveReservedQuantity(
       productoId,
       bodegaId,
       manager,
     );
+    const availableQty = Math.max(stockActual - reservedQty, 0);
+
+    return {
+      producto,
+      bodega,
+      stock,
+      stockActual,
+      reservedQty,
+      availableQty,
+      faltante: Math.max(normalizedRequested - availableQty, 0),
+    };
+  }
+
+  private async resolveInventoryCostReference(
+    productoId: string,
+    bodegaId: string,
+    manager?: EntityManager,
+    options?: { allowMissingStock?: boolean },
+  ) {
+    const { producto, bodega } = options?.allowMissingStock
+      ? await this.resolveProductoBodegaParaReserva(
+          productoId,
+          bodegaId,
+          manager,
+        )
+      : await this.validateProductoEnBodega(productoId, bodegaId, manager);
     const kardexRepo = manager?.getRepository(KardexEntity) ?? this.kardexRepo;
     const kardex = await kardexRepo.findOne({
       where: { producto_id: productoId, bodega_id: bodegaId },
@@ -5521,50 +5603,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.toNumeric(raw?.total, 0);
   }
 
-  private async assertReservableStockAvailable(
-    productoId: string,
-    bodegaId: string,
-    requestedQuantity: number,
-    manager?: EntityManager,
-  ) {
-    const normalizedRequested = this.toNumeric(requestedQuantity, 0);
-    if (!(normalizedRequested > 0)) {
-      throw new BadRequestException(
-        'La cantidad a reservar debe ser mayor a cero.',
-      );
-    }
-
-    const { producto, bodega, stock } = await this.validateProductoEnBodega(
-      productoId,
-      bodegaId,
-      manager,
-    );
-    const stockActual = this.getOperationalStockAmount(stock);
-    const reservedQty = await this.getActiveReservedQuantity(
-      productoId,
-      bodegaId,
-      manager,
-    );
-    const availableQty = Math.max(stockActual - reservedQty, 0);
-
-    if (normalizedRequested > availableQty) {
-      throw new ConflictException(
-        `Stock disponible insuficiente en ${this.buildBodegaLabel(bodega) || bodega.id} para ${producto.nombre || producto.id}. Disponible ${availableQty.toFixed(
-          2,
-        )}, reservado activo ${reservedQty.toFixed(2)}, solicitado ${normalizedRequested.toFixed(2)}.`,
-      );
-    }
-
-    return {
-      producto,
-      bodega,
-      stock,
-      stockActual,
-      reservedQty,
-      availableQty,
-    };
-  }
-
   private normalizeMaterialCondition(
     value: unknown,
     fallback: 'NUEVO' | 'USADO' | 'CRITICO' = 'NUEVO',
@@ -5605,7 +5643,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.normalizeMaterialCondition(raw);
   }
 
-  private getStockNuevoAmount(stock: StockBodegaEntity) {
+  private getStockNuevoAmount(stock?: StockBodegaEntity | null) {
+    if (!stock) return 0;
     const actual = this.toNumeric(stock.stock_actual, 0);
     const usado = this.toNumeric(stock.stock_usado, 0);
     const critico = this.toNumeric(stock.stock_critico, 0);
@@ -5616,15 +5655,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return Math.max(actual - usado - critico, 0);
   }
 
-  private getStockUsadoAmount(stock: StockBodegaEntity) {
-    return Math.max(this.toNumeric(stock.stock_usado, 0), 0);
+  private getStockUsadoAmount(stock?: StockBodegaEntity | null) {
+    return stock ? Math.max(this.toNumeric(stock.stock_usado, 0), 0) : 0;
   }
 
-  private getStockCriticoAmount(stock: StockBodegaEntity) {
-    return Math.max(this.toNumeric(stock.stock_critico, 0), 0);
+  private getStockCriticoAmount(stock?: StockBodegaEntity | null) {
+    return stock ? Math.max(this.toNumeric(stock.stock_critico, 0), 0) : 0;
   }
 
-  private getOperationalStockAmount(stock: StockBodegaEntity) {
+  private getOperationalStockAmount(stock?: StockBodegaEntity | null) {
+    if (!stock) return 0;
     const primary =
       this.getStockNuevoAmount(stock) + this.getStockUsadoAmount(stock);
     return primary > 0.000001 ? primary : this.getStockCriticoAmount(stock);
@@ -8320,6 +8360,43 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'SUPER ADMIN',
       'SUPER_ADMIN',
     ].includes(normalized);
+  }
+
+  /**
+   * Quien puede registrar la salida REAL de material de una OT.
+   *
+   * La salida mueve stock y genera kardex: es un acto de bodega. Operadores,
+   * supervisores y tecnicos reservan el material en la OT, pero no lo sacan.
+   *
+   * Se valida en el servidor y no solo escondiendo la pestana: ocultar un boton
+   * no protege el endpoint.
+   */
+  private readonly MATERIAL_ISSUE_ROLES = [
+    'ADMINISTRADOR',
+    'ADMINISTRADOR DEL SISTEMA',
+    'ADMIN',
+    'SUPER ADMINISTRADOR',
+    'SUPERADMINISTRADOR',
+    'SUPER_ADMINISTRADOR',
+    'SUPER ADMIN',
+    'SUPER_ADMIN',
+    'GERENTE GENERAL',
+    'GERENCIA GENERAL',
+    'BODEGA',
+    'BODEGUERO',
+  ];
+
+  private canRegisterMaterialIssue(roleName?: string | null): boolean {
+    const normalized = this.normalizeRoleName(roleName);
+    if (!normalized) return false;
+    return this.MATERIAL_ISSUE_ROLES.includes(normalized);
+  }
+
+  private assertCanRegisterMaterialIssue(actor?: RequestActorContext | null) {
+    if (this.canRegisterMaterialIssue(actor?.roleName)) return;
+    throw new ForbiddenException(
+      'La salida de materiales solo la puede registrar Bodega, Administracion, Super Administracion o Gerencia General.',
+    );
   }
 
   private assertCanPurge(roleName?: string) {
@@ -12809,7 +12886,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (item) => item.producto_id && item.bodega_id && item.cantidad > 0,
     );
     if (!valid.length) return [] as InventoryReservationEmailItem[];
-    const [{ productMap, warehouseMap }, equipment, requesterLabels] =
+    const [{ productMap, warehouseMap }, equipment, requesterLabels, stockMap] =
       await Promise.all([
         this.buildInventoryCatalogMaps(
           valid.map((item) => item.producto_id),
@@ -12821,6 +12898,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             })
           : Promise.resolve(null),
         this.resolveWorkOrderRequesterLabels(workOrder),
+        // El stock se lee al enviar, no al reservar: el correo sale con 45
+        // segundos de retraso para consolidar varias lineas, y en ese hueco la
+        // existencia puede haber cambiado.
+        this.buildReservationStockMap(valid),
       ]);
     const equipmentLabel = equipment
       ? this.buildEquipmentReportLabel(equipment)
@@ -12842,49 +12923,107 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.buildBodegaLabel(bodega) ?? String(item.bodega_id),
         sucursal_id: bodega?.sucursal_id ?? null,
         cantidad_reservada: this.toNumeric(item.cantidad),
+        stock_actual:
+          stockMap.get(`${item.producto_id}|${item.bodega_id}`) ?? 0,
         observacion: this.firstNonEmptyString(item.observacion),
       };
     });
   }
 
-  private async resolveWorkOrderRequesterLabels(workOrder: WorkOrderEntity) {
+  /** Existencia operativa por material y bodega, para el correo de reserva. */
+  private async buildReservationStockMap(
+    items: Array<{ producto_id: string; bodega_id?: string | null }>,
+  ) {
+    const productoIds = [...new Set(items.map((item) => item.producto_id))];
+    const bodegaIds = [
+      ...new Set(items.map((item) => String(item.bodega_id)).filter(Boolean)),
+    ];
+    const map = new Map<string, number>();
+    if (!productoIds.length || !bodegaIds.length) return map;
+
+    const rows = await this.stockRepo.find({
+      where: {
+        producto_id: In(productoIds),
+        bodega_id: In(bodegaIds),
+      } as any,
+    });
+    for (const row of rows) {
+      map.set(
+        `${row.producto_id}|${row.bodega_id}`,
+        this.getOperationalStockAmount(row),
+      );
+    }
+    return map;
+  }
+
+  /**
+   * Criterios para reconocer a quien levanto la OT.
+   *
+   * La identidad del generador puede haber quedado guardada como id, como
+   * usuario o como correo segun por donde entro la OT, asi que se buscan las
+   * tres. Se extrajo aparte porque ahora hacen falta en dos sitios: para las
+   * etiquetas del correo de reserva y para resolver los destinatarios del aviso
+   * de salida de material.
+   */
+  private buildWorkOrderRequesterMatchers(workOrder: WorkOrderEntity) {
     const payload = (workOrder.valor_json ?? {}) as Record<string, unknown>;
-    const userIds = new Set(
-      [
-        workOrder.requested_by,
-        payload.created_by_user_id,
-        payload.actor_user_id,
-        payload.requested_by_user_id,
-      ]
-        .map((value) => this.firstNonEmptyString(value))
-        .filter((value): value is string => Boolean(value)),
+    return {
+      payload,
+      userIds: new Set(
+        [
+          workOrder.requested_by,
+          payload.created_by_user_id,
+          payload.actor_user_id,
+          payload.requested_by_user_id,
+        ]
+          .map((value) => this.firstNonEmptyString(value))
+          .filter((value): value is string => Boolean(value)),
+      ),
+      usernames: new Set(
+        [
+          payload.created_by_username,
+          payload.actor_username,
+          payload.requested_by,
+          workOrder.created_by,
+        ]
+          .map((value) => this.normalizeUsername(value))
+          .filter((value): value is string => Boolean(value)),
+      ),
+      emails: new Set(
+        [payload.created_by_email, payload.actor_email, payload.requested_by_email]
+          .map((value) => this.normalizeEmail(value))
+          .filter((value): value is string => Boolean(value)),
+      ),
+    };
+  }
+
+  private isWorkOrderRequesterUser(
+    user: SecurityUserDirectoryItem,
+    matchers: ReturnType<typeof this.buildWorkOrderRequesterMatchers>,
+  ) {
+    if (!this.isActiveSecurityUser(user)) return false;
+    const username = this.normalizeUsername(user.nameUser);
+    const email = this.normalizeEmail(user.email);
+    return Boolean(
+      (user.id && matchers.userIds.has(user.id)) ||
+        (username && matchers.usernames.has(username)) ||
+        (email && matchers.emails.has(email)),
     );
-    const usernames = new Set(
-      [
-        payload.created_by_username,
-        payload.actor_username,
-        payload.requested_by,
-        workOrder.created_by,
-      ]
-        .map((value) => this.normalizeUsername(value))
-        .filter((value): value is string => Boolean(value)),
-    );
-    const emails = new Set(
-      [payload.created_by_email, payload.actor_email, payload.requested_by_email]
-        .map((value) => this.normalizeEmail(value))
-        .filter((value): value is string => Boolean(value)),
-    );
+  }
+
+  /** Usuarios reales que levantaron la OT. A diferencia de las etiquetas, traen correo. */
+  private async resolveWorkOrderRequesterUsers(workOrder: WorkOrderEntity) {
+    const matchers = this.buildWorkOrderRequesterMatchers(workOrder);
+    const users = await this.fetchSecurityUsers();
+    return users.filter((user) => this.isWorkOrderRequesterUser(user, matchers));
+  }
+
+  private async resolveWorkOrderRequesterLabels(workOrder: WorkOrderEntity) {
+    const matchers = this.buildWorkOrderRequesterMatchers(workOrder);
+    const payload = matchers.payload;
     const users = await this.fetchSecurityUsers();
     const labels = users
-      .filter(
-        (user) =>
-          this.isActiveSecurityUser(user) &&
-          ((user.id && userIds.has(user.id)) ||
-            (this.normalizeUsername(user.nameUser) &&
-              usernames.has(this.normalizeUsername(user.nameUser)!)) ||
-            (this.normalizeEmail(user.email) &&
-              emails.has(this.normalizeEmail(user.email)!))),
-      )
+      .filter((user) => this.isWorkOrderRequesterUser(user, matchers))
       .map((user) => this.buildSecurityUserDisplayName(user));
 
     const fallback = this.firstNonOpaqueUserLabel(
@@ -12937,6 +13076,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               <tr>
                 <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.producto_label)}</td>
                 <td style="padding:10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${item.cantidad_reservada.toFixed(2)}</td>
+                <td style="padding:10px;border-bottom:1px solid #e6edf5;text-align:right;${
+                  this.toNumeric(item.stock_actual, 0) <= 0
+                    ? 'color:#b3261e;font-weight:700;'
+                    : ''
+                }">${
+                  this.toNumeric(item.stock_actual, 0) <= 0
+                    ? 'SIN STOCK'
+                    : this.toNumeric(item.stock_actual, 0).toFixed(2)
+                }</td>
                 <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.work_order_code)}</td>
                 <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(item.observacion ?? '')}</td>
               </tr>`,
@@ -12948,7 +13096,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             <table style="width:100%;border-collapse:collapse;border:1px solid #dbe4f0;font-size:13px;">
               <thead style="background:#eef4fb;"><tr>
                 <th style="padding:10px;text-align:left;">Material</th>
-                <th style="padding:10px;text-align:right;">Cantidad reservada</th>
+                <th style="padding:10px;text-align:right;">Cantidad solicitada</th>
+                <th style="padding:10px;text-align:right;">Stock actual en bodega</th>
                 <th style="padding:10px;text-align:left;">Orden de trabajo</th>
                 <th style="padding:10px;text-align:left;">Observacion</th>
               </tr></thead>
@@ -13004,7 +13153,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       lines.push(`Bodega: ${group.label}`);
       for (const item of group.items) {
         lines.push(
-          `- ${item.producto_label} | cantidad reservada ${item.cantidad_reservada.toFixed(2)} | OT ${item.work_order_code}${item.observacion ? ` | ${item.observacion}` : ''}`,
+          `- ${item.producto_label} | solicitado ${item.cantidad_reservada.toFixed(2)} | stock actual ${
+            this.toNumeric(item.stock_actual, 0) <= 0
+              ? 'SIN STOCK'
+              : this.toNumeric(item.stock_actual, 0).toFixed(2)
+          } | OT ${item.work_order_code}${item.observacion ? ` | ${item.observacion}` : ''}`,
         );
       }
       lines.push('');
@@ -13014,6 +13167,315 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       lines.push(`Órdenes de trabajo: ${workOrdersUrl}`);
     }
     return lines.join('\n');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Aviso de salida de material
+  //
+  // Bodega avisa a quien levanto la OT -- y a administracion -- de que el
+  // material ya salio. Cierra el circuito de la reserva: hasta ahora el
+  // solicitante se enteraba entrando a la OT a mirar.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Lo reservado y lo realmente entregado, material por material.
+   *
+   * Se reconstruye igual que en el listado de reservas: lo reservado sale de
+   * los consumos de la OT y lo entregado de los detalles de entrega, agrupados
+   * por material y bodega.
+   */
+  private async buildMaterialIssueSummary(workOrder: WorkOrderEntity) {
+    const [consumos, entregas] = await Promise.all([
+      this.consumoRepo.find({
+        where: { work_order_id: workOrder.id, is_deleted: false } as any,
+      }),
+      this.dataSource.getRepository(EntregaMaterialEntity).find({
+        where: { work_order_id: workOrder.id, is_deleted: false } as any,
+      }),
+    ]);
+
+    const entregaIds = entregas.map((row) => row.id);
+    const detalles = entregaIds.length
+      ? await this.dataSource.getRepository(EntregaMaterialDetEntity).find({
+          where: { entrega_id: In(entregaIds) } as any,
+        })
+      : [];
+
+    const reservado = new Map<string, number>();
+    for (const row of consumos) {
+      const bodegaId = String(row.bodega_id || '').trim();
+      if (!bodegaId) continue;
+      const key = `${row.producto_id}|${bodegaId}`;
+      reservado.set(key, (reservado.get(key) ?? 0) + this.toNumeric(row.cantidad, 0));
+    }
+
+    const entregado = new Map<string, number>();
+    for (const row of detalles) {
+      const key = `${row.producto_id}|${row.bodega_id}`;
+      entregado.set(key, (entregado.get(key) ?? 0) + this.toNumeric(row.cantidad, 0));
+    }
+
+    const keys = [...new Set([...reservado.keys(), ...entregado.keys()])];
+    if (!keys.length) return [];
+
+    const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+      keys.map((key) => key.split('|')[0]!),
+      keys.map((key) => key.split('|')[1]!),
+    );
+
+    return keys
+      .map((key) => {
+        const [productoId = '', bodegaId = ''] = key.split('|');
+        const cantidadReservada = reservado.get(key) ?? 0;
+        const cantidadEntregada = entregado.get(key) ?? 0;
+        return {
+          producto_id: productoId,
+          bodega_id: bodegaId,
+          producto_label:
+            this.buildProductoLabel(productMap.get(productoId)) ?? productoId,
+          bodega_label:
+            this.buildBodegaLabel(warehouseMap.get(bodegaId)) ?? bodegaId,
+          cantidad_reservada: cantidadReservada,
+          cantidad_entregada: cantidadEntregada,
+          cantidad_pendiente: Math.max(cantidadReservada - cantidadEntregada, 0),
+        };
+      })
+      // Solo interesa informar lo que de verdad salio.
+      .filter((row) => row.cantidad_entregada > 0)
+      .sort((left, right) =>
+        left.producto_label.localeCompare(right.producto_label, 'es'),
+      );
+  }
+
+  /**
+   * Destinatarios del aviso: quien levanto la OT, mas administracion y
+   * superadministracion.
+   *
+   * Gerencia General queda fuera a proposito -- el aviso es operativo, no de
+   * control -- y es lo que pidio el encargo.
+   */
+  private async resolveMaterialIssueNotificationRecipients(
+    workOrder: WorkOrderEntity,
+  ): Promise<AlertNotificationRecipient[]> {
+    const [requesters, users] = await Promise.all([
+      this.resolveWorkOrderRequesterUsers(workOrder),
+      this.fetchSecurityUsers(),
+    ]);
+
+    const candidates: SecurityUserDirectoryItem[] = [
+      ...requesters,
+      ...users.filter(
+        (user) =>
+          this.isActiveSecurityUser(user) &&
+          (this.isInventoryAdministrator(user) ||
+            this.isInventorySuperAdministrator(user)),
+      ),
+    ];
+
+    const deduped = new Map<string, AlertNotificationRecipient>();
+    for (const user of candidates) {
+      const email = this.normalizeEmail(user.email);
+      if (!email || deduped.has(email)) continue;
+      deduped.set(email, {
+        type: this.isInventorySuperAdministrator(user)
+          ? 'SUPER_ADMINISTRATOR'
+          : this.isInventoryAdministrator(user)
+            ? 'ADMINISTRATOR'
+            : 'TRANSACTION_OWNER',
+        email,
+        userId: user.id,
+        username: user.nameUser,
+        displayName: user.nameSurname ?? user.nameUser,
+        roleName: user.roleName,
+      });
+    }
+    return [...deduped.values()];
+  }
+
+  private buildMaterialIssueEmailHtml(
+    recipient: AlertNotificationRecipient,
+    context: {
+      workOrder: WorkOrderEntity;
+      equipmentLabel: string;
+      requesterLabels: string[];
+      issuerLabel: string;
+      rows: Awaited<ReturnType<KpiMaintenanceService['buildMaterialIssueSummary']>>;
+    },
+  ) {
+    const filas = context.rows
+      .map(
+        (row) => `
+          <tr>
+            <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(row.producto_label)}</td>
+            <td style="padding:10px;border-bottom:1px solid #e6edf5;">${this.escapeHtml(row.bodega_label)}</td>
+            <td style="padding:10px;border-bottom:1px solid #e6edf5;text-align:right;">${row.cantidad_reservada.toFixed(2)}</td>
+            <td style="padding:10px;border-bottom:1px solid #e6edf5;text-align:right;font-weight:700;">${row.cantidad_entregada.toFixed(2)}</td>
+            <td style="padding:10px;border-bottom:1px solid #e6edf5;text-align:right;">${row.cantidad_pendiente.toFixed(2)}</td>
+          </tr>`,
+      )
+      .join('');
+    const workOrdersUrl = this.buildAppModuleUrl('work-orders');
+
+    return this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Órdenes de trabajo',
+      title: 'Salida de material realizada',
+      summary: `Bodega entregó el material reservado para la OT ${context.workOrder.code}.`,
+      accent: '#1f6f52',
+      contentHtml: `
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+          Hola <strong>${this.escapeHtml(recipient.displayName || recipient.username || 'usuario')}</strong>. Bodega ya realizó la salida del material reservado para esta orden de trabajo. A continuación el detalle de lo reservado frente a lo que efectivamente salió.
+        </p>
+        ${this.buildEmailInfoTable([
+          {
+            label: 'Orden',
+            value: `${context.workOrder.code}${context.workOrder.title ? ` - ${context.workOrder.title}` : ''}`,
+          },
+          { label: 'Equipo', value: context.equipmentLabel },
+          { label: 'Solicitó la reserva', value: context.requesterLabels.join(', ') },
+          { label: 'Realizó la salida', value: context.issuerLabel },
+        ])}
+        <div style="margin-top:22px;">
+          <table style="width:100%;border-collapse:collapse;border:1px solid #dbe4f0;font-size:13px;">
+            <thead style="background:#eef4fb;"><tr>
+              <th style="padding:10px;text-align:left;">Material</th>
+              <th style="padding:10px;text-align:left;">Bodega</th>
+              <th style="padding:10px;text-align:right;">Reservado</th>
+              <th style="padding:10px;text-align:right;">Salió</th>
+              <th style="padding:10px;text-align:right;">Pendiente</th>
+            </tr></thead>
+            <tbody>${filas}</tbody>
+          </table>
+        </div>
+        ${
+          workOrdersUrl
+            ? `<div style="margin-top:22px;text-align:center;">
+                <a href="${this.escapeHtml(workOrdersUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#1f6f52;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Abrir órdenes de trabajo</a>
+              </div>`
+            : ''
+        }`,
+      footer:
+        'Correo automático de salida de material. Se envía a quien generó la orden de trabajo, administradores y superadministradores.',
+    });
+  }
+
+  private buildMaterialIssueEmailText(context: {
+    workOrder: WorkOrderEntity;
+    equipmentLabel: string;
+    requesterLabels: string[];
+    issuerLabel: string;
+    rows: Awaited<ReturnType<KpiMaintenanceService['buildMaterialIssueSummary']>>;
+  }) {
+    const lines = [
+      `Salida de material realizada para la orden ${context.workOrder.code}${context.workOrder.title ? ` - ${context.workOrder.title}` : ''}`,
+      `Equipo: ${context.equipmentLabel}`,
+      `Solicito la reserva: ${context.requesterLabels.join(', ')}`,
+      `Realizo la salida: ${context.issuerLabel}`,
+      '',
+    ];
+    for (const row of context.rows) {
+      lines.push(
+        `- ${row.producto_label} | bodega ${row.bodega_label} | reservado ${row.cantidad_reservada.toFixed(2)} | salio ${row.cantidad_entregada.toFixed(2)} | pendiente ${row.cantidad_pendiente.toFixed(2)}`,
+      );
+    }
+    const workOrdersUrl = this.buildAppModuleUrl('work-orders');
+    if (workOrdersUrl) {
+      lines.push('', `Ordenes de trabajo: ${workOrdersUrl}`);
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Informa por correo que la salida de material ya se realizo.
+   *
+   * Lo dispara bodega desde la OT, a mano: la salida puede hacerse en varias
+   * tandas y solo quien entrega sabe cuando esta completa.
+   */
+  async notifyWorkOrderMaterialIssue(
+    workOrderId: string,
+    actor?: RequestActorContext | null,
+  ) {
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+    this.assertCanRegisterMaterialIssue(actor);
+
+    const rows = await this.buildMaterialIssueSummary(workOrder);
+    if (!rows.length) {
+      throw new BadRequestException(
+        'Todavia no hay ninguna salida de material registrada en esta orden de trabajo.',
+      );
+    }
+
+    const [equipment, requesterLabels, recipients] = await Promise.all([
+      workOrder.equipment_id
+        ? this.equipoRepo.findOne({
+            where: { id: workOrder.equipment_id, is_deleted: false },
+          })
+        : Promise.resolve(null),
+      this.resolveWorkOrderRequesterLabels(workOrder),
+      this.resolveMaterialIssueNotificationRecipients(workOrder),
+    ]);
+
+    const context = {
+      workOrder,
+      equipmentLabel: equipment
+        ? this.buildEquipmentReportLabel(equipment)
+        : 'Equipo no disponible',
+      requesterLabels,
+      issuerLabel:
+        this.firstNonEmptyString(actor?.displayName, actor?.username) ??
+        'Bodega',
+      rows,
+    };
+
+    const transporter = await this.getAlertMailTransporter();
+    let sent = 0;
+    let failed = 0;
+    if (transporter) {
+      for (const recipient of recipients) {
+        try {
+          await transporter.sendMail({
+            from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+            to: recipient.email,
+            subject: `[Inventario] Salida de material realizada · OT ${workOrder.code}`,
+            html: this.buildMaterialIssueEmailHtml(recipient, context),
+            text: this.buildMaterialIssueEmailText(context),
+          });
+          sent += 1;
+        } catch (error: any) {
+          failed += 1;
+          this.logger.warn(
+            `[MaterialIssueEmail:${workOrder.id}] Fallo envio a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+          );
+        }
+      }
+    } else {
+      this.logger.warn(
+        `[MaterialIssueEmail:${workOrder.id}] SMTP no configurado; destinatarios resueltos=${recipients.length}.`,
+      );
+    }
+
+    await this.writeSecurityLog({
+      typeLog: 'SALIDA_MATERIAL_INFORMADA',
+      description: `[WO:${workOrder.id}] Aviso de salida de ${rows.length} material(es); destinatarios=${recipients.length}, exitosos=${sent}, fallidos=${failed}`,
+      createdBy: this.firstNonEmptyString(actor?.username, actor?.userId),
+    });
+
+    return this.wrap(
+      {
+        work_order_id: workOrder.id,
+        work_order_code: workOrder.code,
+        materiales: rows.length,
+        destinatarios: recipients.length,
+        enviados: sent,
+        fallidos: failed,
+        smtp_configurado: Boolean(transporter),
+      },
+      sent > 0
+        ? `Aviso de salida de material enviado a ${sent} destinatario(s).`
+        : 'No se pudo enviar el aviso de salida de material.',
+    );
   }
 
   private async sendInventoryReservationEmails(
@@ -14917,20 +15379,53 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder.valor_json = payload;
   }
 
+  /**
+   * Marcas de tiempo del flujo de la OT.
+   *
+   * `started_at`/`closed_at` marcan el flujo; `hora_inicio`/`hora_fin` miden la
+   * intervencion y son la fuente de verdad de las horas en los reportes.
+   *
+   * Hasta ahora esas dos ultimas no las escribia nadie: se sembraron en la
+   * migracion para las OT ya cerradas y desde entonces toda OT nueva caia al
+   * respaldo, la suma de horas tecleadas por responsable. Ahora se marcan solas
+   * en el mismo punto que el resto: el cronometro arranca cuando la OT entra EN
+   * PROCESO y para cuando queda CERRADA, que es el tramo que Gerencia quiere
+   * medir.
+   *
+   * Las horas por responsable siguen capturandose: dicen cuanto trabajo cada
+   * persona, que es otra pregunta -- reparto de carga, no duracion de la OT.
+   */
   private applyWorkflowDates(
     workOrder: WorkOrderEntity,
     previousStatus: string | null,
     nextStatus: string,
   ) {
-    if (nextStatus === 'IN_PROGRESS' && !workOrder.started_at) {
-      workOrder.started_at = new Date();
+    const ahora = new Date();
+
+    if (nextStatus === 'IN_PROGRESS') {
+      if (!workOrder.started_at) workOrder.started_at = ahora;
+      if (!workOrder.hora_inicio) workOrder.hora_inicio = ahora;
     }
-    if (nextStatus === 'CLOSED' && !workOrder.closed_at) {
-      workOrder.closed_at = new Date();
-      if (!workOrder.started_at) workOrder.started_at = new Date();
+
+    if (nextStatus === 'CLOSED') {
+      if (!workOrder.closed_at) {
+        workOrder.closed_at = ahora;
+        if (!workOrder.started_at) workOrder.started_at = ahora;
+      }
+      // Si la OT se cierra sin haber pasado por EN PROCESO no hay tramo que
+      // medir: se ancla el inicio al arranque del flujo en vez de dejar la
+      // duracion sin calcular.
+      if (!workOrder.hora_inicio) {
+        workOrder.hora_inicio = workOrder.started_at ?? ahora;
+      }
+      if (!workOrder.hora_fin) workOrder.hora_fin = ahora;
     }
+
     if (previousStatus === 'CLOSED' && nextStatus !== 'CLOSED') {
+      // Reabrir la OT reabre tambien el cronometro: la duracion la fija el
+      // cierre definitivo, no el primero.
       workOrder.closed_at = null;
+      workOrder.hora_fin = null;
     }
   }
 
@@ -26719,22 +27214,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const { producto, bodega } = await this.validateProductoEnBodega(
-      dto.producto_id,
-      dto.bodega_id,
-      manager,
-    );
-    this.assertOilProductAllowedForWorkOrder(workOrder, producto);
-    await this.assertReservableStockAvailable(
+    // Misma regla que en `addConsumo`: reservar es declarar una necesidad, y
+    // el material que la bodega no tiene tambien se puede necesitar. Esta es la
+    // ruta transaccional -- guardar la OT y reservar en un solo paso -- y si no
+    // se relajaba aqui tambien, la pantalla seguia rechazando el material sin
+    // stock justo en el flujo por el que entra una OT nueva.
+    const reservableStock = await this.resolveReservationAvailability(
       dto.producto_id,
       dto.bodega_id,
       dto.cantidad,
       manager,
     );
+    const { producto, bodega } = reservableStock;
+    this.assertOilProductAllowedForWorkOrder(workOrder, producto);
     const costReference = await this.resolveInventoryCostReference(
       dto.producto_id,
       dto.bodega_id,
       manager,
+      { allowMissingStock: true },
     );
     const costoUnitario = this.toNumeric(
       dto.costo_unitario,
@@ -30242,6 +30739,249 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * Destinatarios de la solicitud a matriz: administracion, superadministracion
+   * y gerencia general.
+   *
+   * Es una peticion de compra o traslado, no un aviso operativo: por eso aqui
+   * si entra Gerencia General y no entra bodega, que es quien la origina.
+   */
+  private async resolveMatrizRequestRecipients(): Promise<
+    AlertNotificationRecipient[]
+  > {
+    const users = await this.fetchSecurityUsers();
+    const deduped = new Map<string, AlertNotificationRecipient>();
+    for (const user of users) {
+      if (!this.isActiveSecurityUser(user)) continue;
+      const esGerencia = this.getSecurityUserNormalizedRoles(user).some(
+        (role) => role.includes('GERENTE GENERAL') || role.includes('GERENCIA GENERAL'),
+      );
+      if (
+        !this.isInventoryAdministrator(user) &&
+        !this.isInventorySuperAdministrator(user) &&
+        !esGerencia
+      ) {
+        continue;
+      }
+      const email = this.normalizeEmail(user.email);
+      if (!email || deduped.has(email)) continue;
+      deduped.set(email, {
+        type: this.isInventorySuperAdministrator(user)
+          ? 'SUPER_ADMINISTRATOR'
+          : esGerencia
+            ? 'GENERAL_MANAGER'
+            : 'ADMINISTRATOR',
+        email,
+        userId: user.id,
+        username: user.nameUser,
+        displayName: user.nameSurname ?? user.nameUser,
+        roleName: user.roleName,
+      });
+    }
+    return [...deduped.values()];
+  }
+
+  private buildMatrizRequestEmailHtml(
+    recipient: AlertNotificationRecipient,
+    context: {
+      bodegaLabel: string;
+      productoLabel: string;
+      cantidadSolicitada: number;
+      stockActual: number;
+      workOrderLabel: string;
+      equipmentLabel: string;
+      solicitanteLabel: string;
+    },
+  ) {
+    const workOrdersUrl = this.buildAppModuleUrl('reservas-bodega');
+    return this.buildEnterpriseEmailLayout({
+      moduleLabel: 'Justice KPI · Reservas de bodega',
+      title: 'Solicitud de material a matriz',
+      summary: `${context.bodegaLabel} necesita ${context.productoLabel} y no tiene existencia.`,
+      accent: '#b3261e',
+      contentHtml: `
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
+          Hola <strong>${this.escapeHtml(recipient.displayName || recipient.username || 'usuario')}</strong>. La bodega <strong>${this.escapeHtml(context.bodegaLabel)}</strong> solicita material a matriz: lo necesita para una orden de trabajo y su existencia actual es ${context.stockActual <= 0 ? '<strong>cero</strong>' : context.stockActual.toFixed(2)}.
+        </p>
+        ${this.buildEmailInfoTable([
+          { label: 'Bodega que solicita', value: context.bodegaLabel },
+          { label: 'Material', value: context.productoLabel },
+          {
+            label: 'Cantidad necesaria',
+            value: context.cantidadSolicitada.toFixed(2),
+          },
+          {
+            label: 'Stock actual en la bodega',
+            value:
+              context.stockActual <= 0
+                ? 'Sin stock'
+                : context.stockActual.toFixed(2),
+          },
+          { label: 'Orden de trabajo', value: context.workOrderLabel },
+          { label: 'Equipo', value: context.equipmentLabel },
+          { label: 'Solicitado por', value: context.solicitanteLabel },
+        ])}
+        <p style="margin:18px 0 0;font-size:14px;line-height:1.6;color:#405a70;">
+          Se necesitan <strong>${context.cantidadSolicitada.toFixed(2)}</strong> unidades de ${this.escapeHtml(context.productoLabel)} para poder ejecutar la orden ${this.escapeHtml(context.workOrderLabel)}.
+        </p>
+        ${
+          workOrdersUrl
+            ? `<div style="margin-top:22px;text-align:center;">
+                <a href="${this.escapeHtml(workOrdersUrl)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#b3261e;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">Abrir reservas de bodega</a>
+              </div>`
+            : ''
+        }`,
+      footer:
+        'Correo automático de solicitud de material a matriz. Se envía a administradores, superadministradores y gerencia general.',
+    });
+  }
+
+  private buildMatrizRequestEmailText(context: {
+    bodegaLabel: string;
+    productoLabel: string;
+    cantidadSolicitada: number;
+    stockActual: number;
+    workOrderLabel: string;
+    equipmentLabel: string;
+    solicitanteLabel: string;
+  }) {
+    return [
+      `Solicitud de material a matriz`,
+      `Bodega que solicita: ${context.bodegaLabel}`,
+      `Material: ${context.productoLabel}`,
+      `Cantidad necesaria: ${context.cantidadSolicitada.toFixed(2)}`,
+      `Stock actual en la bodega: ${
+        context.stockActual <= 0 ? 'Sin stock' : context.stockActual.toFixed(2)
+      }`,
+      `Orden de trabajo: ${context.workOrderLabel}`,
+      `Equipo: ${context.equipmentLabel}`,
+      `Solicitado por: ${context.solicitanteLabel}`,
+      '',
+      `Se necesitan ${context.cantidadSolicitada.toFixed(2)} unidades para poder ejecutar esa orden.`,
+    ].join('\n');
+  }
+
+  /**
+   * Pide a matriz el material que la bodega no tiene.
+   *
+   * Lo dispara bodega desde el modulo de reservas cuando una linea se queda en
+   * cero. Solo informa: no mueve stock ni crea documento de compra, porque esa
+   * decision es de administracion.
+   */
+  async requestMaterialFromMatriz(
+    dto: RequestMaterialFromMatrizDto,
+    actor?: RequestActorContext | null,
+  ) {
+    const workOrderId = String(dto.work_order_id || '').trim();
+    const productoId = String(dto.producto_id || '').trim();
+    const bodegaId = String(dto.bodega_id || '').trim();
+    if (!workOrderId || !productoId || !bodegaId) {
+      throw new BadRequestException(
+        'Indica la orden de trabajo, el material y la bodega de la solicitud.',
+      );
+    }
+
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+
+    const { producto, bodega, stock } =
+      await this.resolveProductoBodegaParaReserva(productoId, bodegaId);
+
+    const consumos = await this.consumoRepo.find({
+      where: {
+        work_order_id: workOrderId,
+        producto_id: productoId,
+        bodega_id: bodegaId,
+        is_deleted: false,
+      } as any,
+    });
+    const cantidadSolicitada = consumos.reduce(
+      (acc, row) => acc + this.toNumeric(row.cantidad, 0),
+      0,
+    );
+    if (!(cantidadSolicitada > 0)) {
+      throw new BadRequestException(
+        'Esa orden de trabajo no tiene una reserva registrada para ese material en esa bodega.',
+      );
+    }
+
+    const equipment = workOrder.equipment_id
+      ? await this.equipoRepo.findOne({
+          where: { id: workOrder.equipment_id, is_deleted: false },
+        })
+      : null;
+
+    const context = {
+      bodegaLabel: this.buildBodegaLabel(bodega) ?? bodegaId,
+      productoLabel: this.buildProductoLabel(producto) ?? productoId,
+      cantidadSolicitada,
+      stockActual: this.getOperationalStockAmount(stock),
+      workOrderLabel: [workOrder.code, workOrder.title]
+        .filter(Boolean)
+        .join(' - '),
+      equipmentLabel: equipment
+        ? this.buildEquipmentReportLabel(equipment)
+        : 'Equipo no disponible',
+      solicitanteLabel:
+        this.firstNonEmptyString(actor?.displayName, actor?.username) ??
+        'Bodega',
+    };
+
+    const recipients = await this.resolveMatrizRequestRecipients();
+    const transporter = await this.getAlertMailTransporter();
+    let sent = 0;
+    let failed = 0;
+    if (transporter) {
+      for (const recipient of recipients) {
+        try {
+          await transporter.sendMail({
+            from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+            to: recipient.email,
+            subject: `[Inventario] ${context.bodegaLabel} solicita material a matriz · OT ${workOrder.code}`,
+            html: this.buildMatrizRequestEmailHtml(recipient, context),
+            text: this.buildMatrizRequestEmailText(context),
+          });
+          sent += 1;
+        } catch (error: any) {
+          failed += 1;
+          this.logger.warn(
+            `[MatrizRequestEmail:${workOrder.id}] Fallo envio a ${recipient.email}: ${error?.message ?? 'desconocido'}`,
+          );
+        }
+      }
+    } else {
+      this.logger.warn(
+        `[MatrizRequestEmail:${workOrder.id}] SMTP no configurado; destinatarios resueltos=${recipients.length}.`,
+      );
+    }
+
+    await this.writeSecurityLog({
+      typeLog: 'SOLICITUD_MATERIAL_MATRIZ',
+      description: `[WO:${workOrder.id}] ${context.bodegaLabel} solicita ${cantidadSolicitada} de ${context.productoLabel}; destinatarios=${recipients.length}, exitosos=${sent}, fallidos=${failed}`,
+      createdBy: this.firstNonEmptyString(actor?.username, actor?.userId),
+    });
+
+    return this.wrap(
+      {
+        work_order_id: workOrder.id,
+        work_order_code: workOrder.code,
+        producto_id: productoId,
+        bodega_id: bodegaId,
+        cantidad_solicitada: cantidadSolicitada,
+        stock_actual: context.stockActual,
+        destinatarios: recipients.length,
+        enviados: sent,
+        fallidos: failed,
+        smtp_configurado: Boolean(transporter),
+      },
+      sent > 0
+        ? `Solicitud enviada a ${sent} destinatario(s) de matriz.`
+        : 'No se pudo enviar la solicitud de material a matriz.',
+    );
+  }
+
   async listWorkOrderReservations(
     query: WorkOrderReservationsQueryDto,
     sucursalId?: string | null,
@@ -30338,6 +31078,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { entrega_id: In(entregaIds) } as any,
         })
       : [];
+
+    // Existencia actual por material y bodega: es lo que decide si la fila
+    // necesita el boton de pedir material a matriz.
+    const stockMap = await this.buildReservationStockMap(
+      reservas.map((row) => ({
+        producto_id: String(row.producto_id || ''),
+        bodega_id: String(row.bodega_id || ''),
+      })),
+    );
     const entregaWorkOrderMap = new Map(
       entregas.map((row) => [
         String(row.id || '').trim(),
@@ -30464,6 +31213,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         cantidad_pendiente: pendingQty,
         estado: estadoNormalizado,
         reserva_activa: reservationActive,
+        stock_actual: stockMap.get(`${groupProductoId}|${groupBodegaId}`) ?? 0,
+        // La bodega no tiene el material: la OT lo necesita igual y hay que
+        // pedirlo a matriz.
+        sin_stock_en_bodega:
+          (stockMap.get(`${groupProductoId}|${groupBodegaId}`) ?? 0) <= 0,
         observacion_reserva: consumoObservationMap.get(key) ?? null,
         observacion_menor_uso_reserva: closeShortfallObservation,
       };
@@ -30564,14 +31318,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('La bodega es obligatoria para registrar el consumo.');
     }
 
-    const { producto, bodega } = await this.validateProductoEnBodega(dto.producto_id, dto.bodega_id);
-    this.assertOilProductAllowedForWorkOrder(workOrder, producto);
-    const reservableStock = await this.assertReservableStockAvailable(
+    // La reserva admite material que la bodega no tiene: reservar es declarar
+    // una necesidad, no mover stock. Lo que falte viaja en el correo de reserva
+    // para que bodega y administracion lo vean, y la salida real sigue validando
+    // la existencia -- ahi si no se puede entregar lo que no hay.
+    const reservableStock = await this.resolveReservationAvailability(
       dto.producto_id,
       dto.bodega_id,
       dto.cantidad,
     );
-    const costReference = await this.resolveInventoryCostReference(dto.producto_id, dto.bodega_id);
+    const { producto, bodega } = reservableStock;
+    this.assertOilProductAllowedForWorkOrder(workOrder, producto);
+    const costReference = await this.resolveInventoryCostReference(
+      dto.producto_id,
+      dto.bodega_id,
+      undefined,
+      { allowMissingStock: true },
+    );
     const costoUnitario = this.toNumeric(dto.costo_unitario, costReference.costo_unitario);
     const subtotal = dto.cantidad * costoUnitario;
     const saved = await this.consumoRepo.save(
@@ -31026,6 +31789,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: workOrderId,
         is_deleted: false,
       });
+      this.assertCanRegisterMaterialIssue(actor);
       await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
       await this.assertWorkOrderNotBlockedByActiveAnnex(
         workOrder,

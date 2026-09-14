@@ -1133,6 +1133,72 @@ describe('KpiMaintenanceService alerts', () => {
     expect(result).not.toHaveProperty('horometro_equipo_referencia');
   });
 
+  it('la duración de la OT se mide de EN PROCESO a CERRADA', () => {
+    // Las horas de la OT salían de un número tecleado a mano por responsable.
+    // Ahora el cronómetro lo lleva el propio flujo.
+    const workOrder: any = {};
+
+    (service as any).applyWorkflowDates(workOrder, 'PLANNED', 'IN_PROGRESS');
+    expect(workOrder.hora_inicio).toBeInstanceOf(Date);
+    expect(workOrder.hora_fin).toBeUndefined();
+
+    const inicio = workOrder.hora_inicio;
+    (service as any).applyWorkflowDates(workOrder, 'IN_PROGRESS', 'CLOSED');
+    expect(workOrder.hora_fin).toBeInstanceOf(Date);
+    // Pasar por EN PROCESO dos veces no reinicia el arranque.
+    expect(workOrder.hora_inicio).toBe(inicio);
+
+    const horas = (service as any).resolveWorkOrderElapsedHours(workOrder);
+    expect(horas).not.toBeNull();
+    expect(horas).toBeGreaterThanOrEqual(0);
+  });
+
+  it('reabrir una OT cerrada vuelve a abrir el cronómetro', () => {
+    const workOrder: any = {};
+    (service as any).applyWorkflowDates(workOrder, 'PLANNED', 'IN_PROGRESS');
+    (service as any).applyWorkflowDates(workOrder, 'IN_PROGRESS', 'CLOSED');
+    expect(workOrder.hora_fin).toBeInstanceOf(Date);
+
+    // La duración la fija el cierre definitivo, no el primero.
+    (service as any).applyWorkflowDates(workOrder, 'CLOSED', 'IN_PROGRESS');
+    expect(workOrder.hora_fin).toBeNull();
+    expect(workOrder.closed_at).toBeNull();
+    expect((service as any).resolveWorkOrderElapsedHours(workOrder)).toBeNull();
+  });
+
+  it('una OT que se cierra sin pasar por EN PROCESO igual deja duración medible', () => {
+    const workOrder: any = {};
+    (service as any).applyWorkflowDates(workOrder, 'PLANNED', 'CLOSED');
+    expect(workOrder.hora_inicio).toBeInstanceOf(Date);
+    expect(workOrder.hora_fin).toBeInstanceOf(Date);
+    expect((service as any).resolveWorkOrderElapsedHours(workOrder)).not.toBeNull();
+  });
+
+  it('la salida de material solo la registran bodega y los perfiles administrativos', () => {
+    const permitidos = [
+      'BODEGA',
+      'Bodeguero',
+      'ADMINISTRADOR',
+      'Super Administrador',
+      'GERENTE GENERAL',
+    ];
+    for (const rol of permitidos) {
+      expect((service as any).canRegisterMaterialIssue(rol)).toBe(true);
+      expect(() =>
+        (service as any).assertCanRegisterMaterialIssue({ roleName: rol }),
+      ).not.toThrow();
+    }
+
+    // Quien levanta la OT reserva el material, pero no lo saca.
+    const rechazados = ['OPERADOR', 'SUPERVISOR', 'TECNICO', '', null];
+    for (const rol of rechazados) {
+      expect((service as any).canRegisterMaterialIssue(rol)).toBe(false);
+      expect(() =>
+        (service as any).assertCanRegisterMaterialIssue({ roleName: rol }),
+      ).toThrow(/solo la puede registrar/i);
+    }
+  });
+
   it('al leer, el horómetro anterior es el que guardó la OT y no la lectura de hoy', () => {
     // El equipo ya va por 15286 porque siguió trabajando con OT posteriores;
     // esta OT cerró con 15226 -> 15228 y así tiene que releerse.
@@ -3453,7 +3519,25 @@ describe('KpiMaintenanceService work orders', () => {
         bodega_label: 'BOD-001 - Principal',
         sucursal_id: 'sucursal-1',
         cantidad_reservada: 5,
+        stock_actual: 12,
         observacion: 'Entrega para turno nocturno',
+      },
+      {
+        work_order_id: 'wo-1',
+        work_order_code: 'OT-A00025',
+        work_order_title: 'Mantenimiento preventivo',
+        equipment_label: 'EQ-001 - Generador (CAT 500)',
+        requester_labels: ['Operador Uno', 'Supervisor Dos'],
+        producto_id: 'producto-2',
+        producto_label: 'MAT-002-Filtro de aire',
+        bodega_id: 'bodega-1',
+        bodega_label: 'BOD-001 - Principal',
+        sucursal_id: 'sucursal-1',
+        cantidad_reservada: 3,
+        // La bodega no lo tiene: se reserva igual para que la falta quede
+        // registrada y el correo la informe.
+        stock_actual: 0,
+        observacion: null,
       },
     ];
 
@@ -3472,10 +3556,16 @@ describe('KpiMaintenanceService work orders', () => {
     expect(html).toContain('EQ-001 - Generador (CAT 500)');
     expect(html).toContain('Operador Uno, Supervisor Dos');
     expect(html).toContain('MAT-001-Aceite (15W40)');
+    // Lo solicitado frente a lo que la bodega tiene hoy.
+    expect(html).toContain('Stock actual en bodega');
+    expect(html).toContain('12.00');
+    expect(html).toContain('SIN STOCK');
     expect(html).toContain(
       'https://justicecompany-ec.com/app/work-orders',
     );
     expect(text).toContain('verificar el stock');
+    expect(text).toContain('solicitado 5.00 | stock actual 12.00');
+    expect(text).toContain('solicitado 3.00 | stock actual SIN STOCK');
   });
 
   it('redirige las alertas al módulo que corresponde', () => {

@@ -1104,6 +1104,25 @@ export class WorkOrderReservationsQueryDto {
   search?: string;
 }
 
+/**
+ * Solicitud de material a matriz desde el modulo de reservas de bodega.
+ *
+ * Identifica la linea de reserva por su triple clave; la cantidad no viaja en
+ * el cuerpo a proposito: la toma el servidor de los consumos de la OT para que
+ * nadie pueda pedir una cifra distinta de la que la orden necesita.
+ */
+export class RequestMaterialFromMatrizDto {
+  @ApiProperty({ description: 'ID de la orden de trabajo', format: 'uuid' })
+  @IsUUID()
+  work_order_id: string;
+  @ApiProperty({ description: 'ID del material solicitado', format: 'uuid' })
+  @IsUUID()
+  producto_id: string;
+  @ApiProperty({ description: 'ID de la bodega que solicita', format: 'uuid' })
+  @IsUUID()
+  bodega_id: string;
+}
+
 export class WorkOrderQueryDto {
   @ApiPropertyOptional({ description: 'ID del equipo', format: 'uuid' })
   @IsOptional()

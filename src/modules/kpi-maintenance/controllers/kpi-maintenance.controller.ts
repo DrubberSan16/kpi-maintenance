@@ -72,6 +72,7 @@ import {
   UpdateProgramacionDto,
   UpdateCronogramaSemanalDto,
   WorkOrderQueryDto,
+  RequestMaterialFromMatrizDto,
   WorkOrderReservationsQueryDto,
   CreateEquipoTipoDto,
   AnnulWorkOrderDto,
@@ -1835,6 +1836,21 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Solicitar a matriz un material que la bodega no tiene',
+    description:
+      'Notifica a administradores, superadministradores y gerencia general que la bodega necesita ese material para una OT. La cantidad la toma el servidor de la reserva: no viaja en el cuerpo.',
+  })
+  @ApiBody({ type: RequestMaterialFromMatrizDto, required: true })
+  @Post('work-orders/reservations/request-matriz')
+  requestMaterialFromMatriz(
+    @Body() dto: RequestMaterialFromMatrizDto,
+    @Req() req: any,
+  ) {
+    return this.service.requestMaterialFromMatriz(dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Obtener orden de trabajo por ID' })
   @ApiParam({
     name: 'id',
@@ -2380,6 +2396,22 @@ export class KpiMaintenanceController {
     @Req() req: any,
   ) {
     return this.service.issueMaterials(id, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Informar por correo que la salida de material ya se realizo',
+    description:
+      'Notifica a quien genero la OT, administradores y superadministradores el detalle de lo reservado frente a lo que salio. Solo lo puede disparar Bodega, Administracion, Super Administracion o Gerencia General.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @Post('work-orders/:id/notify-material-issue')
+  notifyMaterialIssue(@Param('id') id: string, @Req() req: any) {
+    return this.service.notifyWorkOrderMaterialIssue(id, getRequestActor(req));
   }
 
   @ApiTags('Work Orders')
