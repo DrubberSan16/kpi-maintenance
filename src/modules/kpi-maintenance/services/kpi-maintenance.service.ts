@@ -16877,16 +16877,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    * catalogo tiene los tipos escritos de varias formas y crear uno nuevo no
    * puede obligar a tocar codigo. Se comparan sin tildes por el mismo motivo.
    */
+  /**
+   * Acota la consulta de equipos al grupo que pide la pantalla.
+   *
+   * Hay tres entradas de menu sobre la MISMA lista de equipos: Unidades de
+   * Generacion, Proyectos y Otros Equipos. Lo unico que las distingue es este
+   * grupo.
+   *
+   * El grupo se resuelve por el NOMBRE del tipo, no por un id fijo: los tipos
+   * se dan de alta desde su maestro y un id quemado aqui se romperia en cuanto
+   * alguien creara el suyo.
+   */
   private applyEquipoGrupoFilter(
     qb: SelectQueryBuilder<EquipoEntity>,
     grupo?: string | null,
   ) {
     const normalizado = String(grupo || '')
       .normalize('NFD')
-      .replace(/[̀-ͯ]/g, '')
+      .replace(/[\u0300-\u036f]/g, '')
       .trim()
       .toUpperCase();
-    if (normalizado !== 'GENERACION' && normalizado !== 'RESTO') return;
+    if (!['GENERACION', 'PROYECTOS', 'RESTO'].includes(normalizado)) return;
 
     const tiposDeGeneracion = `(
       SELECT tipo.id
@@ -16898,14 +16909,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         )
     )`;
 
+    const tiposDeProyecto = `(
+      SELECT tipo.id
+      FROM kpi_maintenance.tb_equipo_tipo tipo
+      WHERE COALESCE(tipo.is_deleted, false) = false
+        AND TRANSLATE(UPPER(COALESCE(tipo.nombre, '')), 'ÁÉÍÓÚÜÑ', 'AEIOUUN') LIKE '%PROYECTO%'
+    )`;
+
     if (normalizado === 'GENERACION') {
       qb.andWhere(`e.equipo_tipo_id IN ${tiposDeGeneracion}`);
       return;
     }
-    // El equipo sin tipo asignado cuenta como resto: no es una unidad de
-    // generacion mientras nadie diga lo contrario.
+
+    if (normalizado === 'PROYECTOS') {
+      qb.andWhere(`e.equipo_tipo_id IN ${tiposDeProyecto}`);
+      return;
+    }
+
+    // RESTO es el complemento de las otras dos: si no excluyera a ambas, los
+    // proyectos apareceria tambien en Otros Equipos, duplicados en el menu.
+    //
+    // El equipo sin tipo cuenta como resto: no es una unidad de generacion ni
+    // un proyecto mientras nadie diga lo contrario.
     qb.andWhere(
-      `(e.equipo_tipo_id IS NULL OR e.equipo_tipo_id NOT IN ${tiposDeGeneracion})`,
+      `(
+        e.equipo_tipo_id IS NULL
+        OR (
+          e.equipo_tipo_id NOT IN ${tiposDeGeneracion}
+          AND e.equipo_tipo_id NOT IN ${tiposDeProyecto}
+        )
+      )`,
     );
   }
 
