@@ -1345,7 +1345,8 @@ describe('KpiMaintenanceService alerts', () => {
       .mockResolvedValue({ data: { accepted: true }, message: 'OK' } as any);
 
     // Por el módulo administrativo de Equipos, que es donde se corrige un dato
-    // mal cargado y queda el motivo en la bitácora.
+    // mal cargado. La fila queda marcada como AJUSTE_DIRECTO para poder
+    // listarla aparte del trabajo real de la máquina.
     await service.updateEquipo(
       'equipo-1',
       { horometro_actual: 90 } as any,
@@ -1360,7 +1361,7 @@ describe('KpiMaintenanceService alerts', () => {
         equipo_id: 'equipo-1',
         horometro_anterior: 90,
         horometro_nuevo: 90,
-        fuente: 'MANUAL_EQUIPOS',
+        fuente: 'AJUSTE_DIRECTO',
         observacion: expect.stringContaining('Correccion manual descendente'),
       }),
     );
@@ -1394,9 +1395,10 @@ describe('KpiMaintenanceService alerts', () => {
     );
   });
 
-  it('el control de equipos del Dashboard rechaza una lectura que no avanza', async () => {
+  it('el control operativo solo deja bajar el horómetro a un perfil administrativo', async () => {
     // Es un contador físico: que baje significa que alguien tecleó mal, y ese
-    // error se propaga al par "anterior -> actual" de todos los informes.
+    // error se propaga al par "anterior -> actual" de todos los informes. Por
+    // eso bajarlo es un acto administrativo, y ademas hay que decir por qué.
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',
       codigo: 'EQ-1',
@@ -1407,12 +1409,29 @@ describe('KpiMaintenanceService alerts', () => {
 
     await expect(
       service.updateEquipoHorometro('equipo-1', { horometro_actual: 90 }, null),
-    ).rejects.toThrow(/debe ser mayor que la lectura vigente/i);
+    ).rejects.toThrow(ForbiddenException);
 
-    // Repetir la misma lectura tampoco avanza.
+    await expect(
+      service.updateEquipoHorometro(
+        'equipo-1',
+        { horometro_actual: 90 },
+        { roleName: 'Supervisor' },
+      ),
+    ).rejects.toThrow(/solo administrador y super administrador/i);
+
+    // Con el perfil correcto pero sin motivo tampoco pasa.
+    await expect(
+      service.updateEquipoHorometro(
+        'equipo-1',
+        { horometro_actual: 90 },
+        { roleName: 'Administrador' },
+      ),
+    ).rejects.toThrow(/motivo/i);
+
+    // Repetir la misma lectura no es un ajuste: no hay nada que guardar.
     await expect(
       service.updateEquipoHorometro('equipo-1', { horometro_actual: 125 }, null),
-    ).rejects.toThrow(/debe ser mayor que la lectura vigente/i);
+    ).rejects.toThrow(/ya esta en 125/i);
 
     expect(updateSpy).not.toHaveBeenCalled();
   });

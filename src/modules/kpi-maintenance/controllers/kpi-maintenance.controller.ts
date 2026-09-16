@@ -369,6 +369,27 @@ export class KpiMaintenanceController {
   }
   @ApiTags('Equipos')
   @ApiOperation({
+    summary: 'Listar historial de lecturas de horómetro de un equipo',
+    description:
+      'Con fuente=AJUSTE_DIRECTO devuelve solo las correcciones manuales hacia atrás, que son las que un informe de ajustes necesita.',
+  })
+  @ApiParam({ name: 'id', description: 'ID del equipo', required: true })
+  @ApiQuery({
+    name: 'fuente',
+    required: false,
+    description: 'AJUSTE_DIRECTO, MANUAL_EQUIPOS u ORDEN_TRABAJO',
+  })
+  @Get('equipos/:id/horometro/historial')
+  listEquipoHorometroHistorial(
+    @Param('id') id: string,
+    @Query() range: DateRangeDto,
+    @Query('fuente') fuente?: string,
+  ) {
+    return this.service.listEquipoHorometroHistorial(id, range, fuente);
+  }
+
+  @ApiTags('Equipos')
+  @ApiOperation({
     summary: 'Listar historial de estado de funcionamiento de un equipo',
   })
   @ApiParam({ name: 'id', description: 'ID del equipo', required: true })

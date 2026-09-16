@@ -8796,6 +8796,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await repo.save(rows);
   }
 
+  /**
+   * Quien puede registrar un horometro MENOR que la lectura vigente.
+   *
+   * El horometro es un contador fisico: solo avanza. Que baje casi siempre es
+   * un error de tecleo, y ese error contamina el par "anterior -> actual" de
+   * todos los informes. Corregirlo hacia atras es un acto administrativo, y
+   * exige ademas dejar dicho por que.
+   */
+  private puedeRegistrarHorometroMenor(roleName?: string | null): boolean {
+    const normalized = String(roleName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toUpperCase();
+    return [
+      'ADMINISTRADOR',
+      'ADMINISTRADOR DEL SISTEMA',
+      'ADMIN',
+      'SUPER ADMINISTRADOR',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+      'SUPER_ADMIN',
+    ].includes(normalized);
+  }
+
   private isSuperAdministratorRoleName(roleName?: string): boolean {
     const normalized = String(roleName || '')
       .normalize('NFD')
@@ -17427,6 +17453,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /**
+   * Observacion que queda en el historial de lecturas.
+   *
+   * Cuando la lectura baja, el motivo que escribio quien la corrigio es lo
+   * unico que explica el salto meses despues: va primero y textual.
+   */
+  /**
+   * De donde sale una lectura del historial de horometro.
+   *
+   * `AJUSTE_DIRECTO` es la correccion que alguien hace a mano sobre el equipo
+   * para bajar el contador: es el unico movimiento que no refleja trabajo real
+   * de la maquina, y por eso se separa del resto para poder listarlo en los
+   * informes. `ORDEN_TRABAJO` se queda como esta aunque corrija hacia atras: la
+   * lectura pertenece a la OT que la registro.
+   */
+  private readonly HOROMETRO_FUENTE_AJUSTE_DIRECTO = 'AJUSTE_DIRECTO';
+  private readonly HOROMETRO_FUENTE_MANUAL = 'MANUAL_EQUIPOS';
+
+  private buildHorometerAdjustmentNote(
+    isBackwardCorrection: boolean,
+    previousHorometer: number,
+    motivo?: string | null,
+  ) {
+    const base = isBackwardCorrection
+      ? `Correccion manual descendente desde ${previousHorometer}; la nueva lectura se establece como base anterior.`
+      : 'Actualizacion manual desde el modulo Equipos.';
+    return motivo ? `${motivo} · ${base}` : base;
+  }
+
   private resolveHorometerActor(actor?: RequestActorContext | null, fallback?: unknown) {
     const rawId = this.firstNonEmptyString(actor?.userId);
     return {
@@ -17566,6 +17621,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const {
       componentes: _componentes,
       horometro_actual: _horometroActual,
+      horometro_motivo: horometroMotivo,
       ...equipoPayload
     } = dto;
     const serviceSchedule = this.resolveEquipmentServiceSchedule(dto, current);
@@ -17647,10 +17703,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             changed_at: savedEquipo.fecha_ultima_lectura ?? new Date(),
             changed_by_id: actorSnapshot.id,
             changed_by: actorSnapshot.label,
-            fuente: 'MANUAL_EQUIPOS',
-            observacion: isBackwardCorrection
-              ? `Correccion manual descendente desde ${previousHorometer}; la nueva lectura se establece como base anterior.`
-              : 'Actualizacion manual desde el modulo Equipos.',
+            fuente: isBackwardCorrection
+              ? this.HOROMETRO_FUENTE_AJUSTE_DIRECTO
+              : this.HOROMETRO_FUENTE_MANUAL,
+            observacion: this.buildHorometerAdjustmentNote(
+              isBackwardCorrection,
+              previousHorometer,
+              this.trimNullableText(horometroMotivo),
+            ),
           }),
         );
       }
@@ -17670,19 +17730,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(saved, 'Equipo actualizado');
   }
   /**
-   * Lectura manual del horometro desde el control de equipos del Dashboard.
+   * Lectura manual del horometro desde el control operativo del Dashboard.
    *
-   * Aqui la lectura solo puede avanzar. Es un contador fisico: que baje
-   * significa que alguien se equivoco tecleando, y ese error se propaga al par
-   * "anterior -> actual" de todos los informes que lo leen.
+   * El horometro es un contador fisico: en el uso diario solo avanza. Que baje
+   * casi siempre significa que alguien se equivoco tecleando, y ese error se
+   * propaga al par "anterior -> actual" de todos los informes que lo leen.
    *
-   * La correccion descendente sigue existiendo, pero por el modulo de Equipos,
-   * que es administrativo y deja rastro con su motivo. Este control es de uso
-   * diario y no es el sitio para corregir un dato mal cargado.
+   * Bajarlo esta permitido, pero como lo que es: una correccion administrativa.
+   * Solo Administrador y Super Administrador pueden hacerla, tienen que decir
+   * por que, y la fila queda marcada en el historial como AJUSTE_DIRECTO para
+   * poder listarla aparte del trabajo real de la maquina.
    */
   async updateEquipoHorometro(
     id: string,
-    dto: { horometro_actual: number },
+    dto: { horometro_actual: number; motivo?: string | null },
     actor?: RequestActorContext | null,
   ) {
     const current = await this.findEquipoOrFail(id);
@@ -17692,15 +17753,37 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (lecturaNueva == null) {
       throw new BadRequestException('El horometro actual no es valido.');
     }
-    if (lecturaVigente != null && lecturaNueva <= lecturaVigente) {
+
+    const motivo = this.trimNullableText(dto.motivo);
+
+    if (lecturaVigente != null && lecturaNueva === lecturaVigente) {
       throw new BadRequestException(
-        `El horometro debe ser mayor que la lectura vigente (${lecturaVigente}). Se recibio ${lecturaNueva}.`,
+        `El horometro ya esta en ${lecturaVigente}: no hay nada que actualizar.`,
       );
+    }
+
+    // Bajar la lectura es una correccion administrativa: se valida el rol aqui
+    // y no solo escondiendo el campo, porque ocultar un control no protege el
+    // endpoint.
+    if (lecturaVigente != null && lecturaNueva < lecturaVigente) {
+      if (!this.puedeRegistrarHorometroMenor(actor?.roleName)) {
+        throw new ForbiddenException(
+          `El horometro debe ser mayor que la lectura vigente (${lecturaVigente}). Solo Administrador y Super Administrador pueden registrar una lectura menor.`,
+        );
+      }
+      if (!motivo) {
+        throw new BadRequestException(
+          'Debes indicar el motivo por el que se registra un horometro menor que la lectura vigente.',
+        );
+      }
     }
 
     return this.updateEquipo(
       id,
-      { horometro_actual: lecturaNueva } as UpdateEquipoDto,
+      {
+        horometro_actual: lecturaNueva,
+        ...(motivo ? { horometro_motivo: motivo } : {}),
+      } as UpdateEquipoDto,
       actor,
     );
   }
@@ -17801,6 +17884,39 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'Historial de estado de funcionamiento listado',
     );
   }
+  /**
+   * Historial de lecturas de horometro de un equipo.
+   *
+   * Existia solo para escribir; sin poder leerlo, marcar los ajustes directos
+   * no serviria de nada. `fuente` permite pedir unicamente esos ajustes.
+   */
+  async listEquipoHorometroHistorial(
+    equipoId: string,
+    range: DateRangeDto,
+    fuente?: string | null,
+  ) {
+    await this.findEquipoOrFail(equipoId);
+    const qb = this.equipoHorometroHistorialRepo
+      .createQueryBuilder('h')
+      .where('h.equipo_id = :equipoId', { equipoId });
+    if (range?.from) qb.andWhere('h.changed_at >= :from', { from: range.from });
+    if (range?.to) qb.andWhere('h.changed_at <= :to', { to: range.to });
+    const fuenteFiltro = this.trimNullableText(fuente)?.toUpperCase() ?? null;
+    if (fuenteFiltro) {
+      qb.andWhere('UPPER(h.fuente) = :fuente', { fuente: fuenteFiltro });
+    }
+    const rows = await qb.orderBy('h.changed_at', 'DESC').getMany();
+    return this.wrap(
+      rows.map((row) => ({
+        ...row,
+        es_ajuste_directo:
+          String(row.fuente || '').toUpperCase() ===
+          this.HOROMETRO_FUENTE_AJUSTE_DIRECTO,
+      })),
+      'Historial de horometro listado',
+    );
+  }
+
   async deleteEquipo(id: string) {
     const e = await this.findEquipoOrFail(id);
     e.is_deleted = true;

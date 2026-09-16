@@ -295,7 +295,18 @@ export class CreateEquipoDto {
   componentes?: CreateEquipoComponenteInlineDto[];
 }
 
-export class UpdateEquipoDto extends CreateEquipoDto {}
+export class UpdateEquipoDto extends CreateEquipoDto {
+  /**
+   * Motivo del ajuste del horometro. No es una columna del equipo: viaja hasta
+   * la observacion del historial de lecturas.
+   */
+  @ApiPropertyOptional({
+    description: 'Motivo del ajuste del horómetro, guardado en su historial',
+  })
+  @IsOptional()
+  @IsString()
+  horometro_motivo?: string;
+}
 
 export class UpdateEquipoEstadoFuncionamientoDto {
   @ApiProperty({
@@ -319,6 +330,13 @@ export class UpdateEquipoHorometroDto {
   @IsNumber()
   @Min(0)
   horometro_actual: number;
+  @ApiPropertyOptional({
+    description:
+      'Motivo del ajuste. Obligatorio cuando la lectura baja respecto de la vigente, y reservado a Administrador y Super Administrador.',
+  })
+  @IsOptional()
+  @IsString()
+  motivo?: string;
 }
 
 export class CreateEquipoTipoDto {
