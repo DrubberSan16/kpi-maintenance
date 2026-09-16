@@ -14,6 +14,7 @@ import {
   CreateConsumoDto,
   IssueMaterialsDto,
   UploadWorkOrderAdjuntoDto,
+  WorkOrderProyectoPersonalDto,
 } from '../dto';
 import {
   CreateWorkOrderTareaDto,
@@ -154,6 +155,34 @@ export class SaveWorkOrderHeaderDto {
   @IsOptional()
   @IsUUID()
   purchase_request_id?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: ubicaciones donde se ejecuta',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  proyecto_ubicacion_ids?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: bodegas donde se ejecuta',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  proyecto_bodega_ids?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: personal eventual contratado',
+    type: [WorkOrderProyectoPersonalDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => WorkOrderProyectoPersonalDto)
+  proyecto_personal?: WorkOrderProyectoPersonalDto[];
 
   @ApiPropertyOptional({ description: 'Payload adicional de cabecera' })
   @IsOptional()

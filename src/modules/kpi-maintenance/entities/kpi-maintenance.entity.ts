@@ -423,6 +423,19 @@ export class ProcedimientoPlantillaEntity {
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) herramientas: string[];
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) materiales: string[];
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) responsabilidades: string[];
+  /**
+   * Los cinco campos siguientes solo los usa una plantilla de tipo PROYECTO:
+   * son la cabecera del documento de proyecto que la OT carga por defecto. Los
+   * materiales no estan aqui a proposito: en un proyecto son variables y se
+   * capturan en la propia OT.
+   */
+  @Column({ type: 'text', nullable: true }) empresa?: string | null;
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+  objetivos_especificos: string[];
+  @Column({ type: 'text', nullable: true }) metodologia?: string | null;
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) alcance: string[];
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+  personal_requerido: Array<Record<string, unknown>>;
   @Column({ default: 'ACTIVE' }) status: string;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' }) created_at: Date;
   @Column({ type: 'timestamp without time zone', default: () => 'now()' }) updated_at: Date;
@@ -1185,5 +1198,71 @@ export class InventorySucursalEntity {
   @Column({ type: 'varchar', length: 30, nullable: true }) codigo?: string | null;
   @Column({ type: 'varchar', length: 150, nullable: true }) nombre?: string | null;
   @Column({ type: 'text', nullable: true }) status?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+/**
+ * Ubicaciones donde se ejecuta una OT de Proyecto.
+ *
+ * Una OT normal apunta a un equipo; una de Proyecto no tiene equipo y en su
+ * lugar se reparte entre una o varias ubicaciones y bodegas.
+ */
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_proyecto_ubicacion' })
+export class WorkOrderProyectoUbicacionEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) work_order_id: string;
+  @Column({ type: 'uuid' }) location_id: string;
+  @Column({ type: 'integer', default: 1 }) orden: number;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+/** Bodegas donde se ejecuta una OT de Proyecto. */
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_proyecto_bodega' })
+export class WorkOrderProyectoBodegaEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) work_order_id: string;
+  @Column({ type: 'uuid' }) bodega_id: string;
+  @Column({ type: 'integer', default: 1 }) orden: number;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
+  @Column({ default: false }) is_deleted: boolean;
+}
+
+/**
+ * Personal eventual contratado para una OT de Proyecto.
+ *
+ * Es la tabla "Contratacion de personal" del documento: una fila por persona,
+ * con su cargo, los dias trabajados y el valor del dia.
+ */
+@Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_proyecto_personal' })
+export class WorkOrderProyectoPersonalEntity {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) work_order_id: string;
+  @Column({ type: 'integer', default: 1 }) orden: number;
+  @Column({ type: 'text' }) rol: string;
+  @Column({ type: 'text', nullable: true }) nombre?: string | null;
+  @Column('numeric', { precision: 10, scale: 2, default: 0 })
+  dias_laborados: number;
+  @Column({ type: 'uuid', nullable: true }) location_id?: string | null;
+  @Column({ type: 'text', nullable: true }) ubicacion_texto?: string | null;
+  @Column('numeric', { precision: 18, scale: 2, default: 0 }) valor_dia: number;
+  @Column({ type: 'date', nullable: true }) fecha?: string | null;
+  @Column({ type: 'text', nullable: true }) observacion?: string | null;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  created_at: Date;
+  @Column({ type: 'timestamp without time zone', default: () => 'now()' })
+  updated_at: Date;
+  @Column({ type: 'text', nullable: true }) created_by?: string | null;
+  @Column({ type: 'text', nullable: true }) updated_by?: string | null;
   @Column({ default: false }) is_deleted: boolean;
 }

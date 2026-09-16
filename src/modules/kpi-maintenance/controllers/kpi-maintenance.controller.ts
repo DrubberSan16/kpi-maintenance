@@ -1316,9 +1316,21 @@ export class KpiMaintenanceController {
 
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Listar plantillas de procedimientos documentales' })
+  @ApiQuery({
+    name: 'tipo_proceso',
+    required: false,
+    description:
+      'Filtra por tipo de proceso. La pantalla de OT Proyecto pide PROYECTO.',
+  })
   @Get('inteligencia/procedimientos')
-  listProcedimientosPlantilla(@Req() req: any) {
-    return this.service.listProcedimientosPlantilla(getSucursalScopeId(req));
+  listProcedimientosPlantilla(
+    @Req() req: any,
+    @Query('tipo_proceso') tipoProceso?: string,
+  ) {
+    return this.service.listProcedimientosPlantilla(
+      getSucursalScopeId(req),
+      tipoProceso,
+    );
   }
 
   @ApiTags('Inteligencia Operativa')

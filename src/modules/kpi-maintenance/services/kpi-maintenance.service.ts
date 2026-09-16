@@ -89,6 +89,9 @@ import {
   WorkOrderDesechoDetEntity,
   WorkOrderDesechoEntity,
   WorkOrderEntity,
+  WorkOrderProyectoBodegaEntity,
+  WorkOrderProyectoPersonalEntity,
+  WorkOrderProyectoUbicacionEntity,
   WorkOrderTareaEntity,
 } from '../entities/kpi-maintenance.entity';
 import { MaterialPriceTimeline } from '../../../common/pricing/material-price-history.util';
@@ -880,7 +883,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     'PREDICTIVO',
     'CEBADO',
     'INSPECCION',
+    'PROYECTO',
   ] as const;
+  /** Tipo de proceso que marca una plantilla como plantilla de proyecto. */
+  private readonly PROCEDIMIENTO_TIPO_PROCESO_PROYECTO = 'PROYECTO';
   private readonly PLAN_MAINTENANCE_TYPE_VALUES = [
     'CORRECTIVO',
     'PREVENTIVO',
@@ -1041,6 +1047,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     private readonly woTareaRepo: Repository<WorkOrderTareaEntity>,
     @InjectRepository(WorkOrderAdjuntoEntity)
     private readonly woAdjuntoRepo: Repository<WorkOrderAdjuntoEntity>,
+    @InjectRepository(WorkOrderProyectoUbicacionEntity)
+    private readonly woProyectoUbicacionRepo: Repository<WorkOrderProyectoUbicacionEntity>,
+    @InjectRepository(WorkOrderProyectoBodegaEntity)
+    private readonly woProyectoBodegaRepo: Repository<WorkOrderProyectoBodegaEntity>,
+    @InjectRepository(WorkOrderProyectoPersonalEntity)
+    private readonly woProyectoPersonalRepo: Repository<WorkOrderProyectoPersonalEntity>,
     @InjectRepository(EquipoFuncionamientoHistorialEntity)
     private readonly equipoFuncionamientoHistorialRepo: Repository<EquipoFuncionamientoHistorialEntity>,
     @InjectRepository(EquipoHorometroHistorialEntity)
@@ -2779,6 +2791,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (normalized === 'PREDICTIVO') return 'Predictivo';
     if (normalized === 'CEBADO') return 'Cebado';
     if (normalized === 'INSPECCION') return 'Inspección';
+    if (normalized === 'PROYECTO') return 'Proyecto';
     return normalized || 'Sin definir';
   }
 
@@ -2829,6 +2842,309 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private requiresOilProductsForMaintenanceKind(value: unknown) {
     return this.normalizeMaintenanceKind(value) === 'CEBADO';
+  }
+
+  // ---------------------------------------------------------------------------
+  // OT de Proyecto
+  //
+  // Una OT de Proyecto no se ejecuta sobre un equipo sino sobre ubicaciones y
+  // bodegas, y contrata personal eventual que se liquida por dia. Todo lo que
+  // sigue es el soporte de ese caso; el resto del flujo de OT no cambia.
+  // ---------------------------------------------------------------------------
+
+  /** `true` cuando la OT es de tipo Proyecto. */
+  private isProyectoMaintenanceKind(value: unknown) {
+    return this.normalizeMaintenanceKind(value) === 'PROYECTO';
+  }
+
+  private normalizeProcedimientoTipoProceso(value: unknown) {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+  }
+
+  /** `true` cuando la plantilla es de formato proyecto. */
+  private isProyectoProcedimiento(
+    row?: Pick<ProcedimientoPlantillaEntity, 'tipo_proceso'> | null,
+  ) {
+    return (
+      this.normalizeProcedimientoTipoProceso(row?.tipo_proceso) ===
+      this.PROCEDIMIENTO_TIPO_PROCESO_PROYECTO
+    );
+  }
+
+  private normalizeUuidList(values: unknown) {
+    if (!Array.isArray(values)) return [];
+    return [
+      ...new Set(
+        values
+          .map((value) => String(value ?? '').trim())
+          .filter((value) => value.length > 0),
+      ),
+    ];
+  }
+
+  /**
+   * Una OT de Proyecto tiene que decir donde se ejecuta. Sin ubicacion ni
+   * bodega la orden no se puede liquidar contra ningun sitio, asi que se
+   * rechaza igual que se rechazaria una OT normal sin equipo.
+   */
+  private assertProyectoWorkOrderHasSites(
+    maintenanceKind: unknown,
+    ubicacionIds: string[],
+    bodegaIds: string[],
+  ) {
+    if (!this.isProyectoMaintenanceKind(maintenanceKind)) return;
+    if (!ubicacionIds.length && !bodegaIds.length) {
+      throw new BadRequestException(
+        'Una OT de Proyecto debe indicar al menos una ubicacion o una bodega donde se ejecuta.',
+      );
+    }
+  }
+
+  private async assertProyectoSitesExist(
+    ubicacionIds: string[],
+    bodegaIds: string[],
+  ) {
+    if (ubicacionIds.length) {
+      const found = await this.locationRepo.find({
+        where: { id: In(ubicacionIds), is_deleted: false },
+      });
+      if (found.length !== ubicacionIds.length) {
+        throw new BadRequestException(
+          'Alguna de las ubicaciones indicadas para el proyecto no existe.',
+        );
+      }
+    }
+    if (bodegaIds.length) {
+      const found = await this.bodegaRepo.find({
+        where: { id: In(bodegaIds), is_deleted: false },
+      });
+      if (found.length !== bodegaIds.length) {
+        throw new BadRequestException(
+          'Alguna de las bodegas indicadas para el proyecto no existe.',
+        );
+      }
+    }
+  }
+
+  private normalizeProyectoPersonalRows(rows: unknown) {
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((row, index) => {
+        const source = (row ?? {}) as Record<string, unknown>;
+        const rol = this.trimNullableText(source.rol);
+        if (!rol) return null;
+        const diasLaborados = this.toNumeric(source.dias_laborados, 0);
+        const valorDia = this.toNumeric(source.valor_dia, 0);
+        if (diasLaborados < 0 || valorDia < 0) {
+          throw new BadRequestException(
+            'Los dias laborados y el valor por dia del personal del proyecto no pueden ser negativos.',
+          );
+        }
+        return {
+          orden: Number(source.orden ?? index + 1) || index + 1,
+          rol,
+          nombre: this.trimNullableText(source.nombre),
+          dias_laborados: Number(diasLaborados.toFixed(2)),
+          location_id: this.firstNonEmptyString(source.location_id) ?? null,
+          ubicacion_texto: this.trimNullableText(source.ubicacion_texto),
+          valor_dia: Number(valorDia.toFixed(2)),
+          fecha: this.normalizeProyectoPersonalFecha(source.fecha),
+          observacion: this.trimNullableText(source.observacion),
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
+  }
+
+  /** La columna es `date`: se guarda YYYY-MM-DD, sin hora ni zona. */
+  private normalizeProyectoPersonalFecha(value: unknown) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const isoDate = raw.slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
+      throw new BadRequestException(
+        `La fecha ${raw} del personal del proyecto no es valida.`,
+      );
+    }
+    return isoDate;
+  }
+
+  /**
+   * Reemplaza por completo las ubicaciones, bodegas y personal de la OT.
+   *
+   * Cada bloque se toca solo si el cliente lo envio: un guardado parcial (por
+   * ejemplo el que solo cambia el estado del workflow) no debe vaciar el
+   * detalle que ya estaba guardado.
+   */
+  private async replaceWorkOrderProyectoDetail(
+    manager: EntityManager,
+    workOrderId: string,
+    input: {
+      ubicacionIds?: string[] | null;
+      bodegaIds?: string[] | null;
+      personal?: unknown[] | null;
+    },
+    actor?: RequestActorContext | null,
+  ) {
+    const actorName = this.firstNonEmptyString(actor?.username) ?? null;
+    const now = new Date();
+
+    if (Array.isArray(input.ubicacionIds)) {
+      const repo = manager.getRepository(WorkOrderProyectoUbicacionEntity);
+      await repo.update(
+        { work_order_id: workOrderId, is_deleted: false },
+        { is_deleted: true, updated_at: now, updated_by: actorName },
+      );
+      if (input.ubicacionIds.length) {
+        await repo.save(
+          input.ubicacionIds.map((locationId, index) =>
+            repo.create({
+              work_order_id: workOrderId,
+              location_id: locationId,
+              orden: index + 1,
+              created_by: actorName,
+              updated_by: actorName,
+            }),
+          ),
+        );
+      }
+    }
+
+    if (Array.isArray(input.bodegaIds)) {
+      const repo = manager.getRepository(WorkOrderProyectoBodegaEntity);
+      await repo.update(
+        { work_order_id: workOrderId, is_deleted: false },
+        { is_deleted: true, updated_at: now, updated_by: actorName },
+      );
+      if (input.bodegaIds.length) {
+        await repo.save(
+          input.bodegaIds.map((bodegaId, index) =>
+            repo.create({
+              work_order_id: workOrderId,
+              bodega_id: bodegaId,
+              orden: index + 1,
+              created_by: actorName,
+              updated_by: actorName,
+            }),
+          ),
+        );
+      }
+    }
+
+    if (Array.isArray(input.personal)) {
+      const repo = manager.getRepository(WorkOrderProyectoPersonalEntity);
+      await repo.update(
+        { work_order_id: workOrderId, is_deleted: false },
+        { is_deleted: true, updated_at: now, updated_by: actorName },
+      );
+      const rows = this.normalizeProyectoPersonalRows(input.personal);
+      if (rows.length) {
+        await repo.save(
+          rows.map((row, index) =>
+            repo.create({
+              ...row,
+              work_order_id: workOrderId,
+              orden: row.orden ?? index + 1,
+              created_by: actorName,
+              updated_by: actorName,
+            }),
+          ),
+        );
+      }
+    }
+  }
+
+  /**
+   * Detalle de proyecto listo para la pantalla y para el informe: ids para el
+   * formulario y etiquetas resueltas para leerlo sin pedir los catalogos.
+   */
+  private async loadWorkOrderProyectoDetail(workOrderId: string) {
+    const [ubicaciones, bodegas, personal] = await Promise.all([
+      this.woProyectoUbicacionRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+        order: { orden: 'ASC', created_at: 'ASC' },
+      }),
+      this.woProyectoBodegaRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+        order: { orden: 'ASC', created_at: 'ASC' },
+      }),
+      this.woProyectoPersonalRepo.find({
+        where: { work_order_id: workOrderId, is_deleted: false },
+        order: { orden: 'ASC', created_at: 'ASC' },
+      }),
+    ]);
+
+    const locationIds = [
+      ...new Set([
+        ...ubicaciones.map((row) => row.location_id),
+        ...personal
+          .map((row) => row.location_id)
+          .filter((value): value is string => Boolean(value)),
+      ]),
+    ];
+    const bodegaIds = bodegas.map((row) => row.bodega_id);
+
+    const [locationRows, bodegaRows] = await Promise.all([
+      locationIds.length
+        ? this.locationRepo.find({ where: { id: In(locationIds) } })
+        : Promise.resolve([] as LocationEntity[]),
+      bodegaIds.length
+        ? this.bodegaRepo.find({ where: { id: In(bodegaIds) } })
+        : Promise.resolve([] as BodegaEntity[]),
+    ]);
+    const locationById = new Map(locationRows.map((row) => [row.id, row]));
+    const bodegaById = new Map(bodegaRows.map((row) => [row.id, row]));
+
+    const buildLocationLabel = (locationId?: string | null) => {
+      if (!locationId) return null;
+      const location = locationById.get(locationId);
+      if (!location) return null;
+      const codigo = String(location.codigo || '').trim();
+      const nombre = String(location.nombre || '').trim();
+      if (codigo && nombre) return `${codigo} - ${nombre}`;
+      return nombre || codigo || null;
+    };
+
+    return {
+      proyecto_ubicacion_ids: ubicaciones.map((row) => row.location_id),
+      proyecto_ubicaciones: ubicaciones.map((row) => ({
+        id: row.location_id,
+        codigo: locationById.get(row.location_id)?.codigo ?? null,
+        nombre: locationById.get(row.location_id)?.nombre ?? null,
+        label: buildLocationLabel(row.location_id) ?? row.location_id,
+      })),
+      proyecto_bodega_ids: bodegaIds,
+      proyecto_bodegas: bodegas.map((row) => ({
+        id: row.bodega_id,
+        codigo: bodegaById.get(row.bodega_id)?.codigo ?? null,
+        nombre: bodegaById.get(row.bodega_id)?.nombre ?? null,
+        label:
+          this.buildBodegaLabel(bodegaById.get(row.bodega_id)) ?? row.bodega_id,
+      })),
+      proyecto_personal: personal.map((row) => {
+        const dias = this.toNumeric(row.dias_laborados, 0);
+        const valorDia = this.toNumeric(row.valor_dia, 0);
+        return {
+          id: row.id,
+          orden: row.orden,
+          rol: row.rol,
+          nombre: row.nombre ?? null,
+          dias_laborados: dias,
+          location_id: row.location_id ?? null,
+          ubicacion_label:
+            buildLocationLabel(row.location_id) ?? row.ubicacion_texto ?? null,
+          ubicacion_texto: row.ubicacion_texto ?? null,
+          valor_dia: valorDia,
+          total: Number((dias * valorDia).toFixed(2)),
+          fecha: row.fecha ?? null,
+          observacion: row.observacion ?? null,
+        };
+      }),
+    };
   }
 
   private isOperatorActor(actor?: RequestActorContext | null) {
@@ -8215,6 +8531,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .filter(Boolean);
   }
 
+  /**
+   * Roles a contratar que define una plantilla de proyecto.
+   *
+   * Solo se guarda el cargo, cuantas personas y cuanto se paga por dia; el
+   * nombre de cada persona y los dias reales se capturan en la OT.
+   */
+  private normalizeProcedimientoPersonalRequerido(rows: unknown) {
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((row) => {
+        const source = (row ?? {}) as Record<string, unknown>;
+        const rol = this.trimNullableText(source.rol ?? source.nombre);
+        if (!rol) return null;
+        const cantidad = Math.max(
+          1,
+          Math.trunc(this.toNumeric(source.cantidad, 1)),
+        );
+        const valorDia = Math.max(0, this.toNumeric(source.valor_dia, 0));
+        return {
+          rol,
+          cantidad,
+          valor_dia: Number(valorDia.toFixed(2)),
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
+  }
+
   private buildProcedimientoPlanCode(row: ProcedimientoPlantillaEntity) {
     const base = String(row.codigo || row.id)
       .trim()
@@ -9162,6 +9505,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return {
       ...row,
+      es_proyecto: this.isProyectoProcedimiento(row),
       actividades,
       plan_id: plan?.id ?? null,
       plan_codigo: plan?.codigo ?? null,
@@ -16568,6 +16912,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.resolveLinkedProgramacionForWorkOrder(workOrder.id),
       this.findPrimaryLinkedAlertForWorkOrder(workOrder.id),
     ]);
+    // El detalle de proyecto solo se consulta cuando la OT es de Proyecto: el
+    // listado general trae cientos de OT y no debe pagar tres consultas mas por
+    // cada una.
+    const esProyecto = this.isProyectoMaintenanceKind(
+      workOrder.maintenance_kind,
+    );
+    const proyectoDetalle = esProyecto
+      ? await this.loadWorkOrderProyectoDetail(workOrder.id)
+      : {
+          proyecto_ubicacion_ids: [] as string[],
+          proyecto_ubicaciones: [],
+          proyecto_bodega_ids: [] as string[],
+          proyecto_bodegas: [],
+          proyecto_personal: [],
+        };
     const effectiveLinkedProgramacion =
       linkedProgramacion ??
       (await this.resolveProgramacionReferenceForWorkOrder({
@@ -16669,6 +17028,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...workOrder,
       valor_json: auditPayload,
       status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
+      es_proyecto: esProyecto,
+      ...proyectoDetalle,
       equipment_nombre: equipo?.nombre ?? null,
       equipment_nombre_real: equipo?.nombre_real ?? null,
       equipment_codigo: equipo?.codigo ?? null,
@@ -18718,16 +19079,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Punto de lubricación eliminado');
   }
 
-  async listProcedimientosPlantilla(sucursalId?: string | null) {
+  /**
+   * @param tipoProceso filtra por tipo de proceso. La pantalla de OT Proyecto
+   *   lo usa para listar unicamente las plantillas de formato proyecto.
+   */
+  async listProcedimientosPlantilla(
+    sucursalId?: string | null,
+    tipoProceso?: string | null,
+  ) {
     const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.procedimientoRepo.find({
       where: { is_deleted: false },
       order: { updated_at: 'DESC', created_at: 'DESC' },
     });
+    const tipoProcesoFiltro = this.normalizeProcedimientoTipoProceso(tipoProceso);
     return this.wrap(
       await Promise.all(
         rows
           .filter((row) => this.isProcedimientoVisibleForScope(row, scope))
+          .filter(
+            (row) =>
+              !tipoProcesoFiltro ||
+              this.normalizeProcedimientoTipoProceso(row.tipo_proceso) ===
+                tipoProcesoFiltro,
+          )
           .map((row) => this.buildProcedimientoPayload(row)),
       ),
       'Procedimientos plantilla listados',
@@ -18787,6 +19162,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
               herramientas: this.normalizeStringArray(dto.herramientas),
               materiales: this.normalizeMaterialIdArray(dto.materiales),
               responsabilidades,
+              empresa: this.trimNullableText(dto.empresa),
+              objetivos_especificos: this.normalizeStringArray(
+                dto.objetivos_especificos,
+              ),
+              metodologia: this.trimNullableText(dto.metodologia),
+              alcance: this.normalizeStringArray(dto.alcance),
+              personal_requerido: this.normalizeProcedimientoPersonalRequerido(
+                dto.personal_requerido,
+              ),
             }),
           );
 
@@ -18908,6 +19292,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : row.materiales,
         responsabilidades:
           responsabilidades ?? row.responsabilidades,
+        empresa:
+          dto.empresa !== undefined
+            ? this.trimNullableText(dto.empresa)
+            : row.empresa ?? null,
+        objetivos_especificos: dto.objetivos_especificos
+          ? this.normalizeStringArray(dto.objetivos_especificos)
+          : row.objetivos_especificos,
+        metodologia:
+          dto.metodologia !== undefined
+            ? this.trimNullableText(dto.metodologia)
+            : row.metodologia ?? null,
+        alcance: dto.alcance
+          ? this.normalizeStringArray(dto.alcance)
+          : row.alcance,
+        personal_requerido: dto.personal_requerido
+          ? this.normalizeProcedimientoPersonalRequerido(dto.personal_requerido)
+          : row.personal_requerido,
       });
       await procedimientoRepo.save(row);
 
@@ -27904,13 +28305,43 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return workOrderTaskRepo.save(tarea);
   }
 
+  /**
+   * Campos de cierre obligatorios de la cabecera.
+   *
+   * Una OT de mantenimiento cierra con causa / accion / prevencion. Una OT de
+   * Proyecto no: el formato de proyecto pide objetivo general y metodologia, y
+   * esos son los que se exigen en su lugar.
+   */
   private assertRequiredWorkOrderOutcomePayload(
     payload: Record<string, unknown> | null | undefined,
+    maintenanceKind?: unknown,
   ) {
     const source =
       payload && typeof payload === 'object' && !Array.isArray(payload)
         ? payload
         : {};
+
+    if (this.isProyectoMaintenanceKind(maintenanceKind)) {
+      const proyecto =
+        source.proyecto &&
+        typeof source.proyecto === 'object' &&
+        !Array.isArray(source.proyecto)
+          ? (source.proyecto as Record<string, unknown>)
+          : {};
+      const requiredProyectoFields = [
+        { key: 'objetivo_general', label: 'Objetivo general' },
+        { key: 'metodologia', label: 'Metodología aplicable' },
+      ] as const;
+      for (const field of requiredProyectoFields) {
+        if (!String(proyecto[field.key] ?? '').trim()) {
+          throw new BadRequestException(
+            `El campo ${field.label} es obligatorio en la OT de Proyecto.`,
+          );
+        }
+      }
+      return;
+    }
+
     const requiredFields = [
       { key: 'causa', label: 'Causa' },
       { key: 'accion', label: 'Acción' },
@@ -28083,14 +28514,55 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const ownerUsername =
       this.firstNonEmptyString(actor?.username, headerOwnershipHints.username) ??
       null;
+    const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
+      header.maintenance_kind,
+      workOrder?.maintenance_kind,
+      'CORRECTIVO',
+    );
+    const isProyectoWorkOrder = this.isProyectoMaintenanceKind(
+      resolvedMaintenanceKind,
+    );
+    const proyectoUbicacionIds = this.normalizeUuidList(
+      header.proyecto_ubicacion_ids,
+    );
+    const proyectoBodegaIds = this.normalizeUuidList(
+      header.proyecto_bodega_ids,
+    );
+    if (isProyectoWorkOrder) {
+      // Al crear siempre hay que decir donde corre el proyecto. Al editar, si
+      // el cliente no manda los sitios se conservan los ya guardados.
+      const storedSites = workOrder
+        ? await this.loadWorkOrderProyectoDetail(workOrder.id)
+        : null;
+      const effectiveUbicacionIds = header.proyecto_ubicacion_ids
+        ? proyectoUbicacionIds
+        : storedSites?.proyecto_ubicacion_ids ?? [];
+      const effectiveBodegaIds = header.proyecto_bodega_ids
+        ? proyectoBodegaIds
+        : storedSites?.proyecto_bodega_ids ?? [];
+      this.assertProyectoWorkOrderHasSites(
+        resolvedMaintenanceKind,
+        effectiveUbicacionIds,
+        effectiveBodegaIds,
+      );
+      await this.assertProyectoSitesExist(
+        proyectoUbicacionIds,
+        proyectoBodegaIds,
+      );
+    }
+
     const equipmentId =
       this.firstNonEmptyString(header.equipment_id, workOrder?.equipment_id) ??
       null;
 
-    if (!equipmentId) {
+    // La OT de Proyecto se ejecuta sobre ubicaciones y bodegas, no sobre un
+    // equipo; para el resto de tipos el equipo sigue siendo obligatorio.
+    if (!equipmentId && !isProyectoWorkOrder) {
       throw new BadRequestException('Equipo es obligatorio.');
     }
-    const equipment = await this.findEquipoOrFail(equipmentId);
+    const equipment = equipmentId
+      ? await this.findEquipoOrFail(equipmentId)
+      : null;
 
     let resolvedPlanId =
       this.firstNonEmptyString(header.plan_id, workOrder?.plan_id) ?? null;
@@ -28116,7 +28588,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
     const componentContext = await this.resolveWorkOrderComponentContexts({
-      equipmentId,
+      equipmentId: equipmentId ?? null,
       explicitIds: header.equipo_componente_ids,
       legacyId: header.equipo_componente_id ?? null,
       existingSnapshots: this.readStoredComponentSnapshots(
@@ -28137,11 +28609,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     this.assertBlockedWorkflowHasBlockingOrder(
       nextWorkflowStatus,
       nextBlockedByWorkOrderId,
-    );
-    const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
-      header.maintenance_kind,
-      workOrder?.maintenance_kind,
-      'CORRECTIVO',
     );
     const emergencyState = isNew
       ? this.resolveWorkOrderEmergencyState(
@@ -28217,7 +28684,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           previousHorometer: previousHeaderPayload?.horometro_actual,
         },
       );
-      this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+      this.assertRequiredWorkOrderOutcomePayload(
+        nextHeaderPayload,
+        resolvedMaintenanceKind,
+      );
       cebadoProgramacionDate = this.applyCebadoProgramacionDate(
         resolvedMaintenanceKind,
         nextHeaderPayload,
@@ -28351,6 +28821,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'No se pudo generar un codigo unico para la orden de trabajo.',
       );
     }
+
+    await this.replaceWorkOrderProyectoDetail(
+      manager,
+      saved.id,
+      {
+        ubicacionIds: header.proyecto_ubicacion_ids
+          ? proyectoUbicacionIds
+          : null,
+        bodegaIds: header.proyecto_bodega_ids ? proyectoBodegaIds : null,
+        personal: header.proyecto_personal ?? null,
+      },
+      actor,
+    );
 
     const programacionSync = await this.syncCebadoProgramacionFromWorkOrder(
       saved,
@@ -28899,6 +29382,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.equipment_id,
       resolvedPlanId,
     );
+    const proyectoUbicacionIds = this.normalizeUuidList(
+      dto.proyecto_ubicacion_ids,
+    );
+    const proyectoBodegaIds = this.normalizeUuidList(dto.proyecto_bodega_ids);
+    this.assertProyectoWorkOrderHasSites(
+      resolvedMaintenanceKind,
+      proyectoUbicacionIds,
+      proyectoBodegaIds,
+    );
+    await this.assertProyectoSitesExist(proyectoUbicacionIds, proyectoBodegaIds);
     const emergencyState = this.resolveWorkOrderEmergencyState(
       dto.is_emergency ?? false,
       dto.emergency_reason,
@@ -28930,7 +29423,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : {}),
         equipo_componentes: componentContext.snapshots,
       };
-      this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+      this.assertRequiredWorkOrderOutcomePayload(
+        nextHeaderPayload,
+        resolvedMaintenanceKind,
+      );
       cebadoProgramacionDate = this.applyCebadoProgramacionDate(
         resolvedMaintenanceKind,
         nextHeaderPayload,
@@ -29022,6 +29518,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!created) {
       throw new ConflictException('No se pudo generar un código único para la orden de trabajo.');
     }
+    await this.replaceWorkOrderProyectoDetail(
+      this.dataSource.manager,
+      created.id,
+      {
+        ubicacionIds: dto.proyecto_ubicacion_ids ? proyectoUbicacionIds : null,
+        bodegaIds: dto.proyecto_bodega_ids ? proyectoBodegaIds : null,
+        personal: dto.proyecto_personal ?? null,
+      },
+      actor,
+    );
     const createdProgramacionSync =
       await this.syncCebadoProgramacionFromWorkOrder(
         created,
@@ -29229,7 +29735,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         : {}),
       equipo_componentes: componentContext.snapshots,
     };
-    this.assertRequiredWorkOrderOutcomePayload(nextHeaderPayload);
+    this.assertRequiredWorkOrderOutcomePayload(
+      nextHeaderPayload,
+      dto.maintenance_kind ?? wo.maintenance_kind,
+    );
     if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertMaterialShortfallAcknowledged(
         this.dataSource.manager,
@@ -29247,6 +29756,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.equipment_id,
       resolvedPlanId,
     );
+    const {
+      proyecto_ubicacion_ids: dtoProyectoUbicacionIds,
+      proyecto_bodega_ids: dtoProyectoBodegaIds,
+      proyecto_personal: dtoProyectoPersonal,
+      ...dtoColumnas
+    } = dto;
+    const proyectoUbicacionIds = this.normalizeUuidList(
+      dtoProyectoUbicacionIds,
+    );
+    const proyectoBodegaIds = this.normalizeUuidList(dtoProyectoBodegaIds);
+    if (this.isProyectoMaintenanceKind(nextMaintenanceKind)) {
+      // Si el cliente no manda los sitios, se conservan los ya guardados.
+      const storedSites = await this.loadWorkOrderProyectoDetail(wo.id);
+      this.assertProyectoWorkOrderHasSites(
+        nextMaintenanceKind,
+        dtoProyectoUbicacionIds
+          ? proyectoUbicacionIds
+          : storedSites.proyecto_ubicacion_ids,
+        dtoProyectoBodegaIds
+          ? proyectoBodegaIds
+          : storedSites.proyecto_bodega_ids,
+      );
+      await this.assertProyectoSitesExist(
+        proyectoUbicacionIds,
+        proyectoBodegaIds,
+      );
+    }
     const cebadoProgramacionDate = this.applyCebadoProgramacionDate(
       nextMaintenanceKind,
       nextHeaderPayload,
@@ -29258,7 +29794,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       },
     );
     Object.assign(wo, {
-      ...dto,
+      ...dtoColumnas,
       plan_id: resolvedPlanId,
       equipo_componente_id: componentContext.legacyComponentId,
       equipo_componente_nombre: componentContext.legacyComponentName,
@@ -29324,6 +29860,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
     const saved = await this.woRepo.save(wo);
+    await this.replaceWorkOrderProyectoDetail(
+      this.dataSource.manager,
+      saved.id,
+      {
+        ubicacionIds: dtoProyectoUbicacionIds ? proyectoUbicacionIds : null,
+        bodegaIds: dtoProyectoBodegaIds ? proyectoBodegaIds : null,
+        personal: dtoProyectoPersonal ?? null,
+      },
+      actor,
+    );
     const updatedProgramacionSync =
       await this.syncCebadoProgramacionFromWorkOrder(
         saved,

@@ -1156,6 +1156,58 @@ export class WorkOrderQueryDto {
   fecha_hasta?: string;
 }
 
+/**
+ * Una persona contratada para una OT de Proyecto.
+ *
+ * Reproduce la tabla "Contratacion de personal" del formato de proyecto: cargo,
+ * nombre, dias trabajados, ubicacion, valor del dia, fecha y observacion.
+ */
+export class WorkOrderProyectoPersonalDto {
+  @ApiPropertyOptional({ description: 'ID de la fila existente', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  id?: string | null;
+  @ApiPropertyOptional({ description: 'Orden de aparicion', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  orden?: number;
+  @ApiProperty({ description: 'Cargo contratado (Soldador estructural, Esmerilador, ...)' })
+  @IsString()
+  @IsNotEmpty()
+  rol: string;
+  @ApiPropertyOptional({ description: 'Nombre y apellido' })
+  @IsOptional()
+  @IsString()
+  nombre?: string | null;
+  @ApiPropertyOptional({ description: 'Dias laborados', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  dias_laborados?: number;
+  @ApiPropertyOptional({ description: 'Ubicacion donde trabajo', format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  location_id?: string | null;
+  @ApiPropertyOptional({ description: 'Ubicacion escrita a mano cuando no esta en el catalogo' })
+  @IsOptional()
+  @IsString()
+  ubicacion_texto?: string | null;
+  @ApiPropertyOptional({ description: 'Valor por dia', type: Number })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  valor_dia?: number;
+  @ApiPropertyOptional({ description: 'Fecha del trabajo (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  fecha?: string | null;
+  @ApiPropertyOptional({ description: 'Observacion' })
+  @IsOptional()
+  @IsString()
+  observacion?: string | null;
+}
+
 export class CreateWorkOrderDto {
   @ApiProperty({ description: 'Código único de OT' })
   @IsString()
@@ -1281,6 +1333,32 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsString()
   blocked_reason?: string;
+  @ApiPropertyOptional({
+    description:
+      'Solo OT de Proyecto: ubicaciones donde se ejecuta el proyecto',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  proyecto_ubicacion_ids?: string[];
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: bodegas donde se ejecuta el proyecto',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  proyecto_bodega_ids?: string[];
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: personal eventual contratado',
+    type: [WorkOrderProyectoPersonalDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => WorkOrderProyectoPersonalDto)
+  proyecto_personal?: WorkOrderProyectoPersonalDto[];
 }
 
 export class AnnulWorkOrderDto {
@@ -1384,6 +1462,32 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsString()
   blocked_reason?: string;
+  @ApiPropertyOptional({
+    description:
+      'Solo OT de Proyecto: ubicaciones donde se ejecuta el proyecto',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  proyecto_ubicacion_ids?: string[];
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: bodegas donde se ejecuta el proyecto',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  proyecto_bodega_ids?: string[];
+  @ApiPropertyOptional({
+    description: 'Solo OT de Proyecto: personal eventual contratado',
+    type: [WorkOrderProyectoPersonalDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => WorkOrderProyectoPersonalDto)
+  proyecto_personal?: WorkOrderProyectoPersonalDto[];
 }
 
 export class CreateConsumoDto {
@@ -1725,6 +1829,40 @@ export class CreateProcedimientoPlantillaDto {
   @IsOptional()
   @IsString()
   compartimiento_nombre_oficial?: string;
+  @ApiPropertyOptional({
+    description: 'Solo plantillas PROYECTO: empresa que ejecuta el proyecto',
+  })
+  @IsOptional()
+  @IsString()
+  empresa?: string;
+  @ApiPropertyOptional({
+    description: 'Solo plantillas PROYECTO: objetivos especificos',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  objetivos_especificos?: string[];
+  @ApiPropertyOptional({
+    description: 'Solo plantillas PROYECTO: metodologia aplicable',
+  })
+  @IsOptional()
+  @IsString()
+  metodologia?: string;
+  @ApiPropertyOptional({
+    description: 'Solo plantillas PROYECTO: actividades de alcance',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  alcance?: string[];
+  @ApiPropertyOptional({
+    description:
+      'Solo plantillas PROYECTO: roles a contratar [{rol, cantidad, valor_dia}]. Los materiales no se definen aqui porque en un proyecto son variables.',
+    type: [Object],
+  })
+  @IsOptional()
+  @IsArray()
+  personal_requerido?: Array<Record<string, unknown>>;
 }
 
 export class UpdateProcedimientoPlantillaDto extends CreateProcedimientoPlantillaDto {}
