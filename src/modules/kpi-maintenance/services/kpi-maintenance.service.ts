@@ -4972,8 +4972,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         String(payload.work_order_title || '').trim(),
       ]
         .filter(Boolean)
-        .join(' · ');
-      return label ? `OT · ${label}` : fallback;
+        .join(' - ');
+      // La referencia cruda de una OT es una llave interna
+      // (`WORK_ORDER:<id>:<evento>:<epoch>`) que no se muestra nunca: si no hay
+      // codigo ni titulo, es preferible decir solo de que se trata.
+      return label || 'Orden de trabajo';
     }
 
     return fallback;
@@ -7923,14 +7926,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       </table>`;
   }
 
+  /**
+   * Fecha de un correo de alerta, siempre como `yyyy-MM-dd HH:mm`.
+   *
+   * Antes salia "16 sept 2026, 8:44 a. m.": se lee, pero cambia de forma entre
+   * idiomas y no se ordena. Este formato es el mismo que el resto del sistema
+   * usa en pantalla y ademas ordena solo.
+   */
   private formatAlertEmailDate(value: unknown) {
     const date = value instanceof Date ? value : new Date(String(value || ''));
     if (Number.isNaN(date.getTime())) return 'No disponible';
-    return new Intl.DateTimeFormat('es-EC', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
       timeZone: 'America/Guayaquil',
-    }).format(date);
+    }).formatToParts(date);
+    const part = (type: string) =>
+      parts.find((item) => item.type === type)?.value ?? '';
+    return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}`;
   }
 
   private buildAppModuleUrl(path: string) {
@@ -8189,10 +8206,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       'General',
     );
     const destination = this.resolveAlertEmailDestination(row);
+    // El correo mostraba `row.referencia`, que es la llave interna de la alerta:
+    // quien lo recibe veia un uuid y un epoch. Se usa la misma resolucion que ya
+    // alimenta la pantalla de alertas.
     const reference =
       row.origen === 'INVENTARIO' && this.getInventoryAlertItems(payload).length
         ? 'Resumen general de inventario'
-        : this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id);
+        : this.resolveAlertReferenceDisplay(row, payload);
     const inventoryTableHtml = this.buildInventoryAlertTableHtml(payload);
 
     return this.buildEnterpriseEmailLayout({
@@ -8263,7 +8283,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       `Referencia: ${
         row.origen === 'INVENTARIO' && this.getInventoryAlertItems(payload).length
           ? 'Resumen general de inventario'
-          : this.firstNonEmptyString(row.referencia, row.referencia_tipo, row.id)
+          : this.resolveAlertReferenceDisplay(row, payload)
       }`,
       `Fecha: ${this.formatAlertEmailDate(row.fecha_generada)}`,
       '',
@@ -15484,7 +15504,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             return {
               ...nextSnapshot,
               label:
-                `${persisted.code} ? ${persisted.title}`.trim() || persisted.id,
+                [persisted.code, persisted.title].filter(Boolean).join(' - ') ||
+                persisted.id,
             };
           })
           .filter((item) => item.id);
@@ -15504,7 +15525,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.firstNonEmptyString(payload.equipo_label) ??
           [equipoCodigo, equipoNombre].filter(Boolean).join(' - ');
         const workOrderLabel = workOrder
-          ? `${workOrder.code} ? ${workOrder.title}`
+          ? [workOrder.code, workOrder.title].filter(Boolean).join(' - ') || null
           : null;
 
         const hasClosedWorkOrders =
