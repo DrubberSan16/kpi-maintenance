@@ -19,7 +19,12 @@ const createRepo = () => ({
   update: jest.fn(),
 });
 
-type ServiceUnderTest = KpiMaintenanceService & Record<string, any>;
+/**
+ * Las pruebas llaman a metodos privados del servicio a proposito: son la
+ * logica de la OT de Proyecto y no tienen puerta publica propia. El tipo se
+ * relaja para poder alcanzarlos sin abrir la clase solo para el test.
+ */
+type ServiceUnderTest = Record<string, any>;
 
 function createService(overrides: Record<string, any> = {}) {
   const service = Object.create(

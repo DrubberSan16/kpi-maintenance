@@ -32119,11 +32119,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
-    const rows = await this.woHistoryRepo.find({
-      where: { work_order_id: workOrderId },
-      order: { changed_at: 'DESC' },
-    });
-    return this.wrap(rows, 'Historial de la OT listado');
+    const [rows, users] = await Promise.all([
+      this.woHistoryRepo.find({
+        where: { work_order_id: workOrderId },
+        order: { changed_at: 'DESC' },
+      }),
+      this.fetchSecurityUsers(),
+    ]);
+    // `changed_by` guarda el id del usuario. Quien lee el historial -o el PDF
+    // que sale de el- necesita el nombre, asi que el id se resuelve aqui y no
+    // en cada pantalla: el informe por fila del listado no tiene el catalogo
+    // de usuarios cargado y acabaria imprimiendo el uuid.
+    const userMap = new Map(
+      users
+        .filter((item) => item.id)
+        .map((item) => [String(item.id), item] as const),
+    );
+    return this.wrap(
+      rows.map((row) => {
+        const user = row.changed_by ? userMap.get(String(row.changed_by)) : null;
+        return {
+          ...row,
+          changed_by_username: user?.nameUser ?? null,
+          changed_by_label:
+            this.firstNonOpaqueUserLabel(
+              user?.nameSurname,
+              user?.nameUser,
+              row.changed_by,
+            ) ?? null,
+        };
+      }),
+      'Historial de la OT listado',
+    );
   }
 
   async createConsumo(
