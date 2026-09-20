@@ -5753,6 +5753,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       work_order_code: row?.work_order_code ?? null,
       equipment_name: row?.equipment_name ?? row?.equipment_label ?? null,
       maintenance_kind_label: row?.maintenance_kind_label ?? null,
+      started_at: row?.started_at ?? null,
+      closed_at: row?.closed_at ?? null,
+      flow_duration_hours: this.toNumeric(row?.flow_duration_hours, 0),
+      flow_in_progress: row?.flow_in_progress === true,
+      effective_started_at: row?.effective_started_at ?? null,
+      effective_closed_at: row?.effective_closed_at ?? null,
+      effective_duration_hours: this.toNumeric(
+        row?.effective_duration_hours,
+        0,
+      ),
+      effective_in_progress: row?.effective_in_progress === true,
     });
   }
 
@@ -24800,6 +24811,80 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : [];
     const procedureMap = new Map(procedures.map((row) => [row.id, row]));
 
+    // Movimientos del rango para relacionar cada bodega con sus entradas,
+    // salidas, costo y OT de origen. Se aplican las mismas exclusiones del
+    // reporte diario para que una anulacion no vuelva a inflar los totales.
+    const rawWarehouseMovements = await this.dataSource.query(
+      `
+        SELECT
+          kardex.id AS kardex_id,
+          kardex.fecha AS fecha,
+          kardex.producto_id AS producto_id,
+          kardex.bodega_id AS bodega_id,
+          kardex.tipo_movimiento AS tipo_movimiento,
+          kardex.entrada_cantidad AS entrada_cantidad,
+          kardex.salida_cantidad AS salida_cantidad,
+          kardex.costo_unitario AS costo_unitario,
+          kardex.costo_total AS costo_total,
+          movimiento.numero_documento AS numero_documento,
+          movimiento.tipo_documento AS tipo_documento,
+          movimiento.referencia AS referencia,
+          movimiento.work_order_id AS work_order_id
+        FROM kpi_inventory.tb_kardex kardex
+        LEFT JOIN kpi_inventory.tb_movimiento_inventario movimiento
+          ON movimiento.id = kardex.movimiento_id
+         AND movimiento.is_deleted = false
+        LEFT JOIN kpi_inventory.tb_transferencia_bodega_det transfer_det
+          ON (
+            transfer_det.kardex_ingreso_id = kardex.id
+            OR transfer_det.kardex_salida_id = kardex.id
+          )
+         AND transfer_det.is_deleted = false
+        WHERE kardex.is_deleted = false
+          AND kardex.fecha >= $1::date
+          AND kardex.fecha < ($2::date + INTERVAL '1 day')
+          AND (
+            movimiento.id IS NULL
+            OR (
+              UPPER(TRIM(COALESCE(movimiento.tipo_documento, ''))) NOT LIKE 'ANULACION_TRANSFERENCIA%'
+              AND UPPER(TRIM(COALESCE(movimiento.estado, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+              AND UPPER(TRIM(COALESCE(movimiento.status, ''))) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM kpi_inventory.tb_transferencia_bodega transferencia_anulada
+            LEFT JOIN kpi_inventory.tb_transferencia_bodega_det transferencia_det_anulada
+              ON transferencia_det_anulada.transferencia_bodega_id = transferencia_anulada.id
+            WHERE (
+                transferencia_anulada.movimiento_salida_id = kardex.movimiento_id
+                OR transferencia_anulada.movimiento_ingreso_id = kardex.movimiento_id
+                OR transferencia_det_anulada.kardex_salida_id = kardex.id
+                OR transferencia_det_anulada.kardex_ingreso_id = kardex.id
+              )
+              AND (
+                transferencia_anulada.is_deleted = true
+                OR UPPER(TRIM(COALESCE(transferencia_anulada.estado, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED')
+                OR UPPER(TRIM(COALESCE(transferencia_anulada.status, ''))) IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO', 'VOID', 'VOIDED', 'INACTIVE')
+              )
+          )
+        ORDER BY kardex.fecha DESC, kardex.created_at DESC
+      `,
+      [dateRange.from, dateRange.to],
+    );
+
+    const scopedWarehouseMovements = (
+      Array.isArray(rawWarehouseMovements) ? rawWarehouseMovements : []
+    ).filter((row: any) => {
+      const warehouseId = String(row?.bodega_id || '').trim();
+      if (!warehouseId) return false;
+      if (scope && !visibleWarehouseIds.has(warehouseId)) return false;
+      if (requestedWarehouseId && warehouseId !== requestedWarehouseId) {
+        return false;
+      }
+      return true;
+    });
+
     const inventoryProductIds = new Set<string>();
     const inventoryWarehouseIds = new Set<string>(
       visibleWarehouses
@@ -24819,6 +24904,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     for (const row of stockCandidateRows) {
       const productId = String(row.producto_id || '').trim();
       const warehouseId = String(row.bodega_id || '').trim();
+      if (productId) inventoryProductIds.add(productId);
+      if (warehouseId) inventoryWarehouseIds.add(warehouseId);
+    }
+    for (const row of scopedWarehouseMovements) {
+      const productId = String(row?.producto_id || '').trim();
+      const warehouseId = String(row?.bodega_id || '').trim();
       if (productId) inventoryProductIds.add(productId);
       if (warehouseId) inventoryWarehouseIds.add(warehouseId);
     }
@@ -24869,6 +24960,86 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return !!warehouse && !warehouse.es_chatarra;
     });
 
+    const warehouseMovementDetails = scopedWarehouseMovements.map((row: any) => {
+      const warehouseId = String(row?.bodega_id || '').trim();
+      const productId = String(row?.producto_id || '').trim();
+      const entrada = this.toNumeric(row?.entrada_cantidad, 0);
+      const salida = this.toNumeric(row?.salida_cantidad, 0);
+      const cantidad = entrada + salida;
+      const storedUnitCost = this.toNumeric(row?.costo_unitario, 0);
+      const storedTotalCost = Math.abs(this.toNumeric(row?.costo_total, 0));
+      const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
+        productoId: productId,
+        bodegaId: warehouseId,
+        fecha: row?.fecha,
+        fallback:
+          storedUnitCost > 0
+            ? storedUnitCost
+            : cantidad > 0
+              ? storedTotalCost / cantidad
+              : 0,
+      });
+      const product = productMap.get(productId);
+      return {
+        kardex_id: String(row?.kardex_id || '').trim(),
+        fecha: row?.fecha ? new Date(row.fecha).toISOString() : null,
+        bodega_id: warehouseId,
+        bodega_label:
+          this.buildBodegaLabel(warehouseMap.get(warehouseId)) ?? warehouseId,
+        producto_id: productId,
+        material_label: this.buildProductoLabel(product) ?? productId,
+        tipo_movimiento:
+          this.firstNonEmptyString(row?.tipo_movimiento) ?? 'SIN_TIPO',
+        entrada_cantidad: Number(entrada.toFixed(4)),
+        salida_cantidad: Number(salida.toFixed(4)),
+        costo_unitario: Number(unitCost.toFixed(4)),
+        costo_entrada: Number((entrada * unitCost).toFixed(4)),
+        costo_salida: Number((salida * unitCost).toFixed(4)),
+        numero_documento:
+          this.firstNonEmptyString(row?.numero_documento, row?.kardex_id) ??
+          'Sin documento',
+        tipo_documento:
+          this.firstNonEmptyString(row?.tipo_documento) ?? 'KARDEX',
+        referencia: this.firstNonEmptyString(row?.referencia) ?? null,
+        work_order_id:
+          this.firstNonEmptyString(row?.work_order_id) ?? null,
+      };
+    });
+
+    const warehouseMovementMap = new Map<string, any>();
+    for (const row of warehouseMovementDetails) {
+      const key = String(row.bodega_id || row.bodega_label || 'SIN_BODEGA');
+      const current = warehouseMovementMap.get(key) ?? {
+        bodega_id: row.bodega_id,
+        bodega_label: row.bodega_label || 'Sin bodega',
+        movimientos: 0,
+        entradas: 0,
+        salidas: 0,
+        costo_entradas: 0,
+        costo_salidas: 0,
+        _materiales: new Set<string>(),
+        _ordenes: new Set<string>(),
+        _detalle: [] as any[],
+      };
+      current.movimientos += 1;
+      current.entradas = Number(
+        (current.entradas + row.entrada_cantidad).toFixed(4),
+      );
+      current.salidas = Number(
+        (current.salidas + row.salida_cantidad).toFixed(4),
+      );
+      current.costo_entradas = Number(
+        (current.costo_entradas + row.costo_entrada).toFixed(4),
+      );
+      current.costo_salidas = Number(
+        (current.costo_salidas + row.costo_salida).toFixed(4),
+      );
+      if (row.producto_id) current._materiales.add(row.producto_id);
+      if (row.work_order_id) current._ordenes.add(row.work_order_id);
+      current._detalle.push(row);
+      warehouseMovementMap.set(key, current);
+    }
+
     const workOrderContextMap = new Map<string, any>();
     for (const workOrder of datedWorkOrders) {
       const referenceDate = this.resolveWorkOrderReferenceDate(workOrder);
@@ -24894,6 +25065,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
       const horometerSnapshot =
         this.extractWorkOrderHorometerSnapshot(horometerPayload);
+      const flowStart = workOrder.started_at ?? null;
+      const flowEnd = workOrder.closed_at ?? null;
+      const effectiveStart = workOrder.hora_inicio ?? null;
+      const effectiveEnd = workOrder.hora_fin ?? null;
+      const durationHours = (start: Date | null, end: Date | null) => {
+        if (!start) return 0;
+        const resolvedEnd = end ?? new Date();
+        const duration =
+          (resolvedEnd.getTime() - start.getTime()) / (60 * 60 * 1000);
+        return Number(Math.max(duration, 0).toFixed(4));
+      };
       const consumptionWarehouseIds = [
         ...(consumoWarehouseIdsByWorkOrder.get(workOrder.id) ?? new Set<string>()),
       ];
@@ -24933,6 +25115,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         maintenance_kind_label: this.buildWorkOrderMaintenanceKindLabel(
           workOrder.maintenance_kind,
         ),
+        started_at: flowStart?.toISOString() ?? null,
+        closed_at: flowEnd?.toISOString() ?? null,
+        flow_duration_hours: durationHours(flowStart, flowEnd),
+        flow_in_progress: Boolean(flowStart && !flowEnd),
+        effective_started_at: effectiveStart?.toISOString() ?? null,
+        effective_closed_at: effectiveEnd?.toISOString() ?? null,
+        effective_duration_hours: durationHours(effectiveStart, effectiveEnd),
+        effective_in_progress: Boolean(effectiveStart && !effectiveEnd),
         fecha_referencia: referenceDate.toISOString(),
         periodo: this.buildSystemReportPeriodLabel(referenceDate),
         period_key: referenceDate.toISOString().slice(0, 7),
@@ -25778,6 +25968,91 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             }))
             .sort((a, b) => b.total_costo_inventario - a.total_costo_inventario);
 
+    const stockByWarehouse = inventoryCostDetailedRows.reduce(
+      (acc, row) => {
+        const key = String(row.bodega_id || row.bodega_label || 'SIN_BODEGA');
+        const current = acc.get(key) ?? {
+          bodega_id: row.bodega_id,
+          bodega_label: row.bodega_label,
+          stock_actual: 0,
+          costo_inventario_actual: 0,
+          _materiales: new Set<string>(),
+        };
+        current.stock_actual = Number(
+          (current.stock_actual + this.toNumeric(row.stock_actual, 0)).toFixed(4),
+        );
+        current.costo_inventario_actual = Number(
+          (
+            current.costo_inventario_actual +
+            this.toNumeric(row.total_costo_inventario, 0)
+          ).toFixed(4),
+        );
+        if (row.producto_id) current._materiales.add(String(row.producto_id));
+        acc.set(key, current);
+        return acc;
+      },
+      new Map<string, any>(),
+    );
+
+    const warehouseKeys = new Set<string>([
+      ...visibleWarehouses
+        .filter(
+          (row) =>
+            !requestedWarehouseId ||
+            String(row.id || '').trim() === requestedWarehouseId,
+        )
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean),
+      ...warehouseMovementMap.keys(),
+      ...stockByWarehouse.keys(),
+    ]);
+    const warehouseMovementRows = [...warehouseKeys]
+      .map((key) => {
+        const movement = warehouseMovementMap.get(key);
+        const stock = stockByWarehouse.get(key);
+        const warehouse = warehouseMap.get(key);
+        return {
+          bodega_id: key === 'SIN_BODEGA' ? null : key,
+          bodega_label:
+            movement?.bodega_label ||
+            stock?.bodega_label ||
+            this.buildBodegaLabel(warehouse) ||
+            'Sin bodega',
+          movimientos: Number(movement?.movimientos || 0),
+          materiales_movidos: Number(movement?._materiales?.size || 0),
+          total_ordenes: Number(movement?._ordenes?.size || 0),
+          entradas: Number(movement?.entradas || 0),
+          salidas: Number(movement?.salidas || 0),
+          costo_entradas: Number(movement?.costo_entradas || 0),
+          costo_salidas: Number(movement?.costo_salidas || 0),
+          stock_actual: Number(stock?.stock_actual || 0),
+          costo_inventario_actual: Number(stock?.costo_inventario_actual || 0),
+          materiales_en_stock: Number(stock?._materiales?.size || 0),
+          detalle_movimientos: Array.isArray(movement?._detalle)
+            ? movement._detalle
+            : [],
+        };
+      })
+      .sort((a, b) => b.costo_inventario_actual - a.costo_inventario_actual);
+
+    const warehouseMovementTotals = warehouseMovementRows.reduce(
+      (acc, row) => {
+        acc.entradas += this.toNumeric(row.entradas, 0);
+        acc.salidas += this.toNumeric(row.salidas, 0);
+        acc.costo_entradas += this.toNumeric(row.costo_entradas, 0);
+        acc.costo_salidas += this.toNumeric(row.costo_salidas, 0);
+        acc.movimientos += Number(row.movimientos || 0);
+        return acc;
+      },
+      {
+        entradas: 0,
+        salidas: 0,
+        costo_entradas: 0,
+        costo_salidas: 0,
+        movimientos: 0,
+      },
+    );
+
     const closedScopedWorkOrders = scopedWorkOrders
       .map((row) => ({
         row,
@@ -25970,6 +26245,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 .toFixed(4),
             ),
           },
+          {
+            label: 'Valor ingresado a bodegas',
+            value: Number(warehouseMovementTotals.costo_entradas.toFixed(4)),
+          },
+          {
+            label: 'Valor salido de bodegas',
+            value: Number(warehouseMovementTotals.costo_salidas.toFixed(4)),
+          },
           { label: 'OT hoy', value: countClosedWorkOrders(startOfToday, endOfToday) },
           {
             label: 'OT semana',
@@ -26112,6 +26395,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 .toFixed(4),
             ),
             total_registros: consumedBaseRows.length,
+          },
+          movimientos_bodega: {
+            group_by: 'BODEGA',
+            rows: warehouseMovementRows,
+            total_movimientos: warehouseMovementTotals.movimientos,
+            total_entradas: Number(
+              warehouseMovementTotals.entradas.toFixed(4),
+            ),
+            total_salidas: Number(
+              warehouseMovementTotals.salidas.toFixed(4),
+            ),
+            costo_entradas: Number(
+              warehouseMovementTotals.costo_entradas.toFixed(4),
+            ),
+            costo_salidas: Number(
+              warehouseMovementTotals.costo_salidas.toFixed(4),
+            ),
           },
           top_materiales_utilizados: {
             group_by: 'TOP_10',
