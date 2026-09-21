@@ -5751,8 +5751,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     target.set(key, {
       work_order_id: row?.work_order_id ?? null,
       work_order_code: row?.work_order_code ?? null,
+      work_order_title: row?.work_order_title ?? null,
+      work_order_status: row?.work_order_status ?? null,
+      equipment_id: row?.equipment_id ?? null,
       equipment_name: row?.equipment_name ?? row?.equipment_label ?? null,
       maintenance_kind_label: row?.maintenance_kind_label ?? null,
+      horometro_inicial:
+        row?.horometro_inicial ?? row?.horometro_anterior_ot ?? null,
+      horometro_final:
+        row?.horometro_final ?? row?.horometro_actual_ot ?? null,
       started_at: row?.started_at ?? null,
       closed_at: row?.closed_at ?? null,
       flow_duration_hours: this.toNumeric(row?.flow_duration_hours, 0),
@@ -24826,6 +24833,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           kardex.salida_cantidad AS salida_cantidad,
           kardex.costo_unitario AS costo_unitario,
           kardex.costo_total AS costo_total,
+          kardex.saldo_cantidad AS saldo_cantidad,
+          kardex.observacion AS observacion,
           movimiento.numero_documento AS numero_documento,
           movimiento.tipo_documento AS tipo_documento,
           movimiento.referencia AS referencia,
@@ -24988,10 +24997,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.buildBodegaLabel(warehouseMap.get(warehouseId)) ?? warehouseId,
         producto_id: productId,
         material_label: this.buildProductoLabel(product) ?? productId,
+        material_descripcion:
+          this.firstNonEmptyString((product as any)?.descripcion) ?? null,
         tipo_movimiento:
           this.firstNonEmptyString(row?.tipo_movimiento) ?? 'SIN_TIPO',
         entrada_cantidad: Number(entrada.toFixed(4)),
         salida_cantidad: Number(salida.toFixed(4)),
+        stock_final: Number(
+          this.toNumeric(row?.saldo_cantidad, 0).toFixed(4),
+        ),
+        stock_inicial: Number(
+          (
+            this.toNumeric(row?.saldo_cantidad, 0) -
+            entrada +
+            salida
+          ).toFixed(4),
+        ),
         costo_unitario: Number(unitCost.toFixed(4)),
         costo_entrada: Number((entrada * unitCost).toFixed(4)),
         costo_salida: Number((salida * unitCost).toFixed(4)),
@@ -25001,6 +25022,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         tipo_documento:
           this.firstNonEmptyString(row?.tipo_documento) ?? 'KARDEX',
         referencia: this.firstNonEmptyString(row?.referencia) ?? null,
+        descripcion:
+          this.firstNonEmptyString(row?.observacion, row?.referencia) ?? null,
         work_order_id:
           this.firstNonEmptyString(row?.work_order_id) ?? null,
       };
@@ -25149,6 +25172,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         consumo_bodegas: consumptionWarehouseLabels.join(' | ') || null,
         is_maintenance: this.isMaintenanceWorkOrderType(workOrder.type),
         horometro_actual_ot: horometerSnapshot.horometro_actual,
+        horometro_anterior_ot: horometerSnapshot.horometro_anterior,
         horas_a_realizar_ot: horometerSnapshot.horas_a_realizar,
       });
     }
@@ -25409,18 +25433,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         .map((row) => ({
           fecha_referencia: row.fecha_referencia,
           work_order_code: row.work_order_code,
+          work_order_id: row.work_order_id,
           work_order_title: row.work_order_title,
           work_order_status: row.work_order_status,
           work_order_type: row.work_order_type,
           maintenance_kind: row.maintenance_kind,
           maintenance_kind_label: row.maintenance_kind_label,
           equipment_name: row.equipment_name,
+          equipment_id: row.equipment_id,
           equipment_label: row.equipment_label,
           plan_name: row.plan_name,
           procedure_label: row.procedure_label,
           bodega_label: row.bodega_label,
           total_horas: row.total_horas,
           total_responsables: row.total_responsables,
+          horometro_inicial: row.horometro_anterior_ot,
+          horometro_final: row.horometro_actual_ot,
+          started_at: row.started_at,
+          closed_at: row.closed_at,
+          effective_started_at: row.effective_started_at,
+          effective_closed_at: row.effective_closed_at,
+          flow_duration_hours: row.flow_duration_hours,
+          effective_duration_hours: row.effective_duration_hours,
           responsables_meta: row.responsables_meta,
           responsables: row.responsables,
         })),
