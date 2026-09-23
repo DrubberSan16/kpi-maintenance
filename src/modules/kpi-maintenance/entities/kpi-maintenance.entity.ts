@@ -918,6 +918,8 @@ export class EntregaMaterialDetEntity {
   costo_unitario: number;
   @Column({ type: 'varchar', length: 12, default: 'NUEVO' })
   condicion_material: string;
+  /** Linea de kardex de esta salida: por ella le llega el costo FIFO. */
+  @Column({ type: 'uuid', nullable: true }) kardex_id?: string | null;
 }
 
 @Entity({ schema: 'kpi_maintenance', name: 'tb_work_order_desecho' })

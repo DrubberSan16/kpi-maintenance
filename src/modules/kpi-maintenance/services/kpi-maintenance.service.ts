@@ -95,6 +95,7 @@ import {
   WorkOrderTareaEntity,
 } from '../entities/kpi-maintenance.entity';
 import { MaterialPriceTimeline } from '../../../common/pricing/material-price-history.util';
+import { FifoCostEngine } from '../../../common/pricing/fifo-cost.engine';
 import {
   AnalisisAceiteKpiQueryDto,
   AlertaQueryDto,
@@ -3436,14 +3437,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const producto = productMap.get(row.producto_id);
     const bodega = warehouseMap.get(row.bodega_id);
-    const costoUnitario = priceTimeline
-      ? this.resolveDatedMaterialUnitCost(priceTimeline, {
-          productoId: row.producto_id,
-          bodegaId: row.bodega_id,
-          fecha,
-          fallback: this.toNumeric(row.costo_unitario, 0),
-        })
-      : this.toNumeric(row.costo_unitario, 0);
+    // Una entrega enlazada a su kardex se costeo por FIFO: su importe es el
+    // de las capas que consumio y no se revaloriza.
+    const costoUnitario =
+      priceTimeline && !row.kardex_id
+        ? this.resolveDatedMaterialUnitCost(priceTimeline, {
+            productoId: row.producto_id,
+            bodegaId: row.bodega_id,
+            fecha,
+            fallback: this.toNumeric(row.costo_unitario, 0),
+          })
+        : this.toNumeric(row.costo_unitario, 0);
     return {
       ...row,
       costo_unitario: costoUnitario,
@@ -3602,7 +3606,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       [productoId],
       manager,
     );
-    const precioVigente = timeline.priceAt(productoId, new Date(), bodegaId);
+    const precioVigente =
+      (await this.resolveNextFifoLayerCost(manager, productoId, bodegaId)) ??
+      timeline.priceAt(productoId, new Date(), bodegaId);
     const costoUnitario =
       precioVigente ?? (this.toNumeric(kardex?.costo_unitario, 0) || fallbackCost);
     const saldoCostoPromedio =
@@ -24833,6 +24839,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           kardex.salida_cantidad AS salida_cantidad,
           kardex.costo_unitario AS costo_unitario,
           kardex.costo_total AS costo_total,
+          kardex.fifo_origen AS fifo_origen,
           kardex.saldo_cantidad AS saldo_cantidad,
           kardex.observacion AS observacion,
           movimiento.numero_documento AS numero_documento,
@@ -24977,17 +24984,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const cantidad = entrada + salida;
       const storedUnitCost = this.toNumeric(row?.costo_unitario, 0);
       const storedTotalCost = Math.abs(this.toNumeric(row?.costo_total, 0));
-      const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
-        productoId: productId,
-        bodegaId: warehouseId,
-        fecha: row?.fecha,
-        fallback:
-          storedUnitCost > 0
-            ? storedUnitCost
-            : cantidad > 0
-              ? storedTotalCost / cantidad
-              : 0,
-      });
+      const storedCost =
+        storedUnitCost > 0
+          ? storedUnitCost
+          : cantidad > 0
+            ? storedTotalCost / cantidad
+            : 0;
+      // Desde el corte FIFO el kardex guarda el costo de las capas.
+      const costeadoFifo = row?.fifo_origen === null;
+      const unitCost = costeadoFifo
+        ? storedCost
+        : this.resolveDatedMaterialUnitCost(priceTimeline, {
+            productoId: productId,
+            bodegaId: warehouseId,
+            fecha: row?.fecha,
+            fallback: storedCost,
+          });
       const product = productMap.get(productId);
       return {
         kardex_id: String(row?.kardex_id || '').trim(),
@@ -25475,6 +25487,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ]),
     );
 
+    const fifoIssueCosts = await this.loadFifoIssueUnitCosts(
+      filteredConsumos.map((row) => String(row.work_order_id || '').trim()),
+    );
     const replacedBaseMap = new Map<string, any>();
     for (const row of filteredConsumos) {
       const context = workOrderContextMap.get(
@@ -25490,14 +25505,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         warehouseId ??
         'Sin bodega';
       const quantity = this.toNumeric(row.cantidad, 0);
-      const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
-        productoId: row.producto_id,
-        bodegaId: warehouseId,
-        fecha: context.fecha_referencia,
-        fallback:
-          this.toNumeric(row.costo_unitario, 0) ||
-          (quantity > 0 ? this.toNumeric(row.subtotal, 0) / quantity : 0),
-      });
+      // Lo que ya salio de bodega por FIFO vale lo que costaron sus capas; lo
+      // que aun no sale se estima con el precio de la fecha de la OT.
+      const unitCost =
+        fifoIssueCosts.get(
+          `${context.work_order_id}::${row.producto_id}::${warehouseId}`,
+        ) ??
+        this.resolveDatedMaterialUnitCost(priceTimeline, {
+          productoId: row.producto_id,
+          bodegaId: warehouseId,
+          fecha: context.fecha_referencia,
+          fallback:
+            this.toNumeric(row.costo_unitario, 0) ||
+            (quantity > 0 ? this.toNumeric(row.subtotal, 0) / quantity : 0),
+        });
       const subtotal = quantity * unitCost;
 
       if (context.is_maintenance) {
@@ -25937,20 +25958,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         .sort((a, b) => b.total_costo - a.total_costo);
     }
 
+    const fifoActive = await FifoCostEngine.isActive(this.dataSource);
     const inventoryCostDetailedRows = stockRows
       .map((row) => {
         const product = productMap.get(String(row.producto_id || '').trim());
         const warehouse = warehouseMap.get(String(row.bodega_id || '').trim());
         const stockActual = this.toNumeric(row.stock_actual, 0);
-        const unitCost = this.resolveDatedMaterialUnitCost(priceTimeline, {
-          productoId: String(row.producto_id || '').trim(),
-          bodegaId: String(row.bodega_id || '').trim(),
-          fecha: dateRange.toDate,
-          fallback:
-            this.toNumeric(row.costo_promedio_bodega, 0) > 0
-              ? this.toNumeric(row.costo_promedio_bodega, 0)
-              : this.resolveMaterialDefaultCost(product),
-        });
+        const warehouseCost =
+          this.toNumeric(row.costo_promedio_bodega, 0) > 0
+            ? this.toNumeric(row.costo_promedio_bodega, 0)
+            : this.resolveMaterialDefaultCost(product);
+        // Con FIFO el costo de la bodega es el promedio de sus capas vigentes:
+        // stock por ese costo es exactamente lo que valen las capas.
+        const unitCost = fifoActive
+          ? warehouseCost
+          : this.resolveDatedMaterialUnitCost(priceTimeline, {
+              productoId: String(row.producto_id || '').trim(),
+              bodegaId: String(row.bodega_id || '').trim(),
+              fecha: dateRange.toDate,
+              fallback: warehouseCost,
+            });
         const totalCost = Number((stockActual * unitCost).toFixed(4));
         return {
           bodega_id: row.bodega_id,
@@ -26587,6 +26614,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
     >();
 
+    const oilFifoIssueCosts = await this.loadFifoIssueUnitCosts(
+      consumos.map((row) => String(row.work_order_id || '').trim()),
+    );
     for (const row of consumos) {
       const workOrder = workOrderMap.get(String(row.work_order_id || '').trim());
       if (!workOrder) continue;
@@ -26618,14 +26648,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const cantidad = this.toNumeric(row.cantidad, 0);
       // El aceite se valoriza al precio que regia el dia de la OT, la misma
       // regla que usan el kardex y el tablero gerencial.
-      const precio = this.resolveDatedMaterialUnitCost(oilPriceTimeline, {
-        productoId: row.producto_id,
-        bodegaId: row.bodega_id,
-        fecha: referenceDate,
-        fallback:
-          this.toNumeric(row.costo_unitario, 0) ||
-          (cantidad > 0 ? this.toNumeric(row.subtotal, 0) / cantidad : 0),
-      });
+      const precio =
+        oilFifoIssueCosts.get(
+          `${workOrder.id}::${row.producto_id}::${String(row.bodega_id || '').trim()}`,
+        ) ??
+        this.resolveDatedMaterialUnitCost(oilPriceTimeline, {
+          productoId: row.producto_id,
+          bodegaId: row.bodega_id,
+          fecha: referenceDate,
+          fallback:
+            this.toNumeric(row.costo_unitario, 0) ||
+            (cantidad > 0 ? this.toNumeric(row.subtotal, 0) / cantidad : 0),
+        });
       current.cantidad += cantidad;
       current.subtotal += cantidad * precio;
       current.movimientos += 1;
@@ -28413,6 +28447,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
 
     let total = 0;
+    const issuedKardexIds: string[] = [];
     for (const item of dto.items) {
       let reserva = await manager.findOne(ReservaStockEntity, {
         where: {
@@ -28481,17 +28516,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       reserva.estado = remainingReserved > 0 ? 'RESERVADO' : 'CONSUMIDO';
       await manager.save(reserva);
 
-      await entregaDetRepo.save(
-        entregaDetRepo.create({
-          entrega_id: entrega.id,
-          producto_id: item.producto_id,
-          bodega_id: item.bodega_id,
-          cantidad: item.cantidad,
-          costo_unitario: costo,
-          condicion_material: condition,
-        }),
-      );
-
       const movDet = await movimientoDetRepo.save(
         movimientoDetRepo.create({
           movimiento_id: movimiento.id,
@@ -28503,7 +28527,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }),
       );
 
-      await kardexRepo.save(
+      const kardexRow = await kardexRepo.save(
         kardexRepo.create({
           status: 'ACTIVE',
           // El egreso se reutiliza, asi que su fecha es la de apertura; cada
@@ -28526,10 +28550,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           updated_by: movementUser,
         }),
       );
+      issuedKardexIds.push(kardexRow.id);
+
+      // La entrega queda enlazada a su linea de kardex: cuando el costeo FIFO
+      // la recalcula, el importe que ve la OT se actualiza con ella.
+      await entregaDetRepo.save(
+        entregaDetRepo.create({
+          entrega_id: entrega.id,
+          producto_id: item.producto_id,
+          bodega_id: item.bodega_id,
+          cantidad: item.cantidad,
+          costo_unitario: costo,
+          condicion_material: condition,
+          kardex_id: kardexRow.id,
+        }),
+      );
     }
 
     movimiento.total_costos = this.toNumeric(movimiento.total_costos, 0) + total;
     await movimientoRepo.save(movimiento);
+    // El material sale al costo de las capas mas antiguas de la bodega, no al
+    // precio estimado de arriba.
+    await FifoCostEngine.syncPending(manager);
+    total = await this.sumKardexCost(manager, issuedKardexIds, total);
     return {
       entrega_id: entrega.id,
       movimiento_id: movimiento.id,
@@ -31166,6 +31209,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         workOrder.id,
         { actorName, annulledAt, motivo },
       );
+      // Lo anulado de un mes cerrado o anterior al corte FIFO vuelve a la
+      // bodega con la fecha de hoy y el costo con que salio.
+      await FifoCostEngine.syncPending(manager);
 
       workOrder.is_deleted = false;
       workOrder.status = 'ANULADA';
@@ -33158,6 +33204,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         issuedAt,
       );
       let total = 0;
+      const issuedKardexIds: string[] = [];
       for (const item of dto.items) {
         let reserva = await qr.manager.findOne(ReservaStockEntity, {
           where: {
@@ -33215,17 +33262,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         reserva.cantidad = Math.max(remainingReserved, 0);
         reserva.estado = remainingReserved > 0 ? 'RESERVADO' : 'CONSUMIDO';
         await qr.manager.save(reserva);
-        await qr.manager.save(
-          EntregaMaterialDetEntity,
-          qr.manager.create(EntregaMaterialDetEntity, {
-            entrega_id: em.id,
-            producto_id: item.producto_id,
-            bodega_id: item.bodega_id,
-            cantidad: item.cantidad,
-            costo_unitario: costo,
-            condicion_material: condition,
-          }),
-        );
         const movDet = await qr.manager.save(
           MovimientoInventarioDetEntity,
           qr.manager.create(MovimientoInventarioDetEntity, {
@@ -33237,7 +33273,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             condicion_material: condition,
           }),
         );
-        await qr.manager.save(
+        const kardexRow = await qr.manager.save(
           KardexEntity,
           qr.manager.create(KardexEntity, {
             status: 'ACTIVE',
@@ -33261,9 +33297,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             updated_by: movementUser,
           }),
         );
+        issuedKardexIds.push(kardexRow.id);
+        await qr.manager.save(
+          EntregaMaterialDetEntity,
+          qr.manager.create(EntregaMaterialDetEntity, {
+            entrega_id: em.id,
+            producto_id: item.producto_id,
+            bodega_id: item.bodega_id,
+            cantidad: item.cantidad,
+            costo_unitario: costo,
+            condicion_material: condition,
+            kardex_id: kardexRow.id,
+          }),
+        );
       }
       mov.total_costos = this.toNumeric(mov.total_costos, 0) + total;
       await qr.manager.save(mov);
+      // FIFO: el costo real es el de las capas que consumio cada linea.
+      await FifoCostEngine.syncPending(qr.manager);
+      total = await this.sumKardexCost(qr.manager, issuedKardexIds, total);
       this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
       workOrder.updated_by =
         this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
@@ -33796,6 +33848,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       scrapHeader.updated_by = actorName;
       await qr.manager.save(WorkOrderDesechoEntity, scrapHeader);
 
+      // La chatarra se lleva las capas que salieron del origen, con su costo.
+      await FifoCostEngine.syncPending(qr.manager);
+      totalCost = await this.sumMovementKardexCost(
+        qr.manager,
+        movementOut.id,
+        totalCost,
+      );
+
       this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
       workOrder.updated_by =
         this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
@@ -34066,6 +34126,93 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    * los materiales pedidos. Mantenimiento lee las tablas de inventario
    * directamente, asi que consulta la misma fuente que el kardex.
    */
+  /**
+   * Costo unitario FIFO con que salio cada material de cada OT, por bodega:
+   * lo que costaron de verdad las capas consumidas. Solo cuenta lo entregado
+   * desde el corte FIFO (entregas enlazadas a su kardex).
+   */
+  private async loadFifoIssueUnitCosts(workOrderIds: string[]) {
+    const ids = [...new Set(workOrderIds.filter(Boolean))];
+    const costs = new Map<string, number>();
+    if (!ids.length || !(await FifoCostEngine.isActive(this.dataSource))) {
+      return costs;
+    }
+    const rows: Array<Record<string, unknown>> = await this.dataSource.query(
+      `SELECT e.work_order_id, k.producto_id, k.bodega_id,
+              SUM(k.salida_cantidad) AS cantidad,
+              SUM(k.costo_total) AS costo
+         FROM kpi_inventory.tb_entrega_material_det ed
+         JOIN kpi_inventory.tb_entrega_material e ON e.id = ed.entrega_id
+         JOIN kpi_inventory.tb_kardex k ON k.id = ed.kardex_id
+        WHERE e.work_order_id = ANY($1::uuid[])
+          AND COALESCE(e.is_deleted, false) = false
+          AND COALESCE(k.is_deleted, false) = false
+          AND k.fifo_origen IS NULL
+        GROUP BY e.work_order_id, k.producto_id, k.bodega_id`,
+      [ids],
+    );
+    for (const row of rows) {
+      const cantidad = this.toNumeric(row.cantidad, 0);
+      if (!(cantidad > 0)) continue;
+      costs.set(
+        `${row.work_order_id}::${row.producto_id}::${row.bodega_id}`,
+        this.toNumeric(row.costo, 0) / cantidad,
+      );
+    }
+    return costs;
+  }
+
+  /** Costo de la capa que saldra primero de esa bodega. */
+  private async resolveNextFifoLayerCost(
+    manager: EntityManager | null | undefined,
+    productoId: string,
+    bodegaId: string,
+  ): Promise<number | null> {
+    const runner = manager ?? this.dataSource;
+    if (!(await FifoCostEngine.isActive(runner))) return null;
+    const rows: Array<{ costo_unitario: string }> = await runner.query(
+      `SELECT costo_unitario
+         FROM kpi_inventory.tb_fifo_capa
+        WHERE bodega_id = $1 AND producto_id = $2
+          AND cantidad_disponible > 0
+          AND condicion_material = 'NUEVO'
+        ORDER BY fecha_capa, orden
+        LIMIT 1`,
+      [bodegaId, productoId],
+    );
+    if (!rows.length) return null;
+    const costo = this.toNumeric(rows[0].costo_unitario, 0);
+    return costo > 0 ? costo : null;
+  }
+
+  /** Costo con que quedaron las lineas de kardex tras el costeo FIFO. */
+  private async sumKardexCost(
+    manager: EntityManager,
+    kardexIds: string[],
+    fallback: number,
+  ) {
+    if (!kardexIds.length) return fallback;
+    const rows: Array<{ total: string | null }> = await manager.query(
+      `SELECT SUM(costo_total) AS total FROM kpi_inventory.tb_kardex WHERE id = ANY($1::uuid[])`,
+      [kardexIds],
+    );
+    const total = rows[0]?.total;
+    return total === null || total === undefined ? fallback : this.toNumeric(total, fallback);
+  }
+
+  private async sumMovementKardexCost(
+    manager: EntityManager,
+    movimientoId: string,
+    fallback: number,
+  ) {
+    const rows: Array<{ total: string | null }> = await manager.query(
+      `SELECT SUM(costo_total) AS total FROM kpi_inventory.tb_kardex WHERE movimiento_id = $1`,
+      [movimientoId],
+    );
+    const total = rows[0]?.total;
+    return total === null || total === undefined ? fallback : this.toNumeric(total, fallback);
+  }
+
   private async loadMaterialPriceTimeline(
     productIds: Iterable<string | null | undefined>,
     runner?: DataSource | EntityManager,
