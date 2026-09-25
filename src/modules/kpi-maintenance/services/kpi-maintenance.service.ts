@@ -17506,6 +17506,22 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return motivo ? `${motivo} · ${base}` : base;
   }
 
+  /**
+   * Motivo escrito por quien bajo el horometro, sin la nota automatica.
+   *
+   * Es la inversa de `buildHorometerAdjustmentNote`: el motivo va delante y la
+   * nota detras. Las correcciones anteriores a que se pidiera motivo solo
+   * tienen la nota, y devuelven null en vez de repetirla como si fuera uno.
+   */
+  private extractHorometerAdjustmentReason(observacion?: string | null) {
+    const text = this.trimNullableText(observacion);
+    if (!text) return null;
+    const automatic = 'Correccion manual descendente desde ';
+    if (text.startsWith(automatic)) return null;
+    const index = text.lastIndexOf(` · ${automatic}`);
+    return index > 0 ? text.slice(0, index).trim() || null : text;
+  }
+
   private resolveHorometerActor(actor?: RequestActorContext | null, fallback?: unknown) {
     const rawId = this.firstNonEmptyString(actor?.userId);
     return {
@@ -17939,6 +17955,50 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       })),
       'Historial de horometro listado',
     );
+  }
+
+  /**
+   * Ajustes directos de horometro de todos los equipos en un periodo.
+   *
+   * El historial por equipo obliga a recorrerlos uno por uno; un informe
+   * necesita el periodo completo de una vez. Una fecha sola (`2026-09-17`, la
+   * de un formulario) cubre el dia entero en hora local: comparada tal cual, el
+   * hasta se cortaba a medianoche y dejaba fuera los ajustes de ese dia.
+   */
+  async listHorometroAjustesDirectos(range: DateRangeDto) {
+    const qb = this.equipoHorometroHistorialRepo
+      .createQueryBuilder('h')
+      .innerJoin(
+        EquipoEntity,
+        'e',
+        'e.id = h.equipo_id AND e.is_deleted = false',
+      )
+      .where('UPPER(h.fuente) = :fuente', {
+        fuente: this.HOROMETRO_FUENTE_AJUSTE_DIRECTO,
+      });
+    const from = this.horometroRangeBoundary(range?.from, 'start');
+    const to = this.horometroRangeBoundary(range?.to, 'end');
+    if (from) qb.andWhere('h.changed_at >= :from', { from });
+    if (to) qb.andWhere('h.changed_at <= :to', { to });
+    const rows = await qb.orderBy('h.changed_at', 'DESC').getMany();
+    return this.wrap(
+      rows.map((row) => ({
+        ...row,
+        es_ajuste_directo: true,
+        motivo: this.extractHorometerAdjustmentReason(row.observacion),
+      })),
+      'Ajustes directos de horometro listados',
+    );
+  }
+
+  private horometroRangeBoundary(
+    value: string | undefined,
+    edge: 'start' | 'end',
+  ) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    return `${raw} ${edge === 'start' ? '00:00:00' : '23:59:59.999'}`;
   }
 
   async deleteEquipo(id: string) {

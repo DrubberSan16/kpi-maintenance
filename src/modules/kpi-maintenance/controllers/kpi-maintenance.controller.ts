@@ -369,6 +369,16 @@ export class KpiMaintenanceController {
   }
   @ApiTags('Equipos')
   @ApiOperation({
+    summary: 'Listar los ajustes directos de horómetro de todos los equipos',
+    description:
+      'Correcciones manuales hacia atrás hechas en el período, con el motivo que escribió quien las registró. Una fecha sin hora cubre el día completo.',
+  })
+  @Get('equipos/horometro/ajustes')
+  listHorometroAjustesDirectos(@Query() range: DateRangeDto) {
+    return this.service.listHorometroAjustesDirectos(range);
+  }
+  @ApiTags('Equipos')
+  @ApiOperation({
     summary: 'Listar historial de lecturas de horómetro de un equipo',
     description:
       'Con fuente=AJUSTE_DIRECTO devuelve solo las correcciones manuales hacia atrás, que son las que un informe de ajustes necesita.',

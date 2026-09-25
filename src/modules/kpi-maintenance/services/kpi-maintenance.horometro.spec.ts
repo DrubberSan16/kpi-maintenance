@@ -222,4 +222,114 @@ describe('KpiMaintenanceService horometro del control operativo', () => {
       );
     });
   });
+
+  describe('motivo de un ajuste directo', () => {
+    it('recupera el motivo que se escribio delante de la nota', () => {
+      const service = createService();
+      const nota = service.buildHorometerAdjustmentNote(
+        true,
+        1000,
+        'Error de tecleo',
+      );
+      expect(service.extractHorometerAdjustmentReason(nota)).toBe(
+        'Error de tecleo',
+      );
+    });
+
+    it('conserva un motivo que lleva el mismo separador', () => {
+      const service = createService();
+      const nota = service.buildHorometerAdjustmentNote(
+        true,
+        1000,
+        'Tablero cambiado · lectura del nuevo',
+      );
+      expect(service.extractHorometerAdjustmentReason(nota)).toBe(
+        'Tablero cambiado · lectura del nuevo',
+      );
+    });
+
+    it('no presenta la nota automatica de las filas antiguas como motivo', () => {
+      const service = createService();
+      expect(
+        service.extractHorometerAdjustmentReason(
+          'Correccion manual descendente desde 1000; la nueva lectura se establece como base anterior.',
+        ),
+      ).toBeNull();
+      expect(service.extractHorometerAdjustmentReason(null)).toBeNull();
+    });
+  });
+
+  describe('ajustes directos de todos los equipos', () => {
+    function createServiceForAdjustments(rows: unknown[]) {
+      const qb: Record<string, jest.Mock> = {};
+      for (const method of ['innerJoin', 'where', 'andWhere', 'orderBy']) {
+        qb[method] = jest.fn(() => qb);
+      }
+      qb.getMany = jest.fn(async () => rows);
+      const service = createService({
+        equipoHorometroHistorialRepo: { createQueryBuilder: jest.fn(() => qb) },
+      });
+      return { service, qb };
+    }
+
+    it('lista solo AJUSTE_DIRECTO de equipos vigentes', async () => {
+      const { service, qb } = createServiceForAdjustments([]);
+      await service.listHorometroAjustesDirectos({});
+      expect(qb.innerJoin).toHaveBeenCalledWith(
+        expect.anything(),
+        'e',
+        'e.id = h.equipo_id AND e.is_deleted = false',
+      );
+      expect(qb.where).toHaveBeenCalledWith('UPPER(h.fuente) = :fuente', {
+        fuente: 'AJUSTE_DIRECTO',
+      });
+      expect(qb.andWhere).not.toHaveBeenCalled();
+    });
+
+    it('una fecha de formulario cubre el dia completo', async () => {
+      const { service, qb } = createServiceForAdjustments([]);
+      await service.listHorometroAjustesDirectos({
+        from: '2026-09-01',
+        to: '2026-09-30',
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith('h.changed_at >= :from', {
+        from: '2026-09-01 00:00:00',
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith('h.changed_at <= :to', {
+        to: '2026-09-30 23:59:59.999',
+      });
+    });
+
+    it('respeta una fecha que ya trae hora', async () => {
+      const { service, qb } = createServiceForAdjustments([]);
+      await service.listHorometroAjustesDirectos({
+        to: '2026-09-30T12:00:00',
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith('h.changed_at <= :to', {
+        to: '2026-09-30T12:00:00',
+      });
+    });
+
+    it('devuelve cada ajuste con su motivo aparte', async () => {
+      const { service } = createServiceForAdjustments([
+        {
+          id: 'h-1',
+          equipo_id: 'eq-1',
+          horometro_anterior: '1000.00',
+          horometro_nuevo: '800.00',
+          fuente: 'AJUSTE_DIRECTO',
+          observacion:
+            'Error de tecleo · Correccion manual descendente desde 1000; la nueva lectura se establece como base anterior.',
+        },
+      ]);
+      const result = await service.listHorometroAjustesDirectos({});
+      expect(result.data).toEqual([
+        expect.objectContaining({
+          id: 'h-1',
+          es_ajuste_directo: true,
+          motivo: 'Error de tecleo',
+        }),
+      ]);
+    });
+  });
 });
