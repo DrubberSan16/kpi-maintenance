@@ -243,13 +243,24 @@ export class SaveWorkOrderBundleDto {
   adjuntos_nuevos?: SaveWorkOrderAttachmentDto[];
 
   @ApiPropertyOptional({
-    description: 'Consumo pendiente por persistir',
+    description:
+      'Un solo material a reservar. Se sigue aceptando por compatibilidad; lo nuevo va en consumos_pendientes.',
     type: CreateConsumoDto,
   })
   @IsOptional()
   @ValidateNested()
   @Type(() => CreateConsumoDto)
   consumo_pendiente?: CreateConsumoDto | null;
+
+  @ApiPropertyOptional({
+    description: 'Materiales a reservar junto con la OT, en la misma transacción',
+    type: [CreateConsumoDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateConsumoDto)
+  consumos_pendientes?: CreateConsumoDto[];
 
   @ApiPropertyOptional({
     description: 'Salida de materiales pendiente por persistir',

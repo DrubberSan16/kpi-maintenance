@@ -1,5 +1,6 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -1538,6 +1539,19 @@ export class CreateConsumoDto {
   @IsOptional()
   @IsString()
   observacion?: string;
+}
+
+export class CreateConsumosBatchDto {
+  @ApiProperty({
+    description:
+      'Materiales a reservar en la orden de trabajo. Se reservan todos o ninguno.',
+    type: [CreateConsumoDto],
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => CreateConsumoDto)
+  items: CreateConsumoDto[];
 }
 
 export class ReduceConsumoDto {

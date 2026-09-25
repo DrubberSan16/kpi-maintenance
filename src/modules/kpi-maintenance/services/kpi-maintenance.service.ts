@@ -107,6 +107,7 @@ import {
   CreateBitacoraDto,
   CreateComponenteDto,
   CreateConsumoDto,
+  CreateConsumosBatchDto,
   CreateCronogramaSemanalDto,
   CreateEquipoDto,
   CreateEquipoTipoDto,
@@ -29464,6 +29465,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const createdFiles: string[] = [];
     const header = dto.header ?? {};
+    // `consumo_pendiente` es el formato de un solo material de la pantalla
+    // anterior: mientras el despliegue del frontend no alcanza al del backend
+    // puede seguir llegando, y no debe perderse.
+    const consumosPendientes = [
+      ...(dto.consumos_pendientes ?? []),
+      ...(dto.consumo_pendiente ? [dto.consumo_pendiente] : []),
+    ];
+    const reservedConsumos: Array<
+      CreateConsumoDto & { costo_unitario: number; subtotal: number }
+    > = [];
     let currentPhase = 'validar cabecera de la OT';
     const summary = {
       tareas_nuevas: Array.isArray(dto.tareas_nuevas)
@@ -29475,7 +29486,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       adjuntos_nuevos: Array.isArray(dto.adjuntos_nuevos)
         ? dto.adjuntos_nuevos.length
         : 0,
-      incluyo_consumo: Boolean(dto.consumo_pendiente),
+      consumos_pendientes: consumosPendientes.length,
       incluyo_salida_materiales: Boolean(
         dto.salida_materiales_pendiente?.items?.length,
       ),
@@ -29562,13 +29573,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
-        if (dto.consumo_pendiente) {
-          currentPhase = 'registrar reserva o consumo pendiente';
-          await this.createConsumoWithManager(
+        for (const [index, consumo] of consumosPendientes.entries()) {
+          currentPhase = `reservar el material ${index + 1} de ${consumosPendientes.length}`;
+          const reserved = await this.createConsumoWithManager(
             manager,
             headerResult.workOrder,
-            dto.consumo_pendiente,
+            consumo,
           );
+          reservedConsumos.push({
+            ...consumo,
+            costo_unitario: this.toNumeric(reserved.saved.costo_unitario, 0),
+            subtotal: reserved.subtotal,
+          });
         }
 
         if (dto.salida_materiales_pendiente?.items?.length) {
@@ -29837,8 +29853,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await safePostCommit('la sincronizacion de alertas de la OT', () =>
       this.syncAlertsForWorkOrder(saved),
     );
-    if (dto.consumo_pendiente) {
-      this.queueWorkOrderConsumoEmail(saved, [dto.consumo_pendiente], actor);
+    if (reservedConsumos.length) {
+      this.queueWorkOrderConsumoEmail(saved, reservedConsumos, actor);
     }
     if (dto.salida_materiales_pendiente?.items?.length) {
       await safePostCommit('la alerta de stock por salida de materiales', () =>
@@ -32814,6 +32830,97 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         stock_critico: this.getStockCriticoAmount(reservableStock.stock),
       },
       'Consumo registrado',
+    );
+  }
+
+  /**
+   * Reserva varios materiales en una sola transacción: se reservan todos o
+   * ninguno. Si uno falla, el mensaje dice cuál de la lista fue, porque quien
+   * la armó necesita saber qué corregir sin adivinar.
+   */
+  async createConsumosBatch(
+    workOrderId: string,
+    dto: CreateConsumosBatchDto,
+    actor?: RequestActorContext | null,
+  ) {
+    const items = dto.items ?? [];
+    if (!items.length) {
+      throw new BadRequestException('Indica al menos un material para reservar.');
+    }
+    const workOrder = await this.findOneOrFail(this.woRepo, {
+      id: workOrderId,
+      is_deleted: false,
+    });
+    this.assertWorkOrderAllowsMaterialReservation(workOrder);
+    await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
+    await this.assertWorkOrderNotBlockedByActiveAnnex(
+      workOrder,
+      undefined,
+      'registrar consumos',
+    );
+
+    const reserved = await this.dataSource.transaction(async (manager) => {
+      const rows: Array<
+        Awaited<ReturnType<KpiMaintenanceService['createConsumoWithManager']>> & {
+          item: CreateConsumoDto;
+        }
+      > = [];
+      for (const [index, item] of items.entries()) {
+        try {
+          const result = await this.createConsumoWithManager(manager, workOrder, item);
+          rows.push({ ...result, item });
+        } catch (error: any) {
+          if (!(error instanceof HttpException)) throw error;
+          const message = this.extractHttpExceptionMessage(error);
+          throw new HttpException(
+            `No se reservó ningún material. Material ${index + 1} de ${items.length}: ${message || 'no se pudo reservar'}`,
+            error.getStatus(),
+          );
+        }
+      }
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+      workOrder.updated_by =
+        this.firstNonEmptyString(actor?.username) ?? workOrder.updated_by ?? null;
+      await manager.save(WorkOrderEntity, workOrder);
+      return rows;
+    });
+
+    const workflow = this.normalizeWorkflowStatus(workOrder.status_workflow);
+    for (const { item } of reserved) {
+      await this.appendWorkOrderHistory(
+        workOrderId,
+        workflow,
+        `Consumo registrado para producto ${item.producto_id} por ${item.cantidad}`,
+        {
+          fromStatus: workOrder.status_workflow,
+          changedBy: this.resolveActorHistoryUserId(actor),
+        },
+      );
+      await this.writeSecurityLog({
+        description: `[WO:${workOrderId}] Consumo registrado producto ${item.producto_id} cantidad ${item.cantidad}`,
+        typeLog: 'CONSUMO',
+      });
+    }
+    this.queueWorkOrderConsumoEmail(
+      workOrder,
+      reserved.map(({ item, saved, subtotal }) => ({
+        ...item,
+        costo_unitario: this.toNumeric(saved.costo_unitario, 0),
+        subtotal,
+      })),
+      actor,
+    );
+    return this.wrap(
+      reserved.map(({ saved, producto, bodega }) =>
+        this.mapConsumoWithCatalogs(
+          saved,
+          new Map([[producto.id, producto]]),
+          new Map([[bodega.id, bodega]]),
+        ),
+      ),
+      reserved.length === 1
+        ? 'Material reservado'
+        : `${reserved.length} materiales reservados`,
     );
   }
 

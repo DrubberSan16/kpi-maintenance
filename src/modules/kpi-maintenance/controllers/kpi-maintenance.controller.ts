@@ -34,6 +34,7 @@ import {
   ChangeEstadoDto,
   CreateBitacoraDto,
   CreateConsumoDto,
+  CreateConsumosBatchDto,
   CreateCronogramaSemanalDto,
   DailyOperationsReportQueryDto,
   CreateEquipoDto,
@@ -2340,6 +2341,33 @@ export class KpiMaintenanceController {
     @Req() req: any,
   ) {
     return this.service.createConsumo(id, dto, getRequestActor(req));
+  }
+
+  @ApiTags('Work Orders')
+  @ApiOperation({
+    summary: 'Reservar varios materiales en una orden de trabajo',
+    description:
+      'Todo o nada: si un material no se puede reservar, no se reserva ninguno y el mensaje indica cuál de la lista falló.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'ID de la orden de trabajo',
+    required: true,
+  })
+  @ApiBody({
+    type: CreateConsumosBatchDto,
+    required: true,
+    examples: {
+      ejemplo: { value: { items: [bodyExamples.createConsumo] } },
+    },
+  })
+  @Post('work-orders/:id/consumos/batch')
+  createConsumosBatch(
+    @Param('id') id: string,
+    @Body() dto: CreateConsumosBatchDto,
+    @Req() req: any,
+  ) {
+    return this.service.createConsumosBatch(id, dto, getRequestActor(req));
   }
 
   @ApiTags('Work Orders')
