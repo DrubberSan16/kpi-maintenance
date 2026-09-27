@@ -16589,6 +16589,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (this.normalizeMaintenanceKind(options.maintenanceKind) === 'CEBADO') {
       return null;
     }
+    // La programacion exige equipo (`tb_programacion_plan.equipo_id`) y una OT
+    // de Proyecto no tiene: pedirla la dejaba sin poder pasar a En proceso y,
+    // con ello, sin salida de materiales.
+    if (this.isProyectoMaintenanceKind(options.maintenanceKind)) {
+      return null;
+    }
 
     const linkedProgramacion =
       await this.resolveProgramacionReferenceForWorkOrder(options);

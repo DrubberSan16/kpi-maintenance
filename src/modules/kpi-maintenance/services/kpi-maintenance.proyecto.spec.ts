@@ -235,6 +235,32 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
     });
   });
 
+  describe('paso a En proceso', () => {
+    it('una OT de Proyecto pasa sin programacion: no tiene equipo al cual programarla', async () => {
+      const resolveProgramacionReferenceForWorkOrder = jest.fn();
+      const service = createService({ resolveProgramacionReferenceForWorkOrder });
+      await expect(
+        service.assertWorkOrderCanMoveToInProgress({
+          maintenanceKind: 'PROYECTO',
+          workOrderId: 'wo-1',
+        }),
+      ).resolves.toBeNull();
+      expect(resolveProgramacionReferenceForWorkOrder).not.toHaveBeenCalled();
+    });
+
+    it('una OT de mantenimiento sigue necesitando su programacion', async () => {
+      const service = createService({
+        resolveProgramacionReferenceForWorkOrder: jest.fn().mockResolvedValue(null),
+      });
+      await expect(
+        service.assertWorkOrderCanMoveToInProgress({
+          maintenanceKind: 'CORRECTIVO',
+          workOrderId: 'wo-1',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
   describe('persistencia del detalle', () => {
     const buildManager = () => {
       const repos = new Map<unknown, ReturnType<typeof createRepo>>([
