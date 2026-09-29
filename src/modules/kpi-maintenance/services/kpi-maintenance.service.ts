@@ -550,6 +550,14 @@ const EQUIPO_ESTADO_FUNCIONAMIENTO_VALUES = Object.values(
   EquipoEstadoFuncionamientoEnum,
 );
 
+/**
+ * Prefijo del codigo de un equipo. Un proyecto es un equipo cuyo tipo es
+ * "Proyectos", pero un codigo `EQ-` lo hace pasar por equipo justo donde el
+ * usuario pidio que no se confunda: los proyectos llevan serie propia.
+ */
+const EQUIPO_CODE_PREFIX = 'EQ';
+const PROYECTO_CODE_PREFIX = 'PRY';
+
 const LUBRICANT_IMPORT_PARAMETER_ROWS = [
   { row: 22, label: 'Viscosidad a 100ºC, cSt' },
   { row: 23, label: 'Viscosidad a 40ºC, cSt' },
@@ -6436,8 +6444,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.computeNextAlphaNumericCode('PCS', codes[0] ?? null);
   }
 
-  private async generateNextEquipoCode() {
-    return this.generateNextRepositoryAlphaNumericCode(this.equipoRepo, 'EQ');
+  private async generateNextEquipoCode(prefix: string = EQUIPO_CODE_PREFIX) {
+    return this.generateNextRepositoryAlphaNumericCode(this.equipoRepo, prefix);
+  }
+
+  /**
+   * Un tipo es de proyecto por su NOMBRE, igual que en `applyEquipoGrupoFilter`:
+   * los tipos se dan de alta desde su maestro y un id fijo no sobreviviria a
+   * que alguien creara el suyo. Los dos criterios deben cambiar juntos.
+   */
+  private isProyectoTipoName(nombre?: string | null) {
+    return String(nombre ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .includes('PROYECTO');
+  }
+
+  /** Serie de codigos que corresponde a un equipo segun su tipo. */
+  private async resolveEquipoCodePrefix(equipoTipoId?: string | null) {
+    const id = String(equipoTipoId ?? '').trim();
+    if (!id) return EQUIPO_CODE_PREFIX;
+    const tipo = await this.equipoTipoRepo.findOne({
+      where: { id, is_deleted: false } as any,
+    });
+    return this.isProyectoTipoName(tipo?.nombre)
+      ? PROYECTO_CODE_PREFIX
+      : EQUIPO_CODE_PREFIX;
   }
 
   private async generateNextEquipoTipoCode() {
@@ -6483,10 +6516,24 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async getNextEquipoCode() {
+  /**
+   * Con `grupo=PROYECTOS` devuelve el siguiente codigo de la serie de
+   * proyectos; sin grupo, el de equipos. Es el mismo parametro que usa el
+   * listado de equipos para separar las tres entradas del menu.
+   */
+  async getNextEquipoCode(grupo?: string | null) {
+    const esProyecto =
+      String(grupo ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .toUpperCase() === 'PROYECTOS';
+    const prefix = esProyecto ? PROYECTO_CODE_PREFIX : EQUIPO_CODE_PREFIX;
     return this.wrap(
-      { code: await this.generateNextEquipoCode() },
-      'Siguiente código de equipo generado',
+      { code: await this.generateNextEquipoCode(prefix) },
+      esProyecto
+        ? 'Siguiente código de proyecto generado'
+        : 'Siguiente código de equipo generado',
     );
   }
 
@@ -17571,10 +17618,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const codigo_lubricante =
       String(dto.codigo_lubricante ?? '').trim().toUpperCase() || null;
     const serviceSchedule = this.resolveEquipmentServiceSchedule(dto);
+    const codePrefix = await this.resolveEquipoCodePrefix(dto.equipo_tipo_id);
     let resolution = await this.resolveRequestedCatalogCode(
       this.equipoRepo,
       dto.codigo,
-      () => this.generateNextEquipoCode(),
+      () => this.generateNextEquipoCode(codePrefix),
       'El código solicitado existía en un equipo eliminado lógicamente.',
     );
     let saved: EquipoEntity | null = null;
@@ -17613,7 +17661,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         }
         resolution = {
           requestedCode: resolution.requestedCode ?? dto.codigo ?? null,
-          resolvedCode: await this.generateNextEquipoCode(),
+          resolvedCode: await this.generateNextEquipoCode(codePrefix),
           codeWasReassigned: true,
           reassignmentReason:
             resolution.reassignmentReason ||

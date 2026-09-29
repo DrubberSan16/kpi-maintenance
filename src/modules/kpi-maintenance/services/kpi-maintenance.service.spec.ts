@@ -4907,6 +4907,189 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
     expect(result.data.estado_funcionamiento).toBe('PARADO');
   });
 
+  describe('codigo autogenerado segun el tipo (los proyectos llevan serie PRY)', () => {
+    const tipoProyectos = {
+      id: 'tipo-proyectos',
+      nombre: 'PROYECTOS',
+      is_deleted: false,
+    };
+    const tipoGeneracion = {
+      id: 'tipo-generacion',
+      nombre: 'UNIDAD DE GENERACION',
+      is_deleted: false,
+    };
+
+    const prepararAltaDeEquipo = (codigosExistentes: string[]) => {
+      repos.equipoRepo.find.mockResolvedValue(
+        codigosExistentes.map((codigo, index) => ({
+          id: `equipo-${index}`,
+          codigo,
+        })),
+      );
+      repos.equipoRepo.findOne.mockResolvedValue(null);
+      repos.equipoRepo.save.mockImplementation(async (value: any) => ({
+        id: 'equipo-nuevo',
+        ...value,
+      }));
+      repos.equipoComponenteRepo.find.mockResolvedValue([]);
+    };
+
+    it('sin grupo devuelve la siguiente EQ e ignora la serie PRY', async () => {
+      repos.equipoRepo.find.mockResolvedValue([
+        { id: '1', codigo: 'EQ-A00035' },
+        { id: '2', codigo: 'EQ-A00036' },
+        { id: '3', codigo: 'PRY-A00009' },
+      ]);
+
+      const result = await service.getNextEquipoCode();
+
+      expect(result.data.code).toBe('EQ-A00037');
+    });
+
+    it('con grupo PROYECTOS arranca PRY-A00001 aunque ya haya 36 equipos EQ', async () => {
+      repos.equipoRepo.find.mockResolvedValue([
+        { id: '1', codigo: 'EQ-A00035' },
+        { id: '2', codigo: 'EQ-A00036' },
+      ]);
+
+      const result = await service.getNextEquipoCode('PROYECTOS');
+
+      expect(result.data.code).toBe('PRY-A00001');
+    });
+
+    it('con grupo PROYECTOS continua la serie PRY sin importar mayusculas ni espacios', async () => {
+      repos.equipoRepo.find.mockResolvedValue([
+        { id: '1', codigo: 'EQ-A00036' },
+        { id: '2', codigo: 'PRY-A00001' },
+        { id: '3', codigo: 'PRY-A00002' },
+      ]);
+
+      const result = await service.getNextEquipoCode(' proyectos ');
+
+      expect(result.data.code).toBe('PRY-A00003');
+    });
+
+    it.each([['RESTO'], ['GENERACION'], ['']])(
+      'el grupo "%s" sigue devolviendo la serie de equipos',
+      async (grupo) => {
+        repos.equipoRepo.find.mockResolvedValue([
+          { id: '1', codigo: 'EQ-A00036' },
+          { id: '2', codigo: 'PRY-A00002' },
+        ]);
+
+        const result = await service.getNextEquipoCode(grupo);
+
+        expect(result.data.code).toBe('EQ-A00037');
+      },
+    );
+
+    it('un equipo de tipo Proyectos sin codigo recibe uno PRY', async () => {
+      prepararAltaDeEquipo(['EQ-A00036']);
+      repos.equipoTipoRepo.findOne.mockResolvedValue(tipoProyectos);
+
+      const result = await service.createEquipo({
+        nombre: 'Plataforma mediana',
+        equipo_tipo_id: tipoProyectos.id,
+      } as any);
+
+      expect(result.data.codigo).toBe('PRY-A00001');
+      expect(result.data.code_was_reassigned).toBe(false);
+    });
+
+    it('reconoce el tipo de proyecto aunque el nombre lleve tildes o minusculas', async () => {
+      prepararAltaDeEquipo(['PRY-A00004']);
+      repos.equipoTipoRepo.findOne.mockResolvedValue({
+        id: 'tipo-obras',
+        nombre: 'Proyéctos de obra',
+        is_deleted: false,
+      });
+
+      const result = await service.createEquipo({
+        nombre: 'Muro perimetral',
+        equipo_tipo_id: 'tipo-obras',
+      } as any);
+
+      // La comparacion quita la tilde antes de buscar PROYECTO, igual que el
+      // filtro del listado, asi que el nombre escrito con tilde tambien cuenta.
+      expect(result.data.codigo).toBe('PRY-A00005');
+    });
+
+    it('un equipo de otro tipo sigue en la serie EQ', async () => {
+      prepararAltaDeEquipo(['EQ-A00036', 'PRY-A00001']);
+      repos.equipoTipoRepo.findOne.mockResolvedValue(tipoGeneracion);
+
+      const result = await service.createEquipo({
+        nombre: 'Generador 9',
+        equipo_tipo_id: tipoGeneracion.id,
+      } as any);
+
+      expect(result.data.codigo).toBe('EQ-A00037');
+    });
+
+    it('si el tipo no se encuentra, cae a la serie EQ en vez de fallar', async () => {
+      prepararAltaDeEquipo(['EQ-A00036']);
+      repos.equipoTipoRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.createEquipo({
+        nombre: 'Sin tipo conocido',
+        equipo_tipo_id: 'tipo-borrado',
+      } as any);
+
+      expect(result.data.codigo).toBe('EQ-A00037');
+    });
+
+    it('si el codigo pedido ya existe, el reemplazo respeta la serie del tipo', async () => {
+      prepararAltaDeEquipo(['EQ-A00036', 'PRY-A00001']);
+      repos.equipoTipoRepo.findOne.mockResolvedValue(tipoProyectos);
+      // Dos pantallas abrieron el alta a la vez y ambas recibieron PRY-A00001:
+      // la segunda en guardar ve el codigo ocupado.
+      repos.equipoRepo.findOne.mockResolvedValueOnce({
+        id: 'equipo-1',
+        codigo: 'PRY-A00001',
+        is_deleted: false,
+      });
+
+      const result = await service.createEquipo({
+        codigo: 'PRY-A00001',
+        nombre: 'Segundo proyecto',
+        equipo_tipo_id: tipoProyectos.id,
+      } as any);
+
+      expect(result.data.codigo).toBe('PRY-A00002');
+      expect(result.data.code_was_reassigned).toBe(true);
+    });
+
+    it('si el guardado choca por codigo duplicado, reintenta dentro de la serie PRY', async () => {
+      prepararAltaDeEquipo(['EQ-A00036']);
+      repos.equipoTipoRepo.findOne.mockResolvedValue(tipoProyectos);
+      const choque = Object.assign(new Error('duplicate key'), {
+        code: '23505',
+        constraint: 'tb_equipo_codigo_key',
+      });
+      repos.equipoRepo.save
+        .mockRejectedValueOnce(choque)
+        .mockImplementation(async (value: any) => ({
+          id: 'equipo-nuevo',
+          ...value,
+        }));
+      // Entre el primer intento y el reintento otra pantalla ocupo PRY-A00001.
+      repos.equipoRepo.find
+        .mockResolvedValueOnce([{ id: '1', codigo: 'EQ-A00036' }])
+        .mockResolvedValue([
+          { id: '1', codigo: 'EQ-A00036' },
+          { id: '2', codigo: 'PRY-A00001' },
+        ]);
+
+      const result = await service.createEquipo({
+        nombre: 'Tercer proyecto',
+        equipo_tipo_id: tipoProyectos.id,
+      } as any);
+
+      expect(result.data.codigo).toBe('PRY-A00002');
+      expect(result.data.code_was_reassigned).toBe(true);
+    });
+  });
+
   it('lista el historial de estado de funcionamiento ordenado por fecha descendente', async () => {
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',

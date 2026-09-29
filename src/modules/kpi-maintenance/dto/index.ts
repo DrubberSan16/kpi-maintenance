@@ -85,8 +85,8 @@ export class EquipoQueryDto {
   equipo_tipo_id?: string;
   @ApiPropertyOptional({
     description:
-      'GENERACION lista solo las unidades de generacion; RESTO las excluye. El grupo se resuelve por el nombre del tipo, no por un id fijo.',
-    enum: ['GENERACION', 'RESTO'],
+      'GENERACION lista solo las unidades de generacion; PROYECTOS solo los proyectos; RESTO excluye a ambos. El grupo se resuelve por el nombre del tipo, no por un id fijo.',
+    enum: ['GENERACION', 'PROYECTOS', 'RESTO'],
   })
   @IsOptional()
   @IsString()

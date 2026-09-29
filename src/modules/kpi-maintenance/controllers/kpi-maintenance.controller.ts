@@ -291,9 +291,15 @@ export class KpiMaintenanceController {
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener siguiente código autogenerado de equipo' })
+  @ApiQuery({
+    name: 'grupo',
+    required: false,
+    description:
+      'PROYECTOS devuelve el siguiente código de la serie de proyectos (PRY); sin grupo, el de equipos (EQ).',
+  })
   @Get('equipos/next-code')
-  getNextEquipoCode() {
-    return this.service.getNextEquipoCode();
+  getNextEquipoCode(@Query('grupo') grupo?: string) {
+    return this.service.getNextEquipoCode(grupo);
   }
   @ApiTags('Equipos')
   @ApiOperation({ summary: 'Obtener equipo por ID' })
