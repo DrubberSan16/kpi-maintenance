@@ -2331,10 +2331,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private buildWorkOrderHorometerPayload(
     payload: Record<string, unknown> | null | undefined,
-    equipment?: EquipoEntity | null,
+    equipmentOfOrder?: EquipoEntity | null,
     procedure?: ProcedimientoPlantillaEntity | null,
-    options?: { requireIncrease?: boolean; previousHorometer?: unknown },
+    options?: {
+      requireIncrease?: boolean;
+      previousHorometer?: unknown;
+      maintenanceKind?: unknown;
+    },
   ) {
+    // Una OT de Proyecto no toca ningun horometro, aunque lleve un proyecto
+    // asociado: un proyecto es un equipo solo en la base, no una maquina a la
+    // que medirle horas. Sin este corte, la lectura del proyecto (0) se copiaba
+    // a la OT y la regla de que "la lectura debe avanzar" rechazaba el guardado.
+    const isProyecto = this.isProyectoMaintenanceKind(options?.maintenanceKind);
+    const equipment = isProyecto ? null : equipmentOfOrder;
+    const requireIncrease = isProyecto ? false : options?.requireIncrease;
     const {
       horometro_proyectado: _horometroProyectado,
       horometro_equipo_referencia: _horometroEquipoReferencia,
@@ -2371,7 +2382,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (requestedHorometer != null &&
         this.haveDifferentNumericValue(requestedHorometer, previousHorometer));
     if (
-      options?.requireIncrease &&
+      requireIncrease &&
       requestedHorometerChanged &&
       hasRequestedHorometer &&
       requestedHorometer != null &&
@@ -2480,6 +2491,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   ) {
     const equipmentId = this.firstNonEmptyString(workOrder.equipment_id);
     if (!equipmentId) {
+      return { notes: [] as string[], equipmentUpdated: false };
+    }
+    // El proyecto asociado a una OT de Proyecto no es una maquina: su lectura no
+    // se actualiza desde la OT ni deja notas de horometro en el historial.
+    if (this.isProyectoMaintenanceKind(workOrder.maintenance_kind)) {
       return { notes: [] as string[], equipmentUpdated: false };
     }
     const currentPayload =
@@ -2857,9 +2873,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   // ---------------------------------------------------------------------------
   // OT de Proyecto
   //
-  // Una OT de Proyecto no se ejecuta sobre un equipo sino sobre ubicaciones y
-  // bodegas, y contrata personal eventual que se liquida por dia. Todo lo que
-  // sigue es el soporte de ese caso; el resto del flujo de OT no cambia.
+  // Una OT de Proyecto no se ejecuta sobre una maquina sino sobre ubicaciones y
+  // bodegas, se asocia a un proyecto (un equipo de tipo "Proyectos", que no
+  // tiene horometro que medir) y contrata personal eventual que se liquida por
+  // dia. Todo lo que sigue es el soporte de ese caso; el resto del flujo de OT
+  // no cambia.
   // ---------------------------------------------------------------------------
 
   /** `true` cuando la OT es de tipo Proyecto. */
@@ -2938,6 +2956,49 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           'Alguna de las bodegas indicadas para el proyecto no existe.',
         );
       }
+    }
+  }
+
+  /**
+   * El equipo de una OT de Proyecto es un proyecto: un equipo cuyo tipo es
+   * "Proyectos", el que se registra en su propio modulo. Al CREAR la OT hay que
+   * indicarlo; una OT ya guardada sin proyecto (las anteriores a esta regla)
+   * se puede seguir editando. Una maquina cualquiera no vale: la OT de Proyecto
+   * no mide horas de maquina.
+   *
+   * El tipo solo se comprueba al asociar o cambiar el proyecto: una OT ya
+   * guardada conserva el suyo aunque despues alguien renombre el tipo.
+   */
+  private async assertProyectoWorkOrderEquipment(options: {
+    maintenanceKind: unknown;
+    equipment: EquipoEntity | null;
+    isNew: boolean;
+    previousEquipmentId?: string | null;
+  }) {
+    if (!this.isProyectoMaintenanceKind(options.maintenanceKind)) return;
+    if (!options.equipment) {
+      if (options.isNew) {
+        throw new BadRequestException(
+          'El proyecto es obligatorio en la OT de Proyecto.',
+        );
+      }
+      return;
+    }
+    if (
+      options.previousEquipmentId &&
+      options.previousEquipmentId === options.equipment.id
+    ) {
+      return;
+    }
+    const tipo = options.equipment.equipo_tipo_id
+      ? await this.equipoTipoRepo.findOne({
+          where: { id: options.equipment.equipo_tipo_id, is_deleted: false },
+        })
+      : null;
+    if (!this.isProyectoTipoName(tipo?.nombre)) {
+      throw new BadRequestException(
+        'El equipo de una OT de Proyecto debe ser un proyecto (tipo Proyectos).',
+      );
     }
   }
 
@@ -17087,6 +17148,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (workOrderPayload ?? {}) as Record<string, unknown>,
       equipo,
       procedimiento,
+      { maintenanceKind: workOrder.maintenance_kind },
     );
     this.restoreStoredPreviousHorometer(auditPayload, workOrderPayload);
     const horometerSnapshot =
@@ -25212,6 +25274,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         payload,
         equipment,
         procedure,
+        { maintenanceKind: workOrder.maintenance_kind },
       );
       const horometerSnapshot =
         this.extractWorkOrderHorometerSnapshot(horometerPayload);
@@ -29184,14 +29247,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.firstNonEmptyString(header.equipment_id, workOrder?.equipment_id) ??
       null;
 
-    // La OT de Proyecto se ejecuta sobre ubicaciones y bodegas, no sobre un
-    // equipo; para el resto de tipos el equipo sigue siendo obligatorio.
+    // La OT de Proyecto se ejecuta sobre ubicaciones y bodegas, y se asocia a un
+    // proyecto (no a una maquina); para el resto de tipos el equipo sigue siendo
+    // obligatorio.
     if (!equipmentId && !isProyectoWorkOrder) {
       throw new BadRequestException('Equipo es obligatorio.');
     }
     const equipment = equipmentId
       ? await this.findEquipoOrFail(equipmentId)
       : null;
+    await this.assertProyectoWorkOrderEquipment({
+      maintenanceKind: resolvedMaintenanceKind,
+      equipment,
+      isNew,
+      previousEquipmentId: workOrder?.equipment_id ?? null,
+    });
 
     let resolvedPlanId =
       this.firstNonEmptyString(header.plan_id, workOrder?.plan_id) ?? null;
@@ -29311,6 +29381,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         {
           requireIncrease: !emergencyState.is_emergency,
           previousHorometer: previousHeaderPayload?.horometro_actual,
+          maintenanceKind: resolvedMaintenanceKind,
         },
       );
       this.assertRequiredWorkOrderOutcomePayload(
@@ -30110,7 +30181,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         (entity.valor_json as Record<string, unknown> | null) ?? {},
         equipment,
         resolvedProcedure,
-        { requireIncrease: !emergencyState.is_emergency },
+        {
+          requireIncrease: !emergencyState.is_emergency,
+          maintenanceKind: resolvedMaintenanceKind,
+        },
       );
       entity.requested_by =
         entity.requested_by ??
@@ -30465,6 +30539,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       {
         requireIncrease: !emergencyState.is_emergency,
         previousHorometer: previousPayload?.horometro_actual,
+        maintenanceKind: nextMaintenanceKind,
       },
     );
     wo.maintenance_kind = nextMaintenanceKind;

@@ -382,4 +382,227 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
       });
     });
   });
+
+  // La OT de Proyecto se asocia a un proyecto: un equipo cuyo tipo es
+  // "Proyectos". Es un equipo solo en la base; no es una maquina, asi que nada
+  // del horometro puede activarse por llevarlo.
+  describe('proyecto asociado a la OT', () => {
+    const tipoProyectos = {
+      id: 'tipo-proyectos',
+      nombre: 'PROYECTOS',
+      is_deleted: false,
+    };
+    const tipoGeneracion = {
+      id: 'tipo-generacion',
+      nombre: 'UNIDAD DE GENERACION',
+      is_deleted: false,
+    };
+    const proyecto = {
+      id: 'pry-1',
+      equipo_tipo_id: tipoProyectos.id,
+      horometro_actual: '0.00',
+    };
+    const maquina = {
+      id: 'eq-1',
+      equipo_tipo_id: tipoGeneracion.id,
+      horometro_actual: '15286.00',
+    };
+
+    const buildServiceWithTypes = () => {
+      const equipoTipoRepo = createRepo();
+      equipoTipoRepo.findOne.mockImplementation(
+        async ({ where }: { where: { id: string } }) =>
+          [tipoProyectos, tipoGeneracion].find((tipo) => tipo.id === where.id) ??
+          null,
+      );
+      return createService({ equipoTipoRepo });
+    };
+
+    describe('validacion del equipo', () => {
+      it('no aplica a una OT que no es de proyecto', async () => {
+        const service = buildServiceWithTypes();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'CORRECTIVO',
+            equipment: null,
+            isNew: true,
+          }),
+        ).resolves.toBeUndefined();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'CORRECTIVO',
+            equipment: maquina,
+            isNew: true,
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it('exige el proyecto al crear la OT', async () => {
+        const service = buildServiceWithTypes();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: null,
+            isNew: true,
+          }),
+        ).rejects.toThrow(/proyecto es obligatorio/);
+      });
+
+      it('deja seguir editando una OT guardada antes de esta regla, sin proyecto', async () => {
+        const service = buildServiceWithTypes();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: null,
+            isNew: false,
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it('acepta un equipo cuyo tipo es Proyectos', async () => {
+        const service = buildServiceWithTypes();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: proyecto,
+            isNew: true,
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it('no vuelve a comprobar el tipo de un proyecto que la OT ya tenia', async () => {
+        const service = buildServiceWithTypes();
+        // El tipo se renombro despues de crear la OT: guardarla de nuevo no debe fallar.
+        const renombrado = { id: 'pry-1', equipo_tipo_id: 'tipo-renombrado' };
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: renombrado,
+            isNew: false,
+            previousEquipmentId: 'pry-1',
+          }),
+        ).resolves.toBeUndefined();
+        // Cambiar a otro equipo sigue exigiendo que sea un proyecto.
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: maquina,
+            isNew: false,
+            previousEquipmentId: 'pry-1',
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('rechaza una maquina que no es un proyecto', async () => {
+        const service = buildServiceWithTypes();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: maquina,
+            isNew: true,
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('rechaza un equipo sin tipo', async () => {
+        const service = buildServiceWithTypes();
+        await expect(
+          service.assertProyectoWorkOrderEquipment({
+            maintenanceKind: 'PROYECTO',
+            equipment: { id: 'sin-tipo', equipo_tipo_id: null },
+            isNew: false,
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+    });
+
+    describe('horometro', () => {
+      it('una OT de Proyecto no copia la lectura del proyecto ni exige que avance', () => {
+        const service = createService();
+        // El front de una OT normal manda la lectura del equipo; aqui llegaria
+        // un 0 igual al del proyecto, que en una OT de mantenimiento se rechaza.
+        const result = service.buildWorkOrderHorometerPayload(
+          { horometro_actual: 0 },
+          proyecto,
+          null,
+          { requireIncrease: true, maintenanceKind: 'PROYECTO' },
+        );
+        expect(result.horometro_actual).toBe(0);
+        expect(result.horometro_anterior).toBeNull();
+
+        const sinLectura = service.buildWorkOrderHorometerPayload(
+          {},
+          proyecto,
+          null,
+          { requireIncrease: true, maintenanceKind: 'PROYECTO' },
+        );
+        expect(sinLectura.horometro_actual).toBeNull();
+        expect(sinLectura.horometro_anterior).toBeNull();
+      });
+
+      it('una OT de mantenimiento sigue copiando la lectura del equipo', () => {
+        const service = createService();
+        const result = service.buildWorkOrderHorometerPayload(
+          {},
+          maquina,
+          null,
+          { requireIncrease: true, maintenanceKind: 'CORRECTIVO' },
+        );
+        expect(result.horometro_actual).toBe(15286);
+      });
+
+      it('una OT de mantenimiento sigue exigiendo que la lectura avance', () => {
+        const service = createService();
+        expect(() =>
+          service.buildWorkOrderHorometerPayload(
+            { horometro_actual: 15286 },
+            maquina,
+            null,
+            { requireIncrease: true, maintenanceKind: 'CORRECTIVO' },
+          ),
+        ).toThrow(/debe ser mayor/);
+      });
+
+      it('la OT de Proyecto no actualiza el horometro del proyecto ni deja notas', async () => {
+        const equipoRepo = createRepo();
+        const equipoHorometroHistorialRepo = createRepo();
+        const service = createService({
+          equipoRepo,
+          equipoHorometroHistorialRepo,
+        });
+        const result = await service.syncEquipmentHorometerFromWorkOrder({
+          id: 'wo-1',
+          code: 'OT-A00300',
+          equipment_id: proyecto.id,
+          maintenance_kind: 'PROYECTO',
+          valor_json: { horometro_actual: 25 },
+        });
+        expect(result).toEqual({ notes: [], equipmentUpdated: false });
+        expect(equipoRepo.findOne).not.toHaveBeenCalled();
+        expect(equipoRepo.save).not.toHaveBeenCalled();
+        expect(equipoHorometroHistorialRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('la OT de mantenimiento si actualiza el horometro del equipo', async () => {
+        const equipoRepo = createRepo();
+        equipoRepo.findOne.mockResolvedValue({ ...maquina });
+        const equipoHorometroHistorialRepo = createRepo();
+        const service = createService({
+          equipoRepo,
+          equipoHorometroHistorialRepo,
+        });
+        const result = await service.syncEquipmentHorometerFromWorkOrder({
+          id: 'wo-2',
+          code: 'OT-A00301',
+          equipment_id: maquina.id,
+          maintenance_kind: 'CORRECTIVO',
+          valor_json: { horometro_actual: 15300 },
+        });
+        expect(result.equipmentUpdated).toBe(true);
+        expect(equipoRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({ horometro_actual: 15300 }),
+        );
+      });
+    });
+  });
 });
