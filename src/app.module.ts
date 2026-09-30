@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { EmpleadosModule } from './modules/empleados/empleados.module';
 import { KpiMaintenanceModule } from './modules/kpi-maintenance/kpi-maintenance.module';
 
 function boundedPositiveInteger(
@@ -64,6 +65,7 @@ function boundedPositiveInteger(
       },
     }),
     KpiMaintenanceModule,
+    EmpleadosModule,
   ],
 })
 export class AppModule {}
