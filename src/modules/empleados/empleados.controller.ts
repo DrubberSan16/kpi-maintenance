@@ -51,6 +51,15 @@ export class EmpleadosController {
     return this.service.listarCargos(search);
   }
 
+  @Get('responsables')
+  @ApiOperation({
+    summary:
+      'Empleados activos para elegir como responsables de una tarea o plantilla (sin datos de sueldo)',
+  })
+  responsables() {
+    return this.service.listarParaSeleccion();
+  }
+
   @Post('importar')
   @ApiOperation({
     summary:

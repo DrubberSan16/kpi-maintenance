@@ -10,15 +10,25 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class WorkOrderTareaResponsableDto {
-  @ApiProperty({
-    description: 'ID del usuario responsable',
+  @ApiPropertyOptional({
+    description: 'ID del empleado responsable (se elige de Empleados)',
     format: 'uuid',
   })
+  @IsOptional()
   @IsUUID()
-  user_id: string;
+  empleado_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'ID de usuario: solo para lo guardado antes por usuario. El servicio lo cambia por su empleado cuando lo tiene y rechaza al usuario que no es un empleado.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  user_id?: string;
 
   @ApiPropertyOptional({
     description: 'Horas acumuladas del responsable en la tarea',
@@ -38,7 +48,10 @@ export class CreateWorkOrderTareaDto {
   @IsUUID()
   plan_id?: string;
 
-  @ApiPropertyOptional({ description: 'ID de la tarea de plan', format: 'uuid' })
+  @ApiPropertyOptional({
+    description: 'ID de la tarea de plan',
+    format: 'uuid',
+  })
   @IsOptional()
   @IsUUID()
   tarea_id?: string;
@@ -92,7 +105,7 @@ export class CreateWorkOrderTareaDto {
   task_meta?: Record<string, unknown>;
 
   @ApiPropertyOptional({
-    description: 'Responsables y horas acumuladas por usuario',
+    description: 'Responsables (empleados) y horas acumuladas por persona',
     type: [WorkOrderTareaResponsableDto],
   })
   @IsOptional()
@@ -150,7 +163,7 @@ export class UpdateWorkOrderTareaDto {
   task_meta?: Record<string, unknown>;
 
   @ApiPropertyOptional({
-    description: 'Responsables y horas acumuladas por usuario',
+    description: 'Responsables (empleados) y horas acumuladas por persona',
     type: [WorkOrderTareaResponsableDto],
   })
   @IsOptional()

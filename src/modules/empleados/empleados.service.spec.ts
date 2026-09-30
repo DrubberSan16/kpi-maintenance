@@ -359,6 +359,54 @@ describe('EmpleadosService', () => {
     });
   });
 
+  describe('listarParaSeleccion', () => {
+    it('trae a los activos ordenados por nombre y sin datos de sueldo', async () => {
+      const { service, repo } = crearServicio();
+      await service.crear(
+        base({ nombres_apellidos: 'ZAMBRANO LUIS', cedula: '0802531988' }),
+        null,
+      );
+      await service.crear(
+        base({
+          nombres_apellidos: 'ÁLVAREZ ANA',
+          cedula: '1716621311',
+          user_id: USUARIO_A,
+        }),
+        null,
+      );
+      await service.crear(
+        base({ nombres_apellidos: 'MORA PEDRO', cedula: '1205870940' }),
+        null,
+      );
+      const inactivo = repo.filas.find((f) => f.cedula === '1205870940');
+      if (inactivo) inactivo.status = 'INACTIVE';
+
+      const lista = await service.listarParaSeleccion();
+
+      expect(lista.map((e) => e.nombres_apellidos)).toEqual([
+        'ÁLVAREZ ANA',
+        'ZAMBRANO LUIS',
+      ]);
+      expect(lista[0].user_id).toBe(USUARIO_A);
+      expect(lista[1].user_id).toBeNull();
+      for (const empleado of lista) {
+        expect(Object.keys(empleado).sort()).toEqual([
+          'cargo',
+          'id',
+          'nombres_apellidos',
+          'user_id',
+        ]);
+      }
+    });
+
+    it('un empleado eliminado no se puede elegir', async () => {
+      const { service } = crearServicio();
+      const creado = await service.crear(base(), null);
+      await service.eliminar(creado.id, null);
+      expect(await service.listarParaSeleccion()).toEqual([]);
+    });
+  });
+
   describe('importar', () => {
     const fila = (n: number, extra: Record<string, unknown> = {}) => ({
       fila: n,

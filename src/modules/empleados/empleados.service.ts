@@ -106,6 +106,30 @@ export class EmpleadosService {
       .sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
   }
 
+  /**
+   * Empleados que se pueden elegir como responsables de una tarea o de una
+   * plantilla: los activos, sin sueldo ni valor por hora. Cualquier rol que
+   * arma una OT los pide, y esos importes no le corresponden.
+   */
+  async listarParaSeleccion() {
+    const filas = await this.repo.find({
+      select: { id: true, user_id: true, nombres_apellidos: true, cargo: true },
+      where: { is_deleted: false, status: 'ACTIVE' },
+    });
+    return filas
+      .map((fila) => ({
+        id: fila.id,
+        user_id: fila.user_id ?? null,
+        nombres_apellidos: fila.nombres_apellidos,
+        cargo: fila.cargo,
+      }))
+      .sort((a, b) =>
+        a.nombres_apellidos.localeCompare(b.nombres_apellidos, 'es', {
+          sensitivity: 'base',
+        }),
+      );
+  }
+
   // -------------------------------------------------------------- escritura
 
   async crear(dto: CreateEmpleadoDto, actor: string | null) {

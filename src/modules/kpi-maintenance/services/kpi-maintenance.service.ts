@@ -181,6 +181,16 @@ import {
   MonthlyScheduleDocumentRow,
   parseMonthlyScheduleDocument,
 } from './programacion-mensual-document.parser';
+import {
+  buildEmployeeDirectory,
+  describeTemplateResponsibles,
+  prepareResponsablesForSave,
+  prepareTemplateResponsibles,
+  readResponsables,
+  type EmployeeDirectory,
+  type TaskResponsible,
+  type UserLabelResolver,
+} from './work-order-responsables.util';
 
 type AlertLevel = 'INFO' | 'WARNING' | 'CRITICAL';
 type AlertCategory =
@@ -357,12 +367,7 @@ type AlertRecalculationContext = {
   job_id?: string | null;
 };
 
-type WorkOrderTaskResponsible = {
-  user_id: string;
-  username: string | null;
-  display_name: string;
-  horas: number;
-};
+type WorkOrderTaskResponsible = TaskResponsible;
 
 type WorkOrderAttachmentReference = {
   id: string;
@@ -3319,6 +3324,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 actorUserId
                   ? `COALESCE(responsable->>'user_id', responsable->>'id', '') = :actorUserId`
                   : `1 = 0`
+              }
+              ${
+                actorUserId
+                  ? ` OR EXISTS (
+                        SELECT 1
+                        FROM kpi_maintenance.tb_empleado emp
+                        WHERE emp.id::text = responsable->>'empleado_id'
+                          AND emp.user_id::text = :actorUserId
+                          AND COALESCE(emp.is_deleted, false) = false
+                      )`
+                  : ''
               }
               ${
                 actorUsername
@@ -7588,149 +7604,146 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private normalizeWorkOrderTaskResponsibleHours(value: unknown) {
-    const hours = Number(value ?? 0);
-    if (!Number.isFinite(hours) || hours < 0) {
-      throw new BadRequestException(
-        'Las horas registradas por responsable deben ser numéricas y mayores o iguales a cero.',
-      );
+  /**
+   * Directorio de empleados, con las bajas: lo ya registrado sigue dando el
+   * nombre de quien trabajó aunque hoy esté de baja. Se guarda quince segundos
+   * porque cada lectura de tareas lo pide; quien guarda responsables lo pide
+   * fresco, porque de ahí sale el costo de la hora que se congela.
+   */
+  private employeeDirectoryCache: {
+    expiresAt: number;
+    directory: EmployeeDirectory;
+  } | null = null;
+
+  private async loadEmployeeDirectory(
+    options: { strict?: boolean; fresh?: boolean } = {},
+  ): Promise<EmployeeDirectory> {
+    const now = Date.now();
+    if (
+      !options.fresh &&
+      this.employeeDirectoryCache &&
+      this.employeeDirectoryCache.expiresAt > now
+    ) {
+      return this.employeeDirectoryCache.directory;
     }
-    return Number(hours.toFixed(4));
+    try {
+      const rows = (await this.dataSource.query(`
+        SELECT
+          id::text AS id,
+          user_id::text AS user_id,
+          nombres_apellidos,
+          valor_hora::text AS valor_hora,
+          status,
+          is_deleted
+        FROM kpi_maintenance.tb_empleado
+      `)) as Array<Record<string, unknown>>;
+      const directory = buildEmployeeDirectory(Array.isArray(rows) ? rows : []);
+      this.employeeDirectoryCache = { expiresAt: now + 15_000, directory };
+      return directory;
+    } catch (error: any) {
+      // Al guardar, no poder consultar empleados es un error: aceptar
+      // responsables sin validarlos dejaría pasar cualquier cosa. Al leer, una
+      // tarea sin nombres es mejor que una pantalla que no abre.
+      if (options.strict) throw error;
+      this.logger.warn(
+        `No se pudo consultar el directorio de empleados: ${error?.message ?? 'desconocido'}`,
+      );
+      return buildEmployeeDirectory([]);
+    }
+  }
+
+  /** Nombre de un usuario del sistema, para lo guardado por usuario. */
+  private buildUserLabelResolver(
+    users: SecurityUserDirectoryItem[],
+  ): UserLabelResolver {
+    const byId = new Map(
+      users.filter((item) => item.id).map((item) => [String(item.id), item]),
+    );
+    return (userId) => {
+      const user = byId.get(userId);
+      if (!user) return null;
+      return {
+        username: user.nameUser ?? null,
+        displayName: this.buildSecurityUserDisplayName(user),
+      };
+    };
   }
 
   private mapStoredWorkOrderTaskResponsables(
     values: unknown,
     userMap?: Map<string, SecurityUserDirectoryItem>,
+    directory?: EmployeeDirectory,
   ) {
-    if (!Array.isArray(values)) return [] as WorkOrderTaskResponsible[];
-    const grouped = new Map<string, WorkOrderTaskResponsible>();
-
-    for (const item of values) {
-      const userId = this.firstNonEmptyString((item as any)?.user_id);
-      if (!userId) continue;
-      const directoryUser = userMap?.get(userId);
-      const previous = grouped.get(userId);
-      const hours = this.normalizeWorkOrderTaskResponsibleHours(
-        (item as any)?.horas,
-      );
-      grouped.set(userId, {
-        user_id: userId,
-        username:
-          this.firstNonOpaqueUserLabel(
-            directoryUser?.nameUser,
-            (item as any)?.username,
-            previous?.username,
-          ) ?? null,
-        display_name:
-          this.firstNonOpaqueUserLabel(
-            directoryUser?.nameSurname,
-            directoryUser?.nameUser,
-            (item as any)?.display_name,
-            previous?.display_name,
-            (item as any)?.username,
-            previous?.username,
-          ) ?? 'Usuario asignado',
-        horas: Number(
-          (
-            this.normalizeWorkOrderTaskResponsibleHours(previous?.horas) + hours
-          ).toFixed(4),
-        ),
-      });
-    }
-
-    return [...grouped.values()];
+    return readResponsables(values, {
+      directory,
+      userLabel: userMap
+        ? this.buildUserLabelResolver([...userMap.values()])
+        : undefined,
+    });
   }
 
+  /**
+   * Responsables por defecto de una plantilla: ids de empleado. Un id de usuario
+   * con empleado vinculado se guarda como el de su empleado.
+   */
   private async normalizeProcedimientoResponsabilidades(
     values?: string[] | null,
+    stored?: unknown,
   ) {
-    const userIds = this.normalizeStringArray(values);
-    if (!userIds.length) return [];
-
-    const users = await this.fetchSecurityUsers();
-    const activeUsers = users.filter(
-      (item) => this.isActiveSecurityUser(item) && item.id,
-    );
-    if (!activeUsers.length) {
-      return userIds;
+    const ids = this.normalizeStringArray(values);
+    if (!ids.length) return [];
+    const [directory, users] = await Promise.all([
+      this.loadEmployeeDirectory({ strict: true, fresh: true }),
+      this.fetchSecurityUsers(),
+    ]);
+    const result = prepareTemplateResponsibles(ids, stored, directory, {
+      userLabel: this.buildUserLabelResolver(users),
+    });
+    if (result.problems.length) {
+      throw new BadRequestException(result.problems.join(' '));
     }
-
-    const activeUserMap = new Map(
-      activeUsers.map((item) => [String(item.id), item]),
-    );
-    const missingIds = userIds.filter((userId) => !activeUserMap.has(userId));
-    if (missingIds.length) {
-      throw new BadRequestException(
-        'Todos los responsables por defecto deben ser usuarios activos registrados en el sistema.',
-      );
-    }
-
-    return userIds;
+    return result.ids;
   }
 
   private async buildProcedimientoResponsabilidadesDetalle(
     values?: string[] | null,
   ) {
-    const userIds = this.normalizeStringArray(values);
-    if (!userIds.length) return [];
-    const users = await this.fetchSecurityUsers();
-    const userMap = new Map(
-      users
-        .filter((item) => item.id)
-        .map((item) => [String(item.id), item] as const),
-    );
-
-    return userIds.map((userId) => {
-      const user = userMap.get(userId);
-      return {
-        id: userId,
-        nameUser: user?.nameUser ?? null,
-        nameSurname: user?.nameSurname ?? null,
-        label: this.buildSecurityUserDisplayName(user ?? { id: userId }),
-        status: user?.status ?? null,
-        is_deleted: user?.isDeleted ?? false,
-      };
+    const ids = this.normalizeStringArray(values);
+    if (!ids.length) return [];
+    const [directory, users] = await Promise.all([
+      this.loadEmployeeDirectory(),
+      this.fetchSecurityUsers(),
+    ]);
+    return describeTemplateResponsibles(ids, directory, {
+      userLabel: this.buildUserLabelResolver(users),
     });
   }
 
+  /**
+   * Responsables de una tarea, listos para guardar.
+   *
+   * Salen de Empleados. El costo de la hora lo pone el servidor con el valor
+   * por hora que el empleado tiene en ese momento y queda congelado en la
+   * tarea: un cambio posterior de su valor por hora no toca lo ya registrado.
+   * `stored` es lo que la tarea ya tenía, para conservar ese costo y a quien ya
+   * estaba (aunque hoy esté de baja o sea un usuario sin empleado).
+   */
   private async normalizeWorkOrderTaskResponsables(
     values?: WorkOrderTareaResponsableDto[] | WorkOrderTaskResponsible[] | null,
+    stored?: unknown,
   ) {
     if (!Array.isArray(values) || !values.length) return [];
-    const users = await this.fetchSecurityUsers();
-    const activeUsers = users.filter(
-      (item) => this.isActiveSecurityUser(item) && item.id,
-    );
-    if (!activeUsers.length) {
-      return this.mapStoredWorkOrderTaskResponsables(values);
-    }
-    const activeUserMap = new Map(
-      activeUsers.map((item) => [String(item.id), item]),
-    );
-    const normalized = values.map((item) => {
-      const userId = this.firstNonEmptyString((item as any)?.user_id);
-      if (!userId) {
-        throw new BadRequestException(
-          'Cada responsable de la tarea debe incluir un usuario válido.',
-        );
-      }
-      const user = activeUserMap.get(userId);
-      if (!user) {
-        throw new BadRequestException(
-          'Todos los responsables de la tarea deben ser usuarios activos registrados en el sistema.',
-        );
-      }
-      return {
-        user_id: userId,
-        username: user.nameUser ?? null,
-        display_name: this.buildSecurityUserDisplayName(user),
-        horas: this.normalizeWorkOrderTaskResponsibleHours(
-          (item as any)?.horas,
-        ),
-      } as WorkOrderTaskResponsible;
+    const [directory, users] = await Promise.all([
+      this.loadEmployeeDirectory({ strict: true, fresh: true }),
+      this.fetchSecurityUsers(),
+    ]);
+    const result = prepareResponsablesForSave(values, stored, directory, {
+      userLabel: this.buildUserLabelResolver(users),
     });
-
-    return this.mapStoredWorkOrderTaskResponsables(normalized, activeUserMap);
+    if (result.problems.length) {
+      throw new BadRequestException(result.problems.join(' '));
+    }
+    return result.entries;
   }
 
   private findSecurityUsersByRole(
@@ -9889,13 +9902,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           .filter(Boolean),
       ),
     ] as string[];
-    const [definitions, users] = await Promise.all([
+    const [definitions, users, employeeDirectory] = await Promise.all([
       definitionIds.length
         ? this.planTareaRepo.find({
             where: { id: In(definitionIds), is_deleted: false },
           })
         : Promise.resolve([] as PlanTareaEntity[]),
       this.fetchSecurityUsers(),
+      this.loadEmployeeDirectory(),
     ]);
     const definitionMap = new Map(definitions.map((row) => [row.id, row]));
     const userMap = new Map(
@@ -9926,6 +9940,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const responsables = this.mapStoredWorkOrderTaskResponsables(
           row.responsables,
           userMap,
+          employeeDirectory,
         );
 
         return {
@@ -19587,11 +19602,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async updateProcedimientoPlantilla(id: string, dto: UpdateProcedimientoPlantillaDto) {
     await this.ensureInventoryWarehouseExists(dto.bodega_id ?? null);
+    const currentProcedimiento = await this.findOneOrFail(
+      this.procedimientoRepo,
+      {
+        id,
+        is_deleted: false,
+      },
+    );
     const responsabilidades =
       dto.responsabilidades !== undefined
-        ? await this.normalizeProcedimientoResponsabilidades(dto.responsabilidades)
+        ? await this.normalizeProcedimientoResponsabilidades(
+            dto.responsabilidades,
+            currentProcedimiento.responsabilidades,
+          )
         : null;
-    await this.findOneOrFail(this.procedimientoRepo, { id, is_deleted: false });
 
     await this.dataSource.transaction(async (manager) => {
       const procedimientoRepo = manager.getRepository(ProcedimientoPlantillaEntity);
@@ -25387,6 +25411,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
       });
 
+    type ResponsibleAccumulator = {
+      label: string;
+      empleado_id: string | null;
+      user_id: string | null;
+      horas: number;
+      /** Suma de horas × costo de la hora congelado en cada tarea. */
+      costo: number;
+    };
     const hoursOtMap = new Map<string, any>(
       [...workOrderContextMap.values()].map((context) => [
         context.work_order_id,
@@ -25394,8 +25426,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ...context,
           total_horas: 0,
           total_responsables: 0,
+          costo_mano_obra: 0,
           responsables: '',
-          _responsables: new Map<string, { label: string; horas: number }>(),
+          _responsables: new Map<string, ResponsibleAccumulator>(),
         },
       ]),
     );
@@ -25418,33 +25451,52 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       for (const responsable of responsables) {
         const horas = this.toNumeric(responsable?.horas, 0);
         if (horas <= 0) continue;
+        const empleadoId =
+          this.firstNonEmptyString(responsable?.empleado_id) ?? null;
         const userId =
-          this.firstNonEmptyString(
-            responsable?.user_id,
-            responsable?.id,
-            responsable?.username,
-          ) ?? 'SIN_USUARIO';
+          this.firstNonEmptyString(responsable?.user_id, responsable?.id) ??
+          null;
+        // La persona es su empleado; lo anterior, guardado solo por usuario,
+        // cuenta por su usuario.
+        const personKey = empleadoId
+          ? `E:${empleadoId}`
+          : (userId ??
+            this.firstNonEmptyString(responsable?.username) ??
+            'SIN_USUARIO');
         const userLabel =
           this.firstNonOpaqueUserLabel(
             responsable?.display_name,
             responsable?.nameSurname,
             responsable?.username,
           ) ?? 'Usuario asignado';
+        const costoHora = this.toNumeric(responsable?.costo_hora, 0);
         const summary = hoursOtMap.get(context.work_order_id);
         if (!summary) continue;
-        const currentResponsible = summary._responsables.get(userId) ?? {
-          label: userLabel,
-          horas: 0,
-        };
+        const currentResponsible: ResponsibleAccumulator =
+          summary._responsables.get(personKey) ?? {
+            label: userLabel,
+            empleado_id: empleadoId,
+            user_id: userId,
+            horas: 0,
+            costo: 0,
+          };
         currentResponsible.horas = Number(
           (currentResponsible.horas + horas).toFixed(4),
         );
-        summary._responsables.set(userId, currentResponsible);
+        currentResponsible.costo = Number(
+          (currentResponsible.costo + horas * costoHora).toFixed(4),
+        );
+        summary._responsables.set(personKey, currentResponsible);
         summary.total_horas = Number((summary.total_horas + horas).toFixed(4));
+        summary.costo_mano_obra = Number(
+          (summary.costo_mano_obra + horas * costoHora).toFixed(4),
+        );
         hoursDetailRows.push({
           ...context,
           tarea: taskLabel,
+          person_key: personKey,
           user_id: userId,
+          empleado_id: empleadoId,
           responsable: userLabel,
           horas: Number(horas.toFixed(4)),
         });
@@ -25455,16 +25507,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       [...hoursOtMap.values()].map((row) => {
         const responsablesMeta = [
           ...(
-            row._responsables as Map<string, { label: string; horas: number }>
-          ).entries(),
+            row._responsables as Map<string, ResponsibleAccumulator>
+          ).values(),
         ]
-          .sort((left, right) => right[1].horas - left[1].horas)
-          .map(([userId, item]) => ({
-            user_id: userId,
-            display_name:
-              this.firstNonOpaqueUserLabel(item.label) ?? 'Usuario asignado',
-            horas: Number(this.toNumeric(item.horas, 0).toFixed(4)),
-          }));
+          .sort((left, right) => right.horas - left.horas)
+          .map((item) => {
+            const horas = Number(this.toNumeric(item.horas, 0).toFixed(4));
+            return {
+              user_id: item.user_id,
+              empleado_id: item.empleado_id,
+              display_name:
+                this.firstNonOpaqueUserLabel(item.label) ?? 'Usuario asignado',
+              horas,
+              // Los nombres llevan "costo" para que el filtro de importes los
+              // quite a los roles que no ven costos.
+              costo_hora:
+                horas > 0 ? Number((item.costo / horas).toFixed(4)) : 0,
+              costo_total: Number(this.toNumeric(item.costo, 0).toFixed(4)),
+            };
+          });
         const responsablesDetalle = responsablesMeta.map(
           (item) => `${item.display_name} (${item.horas.toFixed(2)} h)`,
         );
@@ -25472,8 +25533,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ...row,
           total_horas: Number(this.toNumeric(row.total_horas, 0).toFixed(4)),
           total_responsables: (
-            row._responsables as Map<string, { label: string; horas: number }>
+            row._responsables as Map<string, ResponsibleAccumulator>
           ).size,
+          costo_mano_obra: Number(
+            this.toNumeric(row.costo_mano_obra, 0).toFixed(4),
+          ),
           responsables_meta: responsablesMeta,
           responsables: responsablesDetalle.join(' | ') || 'Sin horas registradas',
         };
@@ -25484,9 +25548,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (groupBy === 'RESPONSABLE') {
       const grouped = new Map<string, any>();
       for (const row of hoursDetailRows) {
-        const key = String(row.user_id || 'SIN_USUARIO');
+        const key = String(row.person_key || row.user_id || 'SIN_USUARIO');
         const current = grouped.get(key) ?? {
           user_id: row.user_id,
+          empleado_id: row.empleado_id ?? null,
           responsable: row.responsable,
           total_horas: 0,
           total_ordenes: 0,
@@ -25508,6 +25573,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horasTrabajadasRows = [...grouped.values()]
         .map((row) => ({
           user_id: row.user_id,
+          empleado_id: row.empleado_id,
           responsable: row.responsable,
           total_horas: row.total_horas,
           total_ordenes: row.total_ordenes,
@@ -25637,6 +25703,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           bodega_label: row.bodega_label,
           total_horas: row.total_horas,
           total_responsables: row.total_responsables,
+          costo_mano_obra: row.costo_mano_obra,
           horometro_inicial: row.horometro_anterior_ot,
           horometro_final: row.horometro_actual_ot,
           started_at: row.started_at,
@@ -28283,6 +28350,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                         : `1 = 0`
                     }
                     ${
+                      operatorActorUserId
+                        ? ` OR EXISTS (
+                              SELECT 1
+                              FROM kpi_maintenance.tb_empleado emp
+                              WHERE emp.id::text = responsable->>'empleado_id'
+                                AND emp.user_id::text = :operatorActorUserId
+                                AND COALESCE(emp.is_deleted, false) = false
+                            )`
+                        : ''
+                    }
+                    ${
                       operatorActorUsername
                         ? ` OR LOWER(COALESCE(responsable->>'username', '')) = :operatorActorUsername`
                         : ''
@@ -28786,10 +28864,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const normalizedResponsables =
-      dto.responsables !== undefined
-        ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
-        : [];
     const enforceRequiredCapture =
       this.normalizeWorkflowStatus(workOrder.status_workflow) === 'CLOSED';
     const isAdditional = Boolean(
@@ -28810,6 +28884,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto,
         { enforceRequiredCapture },
       );
+      const normalizedResponsables =
+        dto.responsables !== undefined
+          ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+          : [];
       const nextOrder = await this.resolveNextWorkOrderTaskOrder(
         workOrder.id,
         resolvedPlanId,
@@ -28888,7 +28966,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         orden_visual: existing?.orden_visual ?? taskDefinition.orden ?? null,
         responsables:
           dto.responsables !== undefined
-            ? normalizedResponsables
+            ? await this.normalizeWorkOrderTaskResponsables(
+                dto.responsables,
+                existing?.responsables,
+              )
             : this.mapStoredWorkOrderTaskResponsables(existing?.responsables),
         observacion: normalized.observacion,
       }),
@@ -28950,7 +29031,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         procedimiento_actividad_id: null,
         responsables:
           dto.responsables !== undefined
-            ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+            ? await this.normalizeWorkOrderTaskResponsables(
+                dto.responsables,
+                tarea.responsables,
+              )
             : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
         observacion: normalized.observacion,
         status: dto.status ?? tarea.status,
@@ -28989,7 +29073,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         null,
       responsables:
         dto.responsables !== undefined
-          ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+          ? await this.normalizeWorkOrderTaskResponsables(
+              dto.responsables,
+              tarea.responsables,
+            )
           : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
       observacion: normalized.observacion,
       status: dto.status ?? tarea.status,
@@ -31585,10 +31672,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'La tarea seleccionada no pertenece al plan operativo de la OT.',
       );
     }
-    const normalizedResponsables =
-      dto.responsables !== undefined
-        ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
-        : [];
     const enforceRequiredCapture =
       this.normalizeWorkflowStatus(workOrder.status_workflow) === 'CLOSED';
     const isAdditional = Boolean(
@@ -31613,6 +31696,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto,
         { enforceRequiredCapture },
       );
+      const normalizedResponsables =
+        dto.responsables !== undefined
+          ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+          : [];
       const nextOrder = await this.resolveNextWorkOrderTaskOrder(
         workOrderId,
         resolvedPlanId,
@@ -31687,7 +31774,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           orden_visual: existing?.orden_visual ?? taskDefinition.orden ?? null,
           responsables:
             dto.responsables !== undefined
-              ? normalizedResponsables
+              ? await this.normalizeWorkOrderTaskResponsables(
+                  dto.responsables,
+                  existing?.responsables,
+                )
               : this.mapStoredWorkOrderTaskResponsables(existing?.responsables),
           observacion: normalized.observacion,
         }),
@@ -31781,7 +31871,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         procedimiento_actividad_id: null,
         responsables:
           dto.responsables !== undefined
-            ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+            ? await this.normalizeWorkOrderTaskResponsables(
+                dto.responsables,
+                tarea.responsables,
+              )
             : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
         observacion: normalized.observacion,
         status: dto.status ?? tarea.status,
@@ -31819,7 +31912,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           null,
         responsables:
           dto.responsables !== undefined
-            ? await this.normalizeWorkOrderTaskResponsables(dto.responsables)
+            ? await this.normalizeWorkOrderTaskResponsables(
+                dto.responsables,
+                tarea.responsables,
+              )
             : this.mapStoredWorkOrderTaskResponsables(tarea.responsables),
         observacion: normalized.observacion,
         status: dto.status ?? tarea.status,
