@@ -281,6 +281,29 @@ describe('guardar responsables', () => {
     });
   });
 
+  it('un id de empleado que llega como usuario (pestaña vieja con una plantilla nueva) se guarda como ese empleado', () => {
+    const { entries, problems } = prepareResponsablesForSave(
+      [
+        { user_id: EMP_LUIS, horas: 1 },
+        { user_id: EMP_SIN_USUARIO, horas: 2 },
+      ],
+      [],
+      directory(),
+    );
+    expect(problems).toEqual([]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      empleado_id: EMP_LUIS,
+      user_id: USR_LUIS,
+      costo_hora: 5,
+    });
+    expect(entries[1]).toMatchObject({
+      empleado_id: EMP_SIN_USUARIO,
+      user_id: null,
+      costo_hora: 3.75,
+    });
+  });
+
   it('un usuario sin empleado se rechaza si es nuevo y se conserva si ya estaba', () => {
     const nuevo = prepareResponsablesForSave(
       [{ user_id: USR_SUELTO, horas: 1 }],

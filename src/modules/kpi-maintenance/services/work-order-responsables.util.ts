@@ -117,7 +117,13 @@ function resolveEmployee(
 ) {
   if (!directory) return null;
   if (empleadoId) return directory.byId.get(empleadoId) ?? null;
-  if (userId) return directory.byUserId.get(userId) ?? null;
+  // Un id que no es de ningun usuario pero si de un empleado es un empleado que
+  // llego por el campo del usuario: pasa con una pestaña abierta antes del
+  // cambio, que arma los responsables de una plantilla (que ya trae ids de
+  // empleado) como si fueran usuarios.
+  if (userId) {
+    return directory.byUserId.get(userId) ?? directory.byId.get(userId) ?? null;
+  }
   return null;
 }
 
