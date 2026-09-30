@@ -9703,6 +9703,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       plan_codigo: plan?.codigo ?? null,
       plan_nombre: plan?.nombre ?? null,
       plan_tareas: planTareas,
+      // Lo guardado puede ser el id de un usuario con empleado vinculado: se
+      // devuelve el del empleado, que es el que ofrece el selector.
+      responsabilidades: responsabilidadesDetalle.map((item) => item.id),
       responsabilidades_detalle: responsabilidadesDetalle,
       materiales_detalle: materialIds
         .map((materialId) => materialesMap.get(materialId))
@@ -25411,6 +25414,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
       });
 
+    // OT Proyecto: el personal contratado (dias x valor del dia) tambien es mano
+    // de obra de la OT aunque no sea un empleado, y entra en su costo total.
+    const contractedLaborByOrder = new Map<string, number>();
+    if (filteredWorkOrderIds.size) {
+      const contractedRows = await this.woProyectoPersonalRepo.find({
+        where: {
+          work_order_id: In([...filteredWorkOrderIds]),
+          is_deleted: false,
+        },
+      });
+      for (const row of contractedRows) {
+        const orderId = String(row.work_order_id || '').trim();
+        contractedLaborByOrder.set(
+          orderId,
+          (contractedLaborByOrder.get(orderId) ?? 0) +
+            this.toNumeric(row.dias_laborados, 0) *
+              this.toNumeric(row.valor_dia, 0),
+        );
+      }
+    }
+
     type ResponsibleAccumulator = {
       label: string;
       empleado_id: string | null;
@@ -25427,6 +25451,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: 0,
           total_responsables: 0,
           costo_mano_obra: 0,
+          costo_personal_contratado: Number(
+            (contractedLaborByOrder.get(context.work_order_id) ?? 0).toFixed(4),
+          ),
           responsables: '',
           _responsables: new Map<string, ResponsibleAccumulator>(),
         },
@@ -25704,6 +25731,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           total_horas: row.total_horas,
           total_responsables: row.total_responsables,
           costo_mano_obra: row.costo_mano_obra,
+          costo_personal_contratado: row.costo_personal_contratado,
           horometro_inicial: row.horometro_anterior_ot,
           horometro_final: row.horometro_actual_ot,
           started_at: row.started_at,
@@ -26513,7 +26541,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             label: 'Responsables con horas',
             value: new Set(
               hoursDetailRows
-                .map((row) => String(row.user_id || '').trim())
+                .map((row) => String(row.person_key || row.user_id || '').trim())
                 .filter(Boolean),
             ).size,
           },
@@ -26599,6 +26627,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 )
                 .toFixed(4),
             ),
+            total_costo_mano_obra: Number(
+              hoursOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.costo_mano_obra, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
             total_ordenes: hoursOtRows.length,
           },
           costo_mantenimiento: {
@@ -26636,9 +26672,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 )
                 .toFixed(4),
             ),
+            total_costo_mano_obra: Number(
+              responsablesOtRows
+                .reduce(
+                  (acc, row) => acc + this.toNumeric(row.costo_mano_obra, 0),
+                  0,
+                )
+                .toFixed(4),
+            ),
             total_responsables: new Set(
               hoursDetailRows
-                .map((row) => String(row.user_id || '').trim())
+                .map((row) => String(row.person_key || row.user_id || '').trim())
                 .filter(Boolean),
             ).size,
           },
