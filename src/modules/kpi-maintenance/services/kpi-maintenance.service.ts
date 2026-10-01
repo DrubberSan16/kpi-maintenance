@@ -1718,19 +1718,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return bodega;
   }
 
-  private async buildInventoryCatalogMaps(productIds: string[], warehouseIds: string[]) {
+  private async buildInventoryCatalogMaps(
+    productIds: string[], warehouseIds: string[], includeDeleted = false,
+  ) {
     const uniqueProductIds = [...new Set(productIds.filter(Boolean))];
     const uniqueWarehouseIds = [...new Set(warehouseIds.filter(Boolean))];
 
     const [productos, bodegas] = await Promise.all([
       uniqueProductIds.length
         ? this.productoRepo.find({
-            where: { id: In(uniqueProductIds), is_deleted: false },
+            where: { id: In(uniqueProductIds), ...(includeDeleted ? {} : { is_deleted: false }) },
           })
         : Promise.resolve([] as ProductoEntity[]),
       uniqueWarehouseIds.length
         ? this.bodegaRepo.find({
-            where: { id: In(uniqueWarehouseIds), is_deleted: false },
+            where: { id: In(uniqueWarehouseIds), ...(includeDeleted ? {} : { is_deleted: false }) },
           })
         : Promise.resolve([] as BodegaEntity[]),
     ]);
@@ -3191,7 +3193,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         id: row.location_id,
         codigo: locationById.get(row.location_id)?.codigo ?? null,
         nombre: locationById.get(row.location_id)?.nombre ?? null,
-        label: buildLocationLabel(row.location_id) ?? row.location_id,
+        label: buildLocationLabel(row.location_id) ?? 'Ubicacion sin registro',
       })),
       proyecto_bodega_ids: bodegaIds,
       proyecto_bodegas: bodegas.map((row) => ({
@@ -3199,7 +3201,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         codigo: bodegaById.get(row.bodega_id)?.codigo ?? null,
         nombre: bodegaById.get(row.bodega_id)?.nombre ?? null,
         label:
-          this.buildBodegaLabel(bodegaById.get(row.bodega_id)) ?? row.bodega_id,
+          this.buildBodegaLabel(bodegaById.get(row.bodega_id)) ?? 'Bodega sin registro',
       })),
       proyecto_personal: personal.map((row) => {
         const dias = this.toNumeric(row.dias_laborados, 0);
@@ -3503,11 +3505,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...row,
       producto_codigo: producto?.codigo ?? null,
       producto_nombre: producto?.nombre ?? null,
-      producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      producto_label: this.buildProductoLabel(producto) ?? 'Material sin registro',
+      producto_descripcion: producto?.descripcion ?? null,
       es_aceite: Boolean(producto?.es_aceite),
       bodega_codigo: bodega?.codigo ?? null,
       bodega_nombre: bodega?.nombre ?? null,
-      bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id ?? null,
+      bodega_label: this.buildBodegaLabel(bodega) ?? 'Bodega sin registro',
       cantidad_reservada: null,
       cantidad_emitida: null,
       cantidad_pendiente: null,
@@ -3539,11 +3542,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       costo_unitario: costoUnitario,
       producto_codigo: producto?.codigo ?? null,
       producto_nombre: producto?.nombre ?? null,
-      producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      producto_label: this.buildProductoLabel(producto) ?? 'Material sin registro',
+      producto_descripcion: producto?.descripcion ?? null,
       es_aceite: Boolean(producto?.es_aceite),
       bodega_codigo: bodega?.codigo ?? null,
       bodega_nombre: bodega?.nombre ?? null,
-      bodega_label: this.buildBodegaLabel(bodega) ?? row.bodega_id,
+      bodega_label: this.buildBodegaLabel(bodega) ?? 'Bodega sin registro',
       condicion_material: this.normalizeMaterialCondition(
         row.condicion_material,
       ),
@@ -7412,7 +7416,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             ARRAY[]::text[]
           ) AS sucursal_ids
         FROM kpi_security.tb_user usr
-        INNER JOIN kpi_security.tb_role role
+        LEFT JOIN kpi_security.tb_role role
           ON role.id = usr.role_id
          AND COALESCE(role.is_deleted, false) = false
         LEFT JOIN kpi_security.tb_user_sucursal scope
@@ -9908,7 +9912,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const [definitions, users, employeeDirectory] = await Promise.all([
       definitionIds.length
         ? this.planTareaRepo.find({
-            where: { id: In(definitionIds), is_deleted: false },
+            where: { id: In(definitionIds) },
           })
         : Promise.resolve([] as PlanTareaEntity[]),
       this.fetchSecurityUsers(),
@@ -17076,9 +17080,48 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return enriched;
   }
 
+  private buildWorkOrderAuditLabels(
+    workOrder: Pick<WorkOrderEntity, 'valor_json' | 'created_by' | 'requested_by' | 'approved_by' | 'updated_by'>,
+    users: SecurityUserDirectoryItem[],
+  ) {
+    const payload = (workOrder.valor_json ?? {}) as Record<string, unknown>;
+    // La auditoria incluye usuarios inactivos o dados de baja: no es una
+    // asignacion nueva y debe conservar el nombre de quien hizo el trabajo.
+    const byId = new Map(users.map((user) => [user.id, user]));
+    const byUsername = new Map(
+      users.map((user) => [this.normalizeUsername(user.nameUser), user]),
+    );
+    const labelOf = (...hints: unknown[]) => {
+      for (const hint of hints) {
+        const key = this.firstNonEmptyString(hint);
+        if (!key) continue;
+        const user = byId.get(key) ?? byUsername.get(this.normalizeUsername(key));
+        const label = this.firstNonOpaqueUserLabel(user?.nameSurname, user?.nameUser);
+        if (label) return label;
+      }
+      return this.firstNonOpaqueUserLabel(...hints);
+    };
+    return {
+      created_by_label: labelOf(
+        payload.created_by_user_id, workOrder.created_by, workOrder.requested_by,
+        payload.created_by_name, payload.created_by_username,
+      ),
+      processed_by_label: labelOf(
+        payload.processed_by_user_id, payload.processed_by_name,
+        payload.processed_by_username,
+      ),
+      approved_by_label: labelOf(
+        payload.approved_by_user_id, workOrder.approved_by,
+        payload.approved_by_name, payload.approved_by_username,
+      ),
+      updated_by_label: labelOf(workOrder.updated_by),
+    };
+  }
+
   private async enrichWorkOrder(
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
+    users?: SecurityUserDirectoryItem[],
   ) {
     const workOrderPayload =
       ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
@@ -17093,14 +17136,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       linkedAlert,
     ] = await Promise.all([
       workOrder.equipment_id
-        ? this.equipoRepo.findOne({ where: { id: workOrder.equipment_id, is_deleted: false } })
+        ? this.equipoRepo.findOne({ where: { id: workOrder.equipment_id } })
         : Promise.resolve(null),
       workOrder.plan_id
-        ? this.planRepo.findOne({ where: { id: workOrder.plan_id, is_deleted: false } })
+        ? this.planRepo.findOne({ where: { id: workOrder.plan_id } })
         : Promise.resolve(null),
       workOrder.equipo_componente_id
         ? this.equipoComponenteRepo.findOne({
-            where: { id: workOrder.equipo_componente_id, is_deleted: false },
+            where: { id: workOrder.equipo_componente_id },
           })
         : Promise.resolve(null),
       workOrder.blocked_by_work_order_id
@@ -17144,13 +17187,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const procedimiento =
       (procedimientoIdFromPayload
         ? await this.procedimientoRepo.findOne({
-            where: { id: procedimientoIdFromPayload, is_deleted: false },
+            where: { id: procedimientoIdFromPayload },
           })
         : null) ?? (await this.resolveProcedimientoFromPlan(plan));
     const bodega =
       procedimiento?.bodega_id
         ? await this.bodegaRepo.findOne({
-            where: { id: procedimiento.bodega_id, is_deleted: false },
+            where: { id: procedimiento.bodega_id },
           })
         : null;
 
@@ -17180,7 +17223,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     const liveComponentsForSnapshots = storedComponentIds.length
       ? await this.equipoComponenteRepo.find({
-          where: { id: In(storedComponentIds), is_deleted: false },
+          where: { id: In(storedComponentIds) },
         })
       : [];
     const liveComponentsByIdForSnapshots = new Map(
@@ -17290,12 +17333,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           plannerHints.ownerLabel,
           workOrder.created_by,
         ) ?? null,
-      created_by_label:
-        this.firstNonEmptyString(
-          auditPayload.created_by_name,
-          auditPayload.created_by_username,
-          workOrder.created_by,
-        ) ?? null,
       created_by_username:
         this.firstNonEmptyString(
           auditPayload.created_by_username,
@@ -17307,21 +17344,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           workOrder.requested_by,
         ) ?? null,
       ...horometerSnapshot,
-      processed_by_label:
-        this.firstNonEmptyString(
-          auditPayload.processed_by_name,
-          auditPayload.processed_by_username,
-        ) ?? null,
       processed_by_username:
         this.firstNonEmptyString(auditPayload.processed_by_username) ?? null,
       processed_by_user_id:
         this.firstNonEmptyString(auditPayload.processed_by_user_id) ?? null,
       processed_at: auditPayload.processed_at ?? null,
-      approved_by_label:
-        this.firstNonEmptyString(
-          auditPayload.approved_by_name,
-          auditPayload.approved_by_username,
-        ) ?? null,
       approved_by_username:
         this.firstNonEmptyString(auditPayload.approved_by_username) ?? null,
       approved_by_user_id:
@@ -17343,6 +17370,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       approval_action:
         this.firstNonEmptyString(auditPayload.approval_action) ?? null,
       can_close_or_void: canCloseOrVoid,
+      ...this.buildWorkOrderAuditLabels(
+        workOrder,
+        users ?? await this.fetchSecurityUsers(),
+      ),
     };
   }
 
@@ -28499,8 +28530,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const rows = canViewAnnulled
       ? scopedRows
       : scopedRows.filter((row) => !this.isWorkOrderAnnulled(row));
+    const users = rows.length ? await this.fetchSecurityUsers() : [];
     return this.wrap(
-      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor))),
+      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor, users))),
       'Work orders listadas',
     );
   }
@@ -32234,6 +32266,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       scopedRows.map((row) => row.producto_id),
       scopedRows.map((row) => row.bodega_id || '').filter(Boolean),
+      true,
     );
     const stockWhere = scopedRows
       .map((row) => ({
@@ -33376,6 +33409,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       detalles.map((item) => item.producto_id),
       detalles.map((item) => item.bodega_id),
+      true,
     );
 
     // Cada salida se muestra al precio que regia el dia de la entrega, para
@@ -33451,7 +33485,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return this.wrap([], 'Egresos de bodega listados');
     }
 
-    const [detalles, kardexRows] = await Promise.all([
+    const [detalles, kardexRows, users] = await Promise.all([
       this.dataSource.getRepository(MovimientoInventarioDetEntity).find({
         where: { movimiento_id: In(movimientoIds), is_deleted: false },
         order: { created_at: 'ASC' } as any,
@@ -33459,6 +33493,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.kardexRepo.find({
         where: { movimiento_id: In(movimientoIds), is_deleted: false },
       }),
+      this.fetchSecurityUsers(),
     ]);
 
     // El detalle del movimiento no guarda la bodega, y el egreso crece con la
@@ -33480,6 +33515,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         ...movimientos.map((item) => item.bodega_origen_id ?? ''),
         ...kardexRows.map((item) => item.bodega_id),
       ],
+      true,
     );
     const detailMap = detalles.reduce(
       (acc, item) => {
@@ -33510,9 +33546,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 producto_nombre: producto?.nombre ?? null,
                 producto_descripcion: producto?.descripcion ?? null,
                 producto_label:
-                  this.buildProductoLabel(producto) ?? detalle.producto_id,
+                  this.buildProductoLabel(producto) ?? 'Material sin registro',
                 bodega_id: bodegaId,
-                bodega_label: this.buildBodegaLabel(bodega) ?? bodegaId,
+                bodega_label: this.buildBodegaLabel(bodega) ?? 'Bodega sin registro',
                 unidad_medida_id: detalle.unidad_medida_id ?? null,
                 fecha:
                   dateByDetail.get(String(detalle.id)) ??
@@ -33568,13 +33604,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             work_order_code: workOrder.code ?? null,
             bodega_id: headerWarehouseId,
             bodega_label:
-              this.buildBodegaLabel(headerWarehouse) ?? headerWarehouseId,
+              this.buildBodegaLabel(headerWarehouse) ?? 'Bodega sin registro',
             total_items: items.length,
             total_cantidad: totalCantidad,
             total_costos: this.toNumeric(movimiento.total_costos, totalCostos),
             created_by: movimiento.created_by ?? null,
+            created_by_label: this.buildWorkOrderAuditLabels(movimiento, users).created_by_label,
             created_at: movimiento.created_at ?? null,
             updated_by: movimiento.updated_by ?? null,
+            updated_by_label: this.buildWorkOrderAuditLabels(movimiento, users).updated_by_label,
             updated_at: movimiento.updated_at ?? null,
             detalles: items,
           };
@@ -33831,6 +33869,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         item.bodega_origen_id,
         item.bodega_chatarra_id,
       ]),
+      true,
     );
     const detailMap = details.reduce(
       (acc, item) => {
@@ -33862,10 +33901,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             ...header,
             transferencia_codigo: transfer?.codigo ?? header.code,
             bodega_origen_label:
-              this.buildBodegaLabel(sourceWarehouse) ?? header.bodega_origen_id,
+              this.buildBodegaLabel(sourceWarehouse) ?? 'Bodega sin registro',
             bodega_chatarra_label:
               this.buildBodegaLabel(scrapWarehouse) ??
-              header.bodega_chatarra_id,
+              'Bodega sin registro',
             items: (detailMap[header.id] ?? []).map((item) =>
               this.mapScrapItemWithCatalogs(item, productMap),
             ),
@@ -34343,7 +34382,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...row,
       producto_codigo: producto?.codigo ?? null,
       producto_nombre: producto?.nombre ?? null,
-      producto_label: this.buildProductoLabel(producto) ?? row.producto_id,
+      producto_label: this.buildProductoLabel(producto) ?? 'Material sin registro',
+      producto_descripcion: producto?.descripcion ?? null,
     };
   }
 
