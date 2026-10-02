@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
 import {
   EquipoEntity,
+  WorkOrderEntity,
   EquipoFuncionamientoHistorialEntity,
   EntregaMaterialEntity,
   EntregaMaterialDetEntity,
@@ -4704,6 +4705,7 @@ describe('KpiMaintenanceService equipos - estado_funcionamiento', () => {
   const createTransactionalDataSourceMock = (bag: RepoBag) => {
     const entityRepoMap = new Map<any, any>([
       [EquipoEntity, bag.equipoRepo],
+      [WorkOrderEntity, { find: jest.fn().mockResolvedValue([]) }],
       [
         EquipoFuncionamientoHistorialEntity,
         bag.equipoFuncionamientoHistorialRepo,

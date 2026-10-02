@@ -18,6 +18,8 @@ export class EquipoEntity {
   @Column('numeric', { precision: 18, scale: 2, default: 0 })
   horometro_actual: number;
   @Column({ type: 'timestamp without time zone', nullable: true })
+  horometro_operativo_desde?: Date | null;
+  @Column({ type: 'timestamp without time zone', nullable: true })
   fecha_ultima_lectura?: Date | null;
   @Column({ type: 'boolean', default: false })
   es_servicio: boolean;

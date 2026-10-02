@@ -2505,6 +2505,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (this.isProyectoMaintenanceKind(workOrder.maintenance_kind)) {
       return { notes: [] as string[], equipmentUpdated: false };
     }
+    if (this.normalizeWorkflowStatus(workOrder.status_workflow) === 'CLOSED') {
+      return { notes: [] as string[], equipmentUpdated: false };
+    }
     const currentPayload =
       (workOrder.valor_json as Record<string, unknown> | null | undefined) ?? {};
     const previousSnapshot = this.extractWorkOrderHorometerSnapshot(
@@ -5759,6 +5762,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private buildEquipmentReportLabel(
     equipment?: (Pick<EquipoEntity, 'nombre' | 'modelo'> & {
       marca_nombre?: string | null;
+      equipment_location_label?: string | null;
     }) | null,
   ): string {
     if (!equipment) return 'Sin equipo';
@@ -5767,7 +5771,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const modelo = this.firstNonEmptyString(equipment.modelo);
     if (!nombre) return 'Sin equipo';
     const base = `${marca} - ${nombre}`;
-    return modelo ? `${base} (${modelo})` : base;
+    const label = modelo ? `${base} (${modelo})` : base;
+    return equipment.equipment_location_label ? `${label} · ${equipment.equipment_location_label}` : label;
   }
 
   /**
@@ -5883,6 +5888,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     equipment?:
       | (Pick<EquipoEntity, 'nombre' | 'modelo' | 'nombre_real'> & {
           marca_nombre?: string | null;
+          equipment_location_label?: string | null;
         })
       | null,
   ): string {
@@ -5894,7 +5900,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const identidad = [nombre, modelo].filter(Boolean).join(' - ');
     if (!identidad) return nombreReal ?? marca ?? 'Sin equipo';
     const conMarca = marca ? `${marca} | ${identidad}` : identidad;
-    return nombreReal ? `${conMarca} (${nombreReal})` : conMarca;
+    const label = nombreReal ? `${conMarca} (${nombreReal})` : conMarca;
+    return equipment.equipment_location_label ? `${label} · ${equipment.equipment_location_label}` : label;
   }
 
   /**
@@ -11093,6 +11100,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async buildAnalisisLubricantePayload(row: AnalisisLubricanteEntity) {
+    const equipment = row.equipo_id && this.equipoRepo ? await this.equipoRepo.findOne({ where: { id: row.equipo_id } }) : null;
+    const [equipmentIdentity] = equipment ? await this.attachEquipmentBrandNames([equipment]) : [null];
     const [detalles, producto] = await Promise.all([
       this.analisisLubricanteDetRepo.find({
         where: { analisis_id: row.id, is_deleted: false },
@@ -11226,6 +11235,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return {
       ...row,
       producto_id: row.producto_id ?? identity.producto_id,
+      equipment_location_label: equipmentIdentity?.equipment_location_label ?? null,
+      equipo_nombre: equipment?.nombre ?? row.equipo_nombre,
+      equipo_modelo: equipment?.modelo ?? null,
+      equipo_marca: equipmentIdentity?.marca_nombre ?? null,
       producto_label:
         this.buildProductoLabel(producto) ||
         String(payload.producto_label || '').trim() ||
@@ -17212,6 +17225,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       { maintenanceKind: workOrder.maintenance_kind },
     );
     this.restoreStoredPreviousHorometer(auditPayload, workOrderPayload);
+    const [reportEquipment] = equipo ? await this.attachEquipmentBrandNames([equipo]) : [null];
     const horometerSnapshot =
       this.extractWorkOrderHorometerSnapshot(auditPayload);
 
@@ -17278,6 +17292,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
       es_proyecto: esProyecto,
       ...proyectoDetalle,
+      equipment_location_label: reportEquipment?.equipment_location_label ?? null,
+      equipment_modelo: equipo?.modelo ?? null,
+      equipment_brand_name: reportEquipment?.marca_nombre ?? null,
       equipment_nombre: equipo?.nombre ?? null,
       equipment_nombre_real: equipo?.nombre_real ?? null,
       equipment_codigo: equipo?.codigo ?? null,
@@ -17407,10 +17424,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ]),
     );
 
-    return rows.map((row) => ({
-      ...row,
-      marca_nombre: brandNames.get(String(row.marca_id || '')) || null,
-    }));
+    const locationIds = [...new Set(rows.map(row => row.location_id).filter(Boolean))] as string[];
+    const locations = locationIds.length && this.locationRepo
+      ? await this.locationRepo.find({ where: { id: In(locationIds), is_deleted: false } }) : [];
+    const locationMap = new Map(locations.map(row => [row.id, row]));
+    return rows.map((row) => {
+      const location = locationMap.get(String(row.location_id || ''));
+      return {
+        ...row,
+        marca_nombre: brandNames.get(String(row.marca_id || '')) || null,
+        equipment_location_label: location ? [location.codigo, location.nombre].filter(Boolean).join(' - ') : null,
+        location_nombre: location?.nombre ?? null,
+        location_codigo: location?.codigo ?? null,
+        horometro_operativo_base: Number(row.horometro_actual || 0),
+        horometro_actual: this.operationalHorometer(row),
+      };
+    });
+  }
+
+  private operationalHorometer(equipment: EquipoEntity, now = new Date()) {
+    const base = Number(equipment.horometro_actual || 0);
+    if (equipment.estado_funcionamiento !== 'FUNCIONAMIENTO' || !equipment.horometro_operativo_desde) return base;
+    const elapsed = Math.max(0, now.getTime() - new Date(equipment.horometro_operativo_desde).getTime()) / 3600000;
+    return Number((base + elapsed).toFixed(2));
   }
 
   async listEquipos(query: EquipoQueryDto, sucursalId?: string | null) {
@@ -17831,15 +17867,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...equipoPayload
     } = dto;
     const serviceSchedule = this.resolveEquipmentServiceSchedule(dto, current);
-    const requestedHorometer =
+    let requestedHorometer =
       dto.horometro_actual !== undefined
         ? (this.normalizeHorometro(dto.horometro_actual) ??
           this.toNumeric(dto.horometro_actual))
-        : (this.normalizeHorometro(current.horometro_actual) ?? 0);
+        : this.toNumeric(current.horometro_actual, 0);
     if (requestedHorometer < 0) {
       throw new BadRequestException('El horometro actual no puede ser negativo.');
     }
     const actorSnapshot = this.resolveHorometerActor(actor, dto.updated_by);
+    const closedOrders: WorkOrderEntity[] = [];
     const saved = await this.dataSource.transaction(async (manager) => {
       const equipoRepo = manager.getRepository(EquipoEntity);
       const historyRepo = manager.getRepository(EquipoHorometroHistorialEntity);
@@ -17848,7 +17885,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         lock: { mode: 'pessimistic_write' },
       });
       if (!e) throw new NotFoundException('Equipo no encontrado');
+      if (e.estado_funcionamiento === 'PARADO' && this.normalizeEquipoEstadoFuncionamiento(dto.estado_funcionamiento) === 'FUNCIONAMIENTO') {
+        closedOrders.push(...await this.closeWorkOrdersOnRestart(manager, e, actor));
+      }
       const previousHorometer = this.toNumeric(e.horometro_actual, 0);
+      if (dto.horometro_actual === undefined) requestedHorometer = previousHorometer;
       const isBackwardCorrection = requestedHorometer < previousHorometer;
       const horometerChanged = this.haveDifferentNumericValue(
         previousHorometer,
@@ -17920,7 +17961,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           }),
         );
       }
-      return savedEquipo;
+      return (await equipoRepo.findOne({ where: { id, is_deleted: false } })) || savedEquipo;
     });
     if (Array.isArray(dto.componentes)) {
       await this.syncEquipmentComponents(saved.id, dto.componentes);
@@ -17933,6 +17974,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ) {
       await this.triggerAlertRecalculation('horometro-manual');
     }
+    await this.syncClosedWorkOrders(closedOrders);
     return this.wrap(saved, 'Equipo actualizado');
   }
   /**
@@ -17993,14 +18035,49 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       actor,
     );
   }
+  private async closeWorkOrdersOnRestart(manager: EntityManager, equipment: EquipoEntity, actor?: RequestActorContext | null) {
+    const closedOrders: WorkOrderEntity[] = [];
+    const { id: changedById, label: changedByLabel } = this.resolveHorometerActor(actor);
+    const workOrders = await manager.getRepository(WorkOrderEntity).find({
+      where: { equipment_id: equipment.id, is_deleted: false, status_workflow: In(['IN_PROGRESS', 'REVIEW', 'BLOCKED']) },
+      lock: { mode: 'pessimistic_write' },
+      order: { created_at: 'ASC' },
+    });
+    for (const order of workOrders) {
+      if (this.isProyectoMaintenanceKind(order.maintenance_kind) || this.isWorkOrderAnnulled(order)) continue;
+      await this.assertCanCloseOrVoidWorkOrder(order, actor, 'cerrar al encender el equipo');
+      await this.assertWorkOrderNotBlockedByActiveAnnex(order, manager, 'encender el equipo y cerrar la OT');
+      await this.assertWorkOrderTaskCapturesReadyForClosure(manager, order.id);
+      this.assertRequiredWorkOrderOutcomePayload(order.valor_json, order.maintenance_kind);
+      await this.assertMaterialShortfallAcknowledged(manager, order.id, order.valor_json as Record<string, unknown> | null);
+      const fromStatus = order.status_workflow;
+      order.valor_json = { ...(order.valor_json || {}), horometro_actual: Number(equipment.horometro_actual), cierre_por_encendido: true };
+      order.status_workflow = 'CLOSED';
+      this.applyWorkflowDates(order, fromStatus, 'CLOSED');
+      this.applyWorkOrderAuditStamp(order, actor, 'APPROVED', { action: 'CERRADA' });
+      order.updated_by = changedByLabel || order.updated_by;
+      await manager.getRepository(WorkOrderEntity).save(order);
+      await this.releaseOpenReservationsForWorkOrder(order.id, manager, changedById);
+      const history = manager.getRepository(WorkOrderStatusHistoryEntity);
+      await history.save(history.create({ work_order_id: order.id, from_status: fromStatus, to_status: 'CLOSED', changed_by: changedById, note: 'OT cerrada al encender la unidad. Horómetro final congelado.' }));
+      closedOrders.push(order);
+    }
+    return closedOrders;
+  }
+
+  private async syncClosedWorkOrders(orders: WorkOrderEntity[]) {
+    for (const order of orders) {
+      await this.releaseBlockedWorkOrdersFor(order);
+      await this.syncProgramacionExecutionFromLinkedWorkOrder(order);
+      await this.syncAlertsForWorkOrder(order);
+    }
+    if (orders.length) await this.triggerAlertRecalculation('encendido-cierre-ot');
+  }
+
   async updateEquipoEstadoFuncionamiento(
     id: string,
     dto: UpdateEquipoEstadoFuncionamientoDto,
-    actor?: {
-      userId?: string | null;
-      username?: string | null;
-      displayName?: string | null;
-    },
+    actor?: RequestActorContext | null,
   ) {
     const estado_funcionamiento = this.normalizeEquipoEstadoFuncionamiento(
       dto.estado_funcionamiento,
@@ -18021,6 +18098,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actor?.displayName || actor?.username || actor?.userId || '',
       ).trim() || null;
 
+    const closedOrders: WorkOrderEntity[] = [];
     const saved = await this.dataSource.transaction(async (manager) => {
       const equipoRepo = manager.getRepository(EquipoEntity);
       const historialRepo = manager.getRepository(
@@ -18038,6 +18116,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         return e;
       }
       const now = new Date();
+      if (estadoAnterior === 'PARADO' && estado_funcionamiento === 'FUNCIONAMIENTO') {
+        closedOrders.push(...await this.closeWorkOrdersOnRestart(manager, e, actor));
+      }
       const estadoAnteriorDesde =
         e.estado_funcionamiento_actualizado_en &&
         !Number.isNaN(new Date(e.estado_funcionamiento_actualizado_en).getTime())
@@ -18069,8 +18150,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           changed_by: changedByLabel,
         }),
       );
-      return savedEquipo;
+      return (await equipoRepo.findOne({ where: { id, is_deleted: false } })) || savedEquipo;
     });
+    await this.syncClosedWorkOrders(closedOrders);
     return this.wrap(saved, 'Estado de funcionamiento actualizado');
   }
 

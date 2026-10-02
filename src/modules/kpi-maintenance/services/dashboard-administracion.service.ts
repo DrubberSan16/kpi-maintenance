@@ -238,14 +238,23 @@ export class DashboardAdministracionService {
           NULLIF(TRIM(wo.valor_json ->> 'horometro_anterior'), '')::numeric AS horometro_anterior,
           NULLIF(TRIM(wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro_actual,
           SUM(cr.cantidad) AS galones,
-          SUM(COALESCE(cr.subtotal, 0)) AS costo
+          SUM(cr.cantidad * COALESCE(issued.costo_unitario, cr.costo_unitario, 0)) AS costo
         FROM kpi_process.tb_work_order wo
         INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
           ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
         INNER JOIN kpi_inventory.tb_producto p
           ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        LEFT JOIN LATERAL (
+          SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS costo_unitario
+          FROM kpi_inventory.tb_entrega_material em
+          INNER JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = em.id
+          WHERE em.work_order_id = wo.id AND COALESCE(em.is_deleted, false) = false
+            AND d.producto_id = cr.producto_id AND d.bodega_id = cr.bodega_id
+        ) issued ON true
         WHERE COALESCE(wo.is_deleted, false) = false
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
+          AND UPPER(COALESCE(wo.valor_json ->> 'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
+          AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'CANCELLED', 'VOID')
           AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
         GROUP BY wo.id, wo.equipment_id, momento
@@ -255,6 +264,8 @@ export class DashboardAdministracionService {
         e.codigo AS equipo_codigo,
         COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
         e.nombre_real AS equipo_descripcion,
+        l.id AS location_id,
+        CONCAT_WS(' - ', l.codigo, l.nombre) AS central,
         ROUND(COALESCE(SUM(o.galones), 0)::numeric, 2) AS galones_periodo,
         ROUND(COALESCE(SUM(o.galones) FILTER (
           WHERE o.momento >= $2::timestamp - INTERVAL '7 days'
@@ -276,8 +287,9 @@ export class DashboardAdministracionService {
            FILTER (WHERE o.horometro_actual IS NOT NULL))[1] AS horometro_final
       FROM por_orden o
       INNER JOIN kpi_maintenance.tb_equipo e ON e.id = o.equipment_id
-      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion
-      ORDER BY ots_criticas DESC, galones_periodo DESC, e.codigo
+      LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND COALESCE(l.is_deleted, false) = false
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion, l.id
+      ORDER BY l.nombre NULLS LAST, NULLIF(substring(e.nombre from '(?i)UG[ -]*([0-9]+)'), '')::integer NULLS LAST, e.nombre
       `,
       [desde, hasta, equipoId],
     );

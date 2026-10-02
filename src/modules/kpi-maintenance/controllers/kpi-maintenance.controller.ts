@@ -1022,16 +1022,18 @@ export class KpiMaintenanceController {
   @ApiQuery({ name: 'hasta', required: false, type: String, description: 'YYYY-MM-DD' })
   @ApiQuery({ name: 'equipo_id', required: false, type: String })
   @Get('dashboard-administracion/cebado')
-  getDashboardCebado(
+  async getDashboardCebado(
+    @Req() req: Request,
     @Query('desde') desde?: string,
     @Query('hasta') hasta?: string,
     @Query('equipo_id') equipoId?: string,
   ) {
-    return this.dashboardAdministracion.getCebadoSummary({
+    const response = await this.dashboardAdministracion.getCebadoSummary({
       desde,
       hasta,
       equipo_id: equipoId,
     });
+    return this.service.omitirCostos(response, getRequestActor(req).roleName);
   }
 
   @ApiTags('Dashboard Administracion')
