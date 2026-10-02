@@ -1526,7 +1526,7 @@ export class CreateConsumoDto {
   @Min(0.000001)
   cantidad: number;
   @ApiPropertyOptional({
-    description: 'Costo unitario del consumo. Si no se envía, se toma desde kardex según bodega y producto.',
+    description: 'Campo conservado por compatibilidad. El costo del consumo se obtiene automáticamente de Inventario según bodega y producto.',
     type: Number,
     minimum: 0,
   })

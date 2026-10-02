@@ -28769,10 +28769,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       manager,
       { allowMissingStock: true },
     );
-    const costoUnitario = this.toNumeric(
-      dto.costo_unitario,
-      costReference.costo_unitario,
-    );
+    const costoUnitario = costReference.costo_unitario;
     const subtotal = dto.cantidad * costoUnitario;
     const repo = manager.getRepository(ConsumoRepuestoEntity);
     const saved = await repo.save(
@@ -32298,7 +32295,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async getInventoryCostReference(productoId: string, bodegaId: string) {
     return this.wrap(
-      await this.resolveInventoryCostReference(productoId, bodegaId),
+      await this.resolveInventoryCostReference(productoId, bodegaId, undefined, {
+        allowMissingStock: true,
+      }),
       'Costo de referencia obtenido',
     );
   }
@@ -33148,7 +33147,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       undefined,
       { allowMissingStock: true },
     );
-    const costoUnitario = this.toNumeric(dto.costo_unitario, costReference.costo_unitario);
+    const costoUnitario = costReference.costo_unitario;
     const subtotal = dto.cantidad * costoUnitario;
     const saved = await this.consumoRepo.save(
       this.consumoRepo.create({

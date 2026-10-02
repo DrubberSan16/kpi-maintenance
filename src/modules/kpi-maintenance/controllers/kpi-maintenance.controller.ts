@@ -2278,11 +2278,13 @@ export class KpiMaintenanceController {
   @ApiQuery({ name: 'producto_id', required: true, description: 'ID del producto' })
   @ApiQuery({ name: 'bodega_id', required: true, description: 'ID de la bodega' })
   @Get('inventory/cost-reference')
-  getInventoryCostReference(
+  async getInventoryCostReference(
     @Query('producto_id') productoId: string,
     @Query('bodega_id') bodegaId: string,
+    @Req() req: any,
   ) {
-    return this.service.getInventoryCostReference(productoId, bodegaId);
+    const response = await this.service.getInventoryCostReference(productoId, bodegaId);
+    return this.service.omitirCostos(response, getRequestActor(req).roleName);
   }
 
   @ApiTags('Work Orders')
