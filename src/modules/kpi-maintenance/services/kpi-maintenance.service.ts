@@ -897,6 +897,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     'PREVENTIVO',
     'PREDICTIVO',
     'CEBADO',
+    'SSA',
     'INSPECCION',
     'PROYECTO',
   ] as const;
@@ -907,6 +908,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     'PREVENTIVO',
     'PREDICTIVO',
     'CEBADO',
+    'SSA',
   ] as const;
   private recalculationInterval: NodeJS.Timeout | null = null;
   private horometerReminderTimeout: NodeJS.Timeout | null = null;
@@ -1837,7 +1839,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await this.dataSource.query(`
       UPDATE kpi_maintenance.tb_plan_mantenimiento
       SET tipo = 'PREVENTIVO'
-      WHERE COALESCE(NULLIF(TRIM(tipo), ''), 'PREVENTIVO') NOT IN ('PREVENTIVO', 'CORRECTIVO', 'PREDICTIVO', 'CEBADO')
+      WHERE COALESCE(NULLIF(TRIM(tipo), ''), 'PREVENTIVO') NOT IN ('PREVENTIVO', 'CORRECTIVO', 'PREDICTIVO', 'CEBADO', 'SSA')
     `);
     await this.dataSource.query(`
       DO $$
@@ -1856,7 +1858,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         END IF;
         ALTER TABLE kpi_maintenance.tb_plan_mantenimiento
           ADD CONSTRAINT ck_tb_plan_tipo
-          CHECK (UPPER(COALESCE(TRIM(tipo), '')) IN ('PREVENTIVO', 'CORRECTIVO', 'PREDICTIVO', 'CEBADO'));
+          CHECK (UPPER(COALESCE(TRIM(tipo), '')) IN ('PREVENTIVO', 'CORRECTIVO', 'PREDICTIVO', 'CEBADO', 'SSA'));
       END $$;
     `);
   }
@@ -2819,6 +2821,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (normalized === 'PREVENTIVO') return 'Preventivo';
     if (normalized === 'PREDICTIVO') return 'Predictivo';
     if (normalized === 'CEBADO') return 'Cebado';
+    if (normalized === 'SSA') return 'SSA';
     if (normalized === 'INSPECCION') return 'Inspección';
     if (normalized === 'PROYECTO') return 'Proyecto';
     return normalized || 'Sin definir';
@@ -8811,6 +8814,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
 
     const planCode = this.buildProcedimientoPlanCode(procedimiento);
+    const tipoProcesoSSA =
+      this.normalizeProcedimientoTipoProceso(procedimiento.tipo_proceso) === 'SSA'
+        ? 'SSA'
+        : null;
     let plan = await this.planRepo.findOne({
       where: { codigo: planCode, is_deleted: false },
     });
@@ -8818,6 +8825,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (!plan) {
       const resolvedPlanType = this.resolvePlanMaintenanceType(
         procedimiento.clase_mantenimiento,
+        tipoProcesoSSA,
         'PREVENTIVO',
       );
       plan = this.planRepo.create({
@@ -8836,6 +8844,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     } else {
       const resolvedPlanType = this.resolvePlanMaintenanceType(
         procedimiento.clase_mantenimiento,
+        tipoProcesoSSA,
         plan.tipo,
         'PREVENTIVO',
       );
