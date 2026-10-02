@@ -24,7 +24,8 @@ import {
 } from 'fs/promises';
 import { basename, extname, join } from 'path';
 import * as XLSX from 'xlsx';
-import nodemailer, { type Transporter } from 'nodemailer';
+import nodemailer, { type SendMailOptions, type Transporter } from 'nodemailer';
+import { emailEnumLabel, emailHours, emailLabel, readableEmail } from '../../../common/utils/email-display';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import {
   Brackets,
@@ -4366,7 +4367,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const email = this.normalizeEmail(recipient.email)!;
         if (previouslySent.has(email)) continue;
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: email,
             subject: 'Actualización diaria de horómetros · Justice KPI',
@@ -4623,7 +4624,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       } else {
         for (const { recipient, items } of scopedRecipients) {
           try {
-            await transporter.sendMail({
+            await this.sendReadableEmail(transporter, {
               from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
               to: recipient.email,
               subject: `[Inventario] Stock bajo mínimo · ${items.length} material(es) · ${dateKey}`,
@@ -5017,13 +5018,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     row: Pick<AlertaMantenimientoEntity, 'referencia' | 'referencia_tipo'>,
     payload: Record<string, unknown>,
   ) {
-    const fallback =
-      String(row.referencia || '').trim() ||
-      String(row.referencia_tipo || '').trim() ||
-      'Sin referencia';
+    const fallback = emailLabel(
+      row.referencia_tipo ? emailEnumLabel(row.referencia_tipo) : 'Sin referencia',
+      row.referencia && !String(row.referencia).includes(':') ? row.referencia : null,
+    );
+
+    if (row.referencia_tipo === 'HOROMETRO') {
+      const target = payload.horometro_proximo_mantenimiento ?? String(row.referencia || '').split(':')[2];
+      return target != null && String(target).trim() && Number.isFinite(Number(target))
+        ? `Mantenimiento a las ${Number(target).toFixed(2)} h`
+        : 'Mantenimiento por horómetro';
+    }
+
+    if (row.referencia_tipo === 'EQUIPO_SERVICIO_TIEMPO') {
+      const date = emailLabel('', payload.proximo_servicio_fecha);
+      return date ? `Servicio del equipo · ${date}` : 'Servicio del equipo por tiempo';
+    }
+
+    if (row.referencia_tipo === 'CRONOGRAMA_SEMANAL') {
+      return ['Cronograma semanal', emailLabel('', payload.cronograma_codigo, payload.cronograma_titulo),
+        emailLabel('', payload.actividad), emailLabel('', payload.fecha_actividad)].filter(Boolean).join(' · ');
+    }
+
+    if (row.referencia_tipo === 'PROGRAMACION_MENSUAL') {
+      return ['Programación mensual', emailLabel('', payload.valor_crudo, payload.tipo_mantenimiento),
+        emailLabel('', payload.fecha_programada_nueva)].filter(Boolean).join(' · ');
+    }
 
     if (row.referencia_tipo === 'PROGRAMACION') {
-      const label = this.firstNonEmptyString(
+      const label = emailLabel('',
         payload.referencia_label,
         payload.procedimiento_nombre,
         payload.plan_nombre,
@@ -5034,7 +5057,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (row.referencia_tipo === 'REPORTE_DIARIO') {
-      const label = this.firstNonEmptyString(
+      const label = emailLabel('',
         payload.reporte_codigo,
         payload.fecha_reporte,
       );
@@ -5042,19 +5065,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (row.referencia_tipo === 'ANALISIS_LUBRICANTE') {
-      const label = this.firstNonEmptyString(payload.codigo);
+      const label = emailLabel('', payload.codigo);
       return label ? `Análisis · ${label}` : fallback;
     }
 
     if (row.referencia_tipo === 'COMBUSTIBLE') {
-      const tanque = this.firstNonEmptyString(payload.tanque);
+      const tanque = /^\d+$/.test(String(payload.tanque ?? ''))
+        ? String(payload.tanque) : emailLabel('', payload.tanque);
       return tanque ? `Tanque ${tanque}` : fallback;
     }
 
     if (row.referencia_tipo === 'STOCK_BODEGA') {
       const label = [
-        String(payload.producto_label || '').trim(),
-        String(payload.bodega_label || '').trim(),
+        emailLabel('', payload.producto_label),
+        emailLabel('', payload.bodega_label),
       ]
         .filter(Boolean)
         .join(' · ');
@@ -5063,8 +5087,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (row.referencia_tipo === 'WORK_ORDER') {
       const label = [
-        String(payload.work_order_code || '').trim(),
-        String(payload.work_order_title || '').trim(),
+        emailLabel('', payload.work_order_code),
+        emailLabel('', payload.work_order_title),
       ]
         .filter(Boolean)
         .join(' - ');
@@ -7212,6 +7236,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const transporter = await this.getAlertMailTransporter();
     if (!transporter) return;
 
+    const users = await this.fetchSecurityUsers();
+    const user = this.findSecurityUserByHints(users, {
+      userId: this.firstNonEmptyString(input.payload.user_id, input.payload.actor_user_id, input.createdBy),
+      username: this.firstNonEmptyString(input.payload.username, input.createdBy),
+      email: this.firstNonEmptyString(input.payload.user_email),
+    });
+    const userLabel = user ? this.buildSecurityUserDisplayName(user)
+      : emailLabel('Usuario no identificado', input.payload.user_name, input.payload.actor_name, input.createdBy);
     const subject = `[${input.moduleName}] Error tecnico ${input.ticket}`;
     const text = [
       'Se notifico automaticamente un error tecnico al equipo de soporte.',
@@ -7221,7 +7253,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       `HTTP: ${input.method}`,
       `URL: ${input.requestUrl}`,
       `Status: ${input.statusCode}`,
-      `Usuario: ${input.createdBy}`,
+      `Usuario: ${userLabel}`,
       `Ruta frontend: ${this.firstNonEmptyString(input.payload.frontend_route) ?? 'N/A'}`,
       `Correo usuario: ${this.firstNonEmptyString(input.payload.user_email) ?? 'N/A'}`,
       '',
@@ -7245,7 +7277,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           { label: 'Módulo', value: input.moduleName },
           { label: 'Solicitud', value: `${input.method} ${input.requestUrl}` },
           { label: 'Estado HTTP', value: input.statusCode },
-          { label: 'Usuario', value: input.createdBy },
+          { label: 'Usuario', value: userLabel },
           {
             label: 'Ruta frontend',
             value:
@@ -7261,7 +7293,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
 
     try {
-      await transporter.sendMail({
+      await this.sendReadableEmail(transporter, {
         from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
         to: this.alertAdministratorEmail,
         subject,
@@ -8275,7 +8307,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     row: AlertaMantenimientoEntity,
     payload: Record<string, unknown>,
   ) {
-    const stored = this.firstNonEmptyString(payload.equipo_label);
+    const stored = emailLabel('', payload.equipo_label);
     if (stored) return stored;
 
     const equipoId = this.firstNonEmptyString(row.equipo_id, payload.equipo_id);
@@ -8297,14 +8329,57 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    return (
-      this.firstNonEmptyString(
-        payload.equipo_codigo,
-        payload.equipo_nombre,
-        row.equipo_id,
-        'General',
-      ) ?? 'General'
-    );
+    return emailLabel(equipoId ? 'Equipo no disponible' : 'General', payload.equipo_nombre, payload.equipo_codigo);
+  }
+
+  private resolveWorkOrderEmailEquipment(workOrder: WorkOrderEntity) {
+    return this.resolveAlertEquipmentLabel({ equipo_id: workOrder.equipment_id } as AlertaMantenimientoEntity, {});
+  }
+
+  private async buildEmailEquipmentLabel(equipment: EquipoEntity | null) {
+    if (!equipment) return 'Equipo no disponible';
+    try {
+      const [identity] = await this.attachEquipmentBrandNames([equipment]);
+      return emailLabel('Equipo no disponible', this.buildEquipmentReportLabel(identity));
+    } catch (error: any) {
+      this.logger.warn(`No se pudo completar la identidad del equipo en el correo: ${error?.message ?? 'desconocido'}`);
+      return emailLabel('Equipo no disponible', equipment.nombre, equipment.codigo);
+    }
+  }
+
+  private async prepareAlertEmail(row: AlertaMantenimientoEntity) {
+    const payload = { ...(row.payload_json ?? {}) } as Record<string, unknown>;
+    const workOrderId = this.firstNonEmptyString(row.work_order_id, payload.work_order_id, payload.orden_trabajo_id,
+      row.referencia_tipo === 'WORK_ORDER' ? String(row.referencia || '').split(':')[1] : null);
+    if (workOrderId && !emailLabel('', payload.work_order_code)) {
+      try {
+        const workOrder = await this.woRepo.findOne({ where: { id: workOrderId } });
+        if (workOrder) {
+          payload.work_order_code = workOrder.code;
+          payload.work_order_title = workOrder.title;
+          if (!row.equipo_id && !payload.equipo_id) payload.equipo_id = workOrder.equipment_id;
+        }
+      } catch (error: any) {
+        this.logger.warn(`No se pudo resolver la orden del correo de alerta: ${error?.message ?? 'desconocido'}`);
+      }
+    }
+    const inventoryItems = this.getInventoryAlertItems(payload);
+    if (inventoryItems.some(item => !emailLabel('', item.producto_label) || !emailLabel('', item.bodega_label))) {
+      let productMap = new Map<string, ProductoEntity>();
+      let warehouseMap = new Map<string, BodegaEntity>();
+      try {
+        ({ productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
+          inventoryItems.map(item => item.producto_id), inventoryItems.map(item => item.bodega_id), true));
+      } catch (error: any) {
+        this.logger.warn(`No se pudo consultar el catálogo del correo de inventario: ${error?.message ?? 'desconocido'}`);
+      }
+      payload.inventory_items = inventoryItems.map(item => ({
+        ...item,
+        producto_label: emailLabel('Material sin registro', this.buildProductoLabel(productMap.get(item.producto_id)), item.producto_label),
+        bodega_label: emailLabel('Bodega sin registro', this.buildBodegaLabel(warehouseMap.get(item.bodega_id)), item.bodega_label),
+      }));
+    }
+    return { ...row, payload_json: payload } as AlertaMantenimientoEntity;
   }
 
   private buildAlertEmailSubject(
@@ -8313,13 +8388,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     equipoLabel?: string | null,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
-    const equipo = this.firstNonEmptyString(
+    const equipo = emailLabel('General',
       equipoLabel,
       payload.equipo_label,
       payload.equipo_codigo,
       payload.equipo_nombre,
-      row.equipo_id,
-      'General',
     );
     const kind =
       recipient.type === 'TRANSACTION_OWNER'
@@ -8329,7 +8402,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : recipient.type === 'SUPERVISOR'
             ? 'Supervisión'
             : 'Administrador';
-    return `[Alerta ${this.getAlertEmailLevelLabel(row.nivel)}] ${equipo} · ${row.categoria} · ${kind}`;
+    return `[Alerta ${this.getAlertEmailLevelLabel(row.nivel)}] ${equipo} · ${emailEnumLabel(row.categoria)} · ${kind}`;
   }
 
   private buildAlertEmailHtml(
@@ -8338,7 +8411,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     equipoLabel?: string | null,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
-    const alertType = this.resolveAlertPublicType(row);
+    const alertType = emailEnumLabel(this.resolveAlertPublicType(row));
     const accent = this.getAlertEmailLevelColor(row.nivel);
     const recipientLabel =
       recipient.displayName ||
@@ -8350,13 +8423,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : recipient.type === 'SUPERVISOR'
             ? 'supervisión'
             : 'administracion');
-    const equipo = this.firstNonEmptyString(
+    const equipo = emailLabel('General',
       equipoLabel,
       payload.equipo_label,
       payload.equipo_codigo,
       payload.equipo_nombre,
-      row.equipo_id,
-      'General',
     );
     const destination = this.resolveAlertEmailDestination(row);
     // El correo mostraba `row.referencia`, que es la llave interna de la alerta:
@@ -8370,7 +8441,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return this.buildEnterpriseEmailLayout({
       moduleLabel: 'Justice KPI · Alertas operativas',
-      title: `${row.categoria} · ${this.getAlertEmailLevelLabel(row.nivel)}`,
+      title: `${emailEnumLabel(row.categoria)} · ${this.getAlertEmailLevelLabel(row.nivel)}`,
       summary:
         'Se generó una alerta operativa que requiere seguimiento oportuno.',
       accent,
@@ -8382,11 +8453,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ${this.escapeHtml(row.detalle || 'Alerta operativa')}
         </div>
         ${this.buildEmailInfoTable([
-          { label: 'Estado', value: row.estado },
-          { label: 'Origen', value: row.origen },
+          { label: 'Estado', value: emailEnumLabel(row.estado) },
+          { label: 'Origen', value: emailEnumLabel(row.origen) },
           { label: 'Equipo', value: equipo },
           { label: 'Tipo', value: alertType },
           { label: 'Referencia', value: reference },
+          ...(row.referencia_tipo === 'HOROMETRO' ? [
+            { label: 'Horómetro actual', value: emailHours(payload.horometro_actual) },
+            { label: 'Horas restantes', value: emailHours(payload.horas_restantes) },
+          ] : []),
           {
             label: 'Generada',
             value: this.formatAlertEmailDate(row.fecha_generada),
@@ -8411,14 +8486,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     equipoLabel?: string | null,
   ) {
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
-    const alertType = this.resolveAlertPublicType(row);
-    const equipo = this.firstNonEmptyString(
+    const alertType = emailEnumLabel(this.resolveAlertPublicType(row));
+    const equipo = emailLabel('General',
       equipoLabel,
       payload.equipo_label,
       payload.equipo_codigo,
       payload.equipo_nombre,
-      row.equipo_id,
-      'General',
     );
     const destination = this.resolveAlertEmailDestination(row);
     return [
@@ -8426,10 +8499,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       '',
       'Se genero una alerta operativa en Justice KPI.',
       '',
-      `Categoria: ${row.categoria}`,
+      `Categoria: ${emailEnumLabel(row.categoria)}`,
       `Nivel: ${this.getAlertEmailLevelLabel(row.nivel)}`,
-      `Estado: ${row.estado}`,
-      `Origen: ${row.origen}`,
+      `Estado: ${emailEnumLabel(row.estado)}`,
+      `Origen: ${emailEnumLabel(row.origen)}`,
       `Equipo: ${equipo}`,
       `Tipo: ${alertType}`,
       `Detalle: ${row.detalle || 'Alerta operativa'}`,
@@ -8438,6 +8511,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? 'Resumen general de inventario'
           : this.resolveAlertReferenceDisplay(row, payload)
       }`,
+      ...(row.referencia_tipo === 'HOROMETRO' ? [
+        `Horómetro actual: ${emailHours(payload.horometro_actual)}`,
+        `Horas restantes: ${emailHours(payload.horas_restantes)}`,
+      ] : []),
       `Fecha: ${this.formatAlertEmailDate(row.fecha_generada)}`,
       '',
       ...this.buildInventoryAlertTableText(payload),
@@ -8448,6 +8525,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  private sendReadableEmail(transporter: Transporter, options: SendMailOptions) {
+    return transporter.sendMail(readableEmail(options));
   }
 
   private async getAlertMailTransporter() {
@@ -8532,7 +8613,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const transporter = await this.getAlertMailTransporter();
-    const equipoLabel = await this.resolveAlertEquipmentLabel(row, payload);
+    const emailRow = await this.prepareAlertEmail(row);
+    const equipoLabel = await this.resolveAlertEquipmentLabel(emailRow, emailRow.payload_json ?? {});
     const sent: string[] = [];
     const failed: string[] = [];
     const transactionOwner = recipients.find(
@@ -8548,13 +8630,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (transporter) {
       for (const recipient of recipients) {
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
             replyTo: transactionOwner?.email || undefined,
-            subject: this.buildAlertEmailSubject(row, recipient, equipoLabel),
-            html: this.buildAlertEmailHtml(row, recipient, equipoLabel),
-            text: this.buildAlertEmailText(row, recipient, equipoLabel),
+            subject: this.buildAlertEmailSubject(emailRow, recipient, equipoLabel),
+            html: this.buildAlertEmailHtml(emailRow, recipient, equipoLabel),
+            text: this.buildAlertEmailText(emailRow, recipient, equipoLabel),
           });
           sent.push(recipient.email);
           this.logger.log(
@@ -13279,6 +13361,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       rows.map((row) => row.producto_id),
       rows.map((row) => row.bodega_id),
+      true,
     );
 
     const items = rows
@@ -13291,8 +13374,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
         const producto = productMap.get(row.producto_id);
         const bodega = warehouseMap.get(row.bodega_id);
-        const productoLabel = this.buildProductoLabel(producto) ?? row.producto_id;
-        const bodegaLabel = this.buildBodegaLabel(bodega) ?? row.bodega_id;
+        const productoLabel = emailLabel('Material sin registro', this.buildProductoLabel(producto));
+        const bodegaLabel = emailLabel('Bodega sin registro', this.buildBodegaLabel(bodega));
         const isCritical = stockDisponibleMinimo <= 0;
 
         return {
@@ -13488,7 +13571,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? `[Inventario] Stock minimo por bodega · ${recipientItems.length} material(es)`
           : `[Inventario] Material bajo stock minimo · ${recipientItems[0].producto_label} · ${recipientItems[0].bodega_label}`;
       try {
-        await transporter.sendMail({
+        await this.sendReadableEmail(transporter, {
           from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
           to: recipient.email,
           subject,
@@ -13537,6 +13620,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         this.buildInventoryCatalogMaps(
           valid.map((item) => item.producto_id),
           valid.map((item) => String(item.bodega_id)),
+          true,
         ),
         workOrder.equipment_id
           ? this.equipoRepo.findOne({
@@ -13549,9 +13633,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         // existencia puede haber cambiado.
         this.buildReservationStockMap(valid),
       ]);
-    const equipmentLabel = equipment
-      ? this.buildEquipmentReportLabel(equipment)
-      : 'Equipo no disponible';
+    const equipmentLabel = await this.buildEmailEquipmentLabel(equipment);
     return valid.map((item): InventoryReservationEmailItem => {
       const producto = productMap.get(item.producto_id);
       const bodega = warehouseMap.get(String(item.bodega_id));
@@ -13562,11 +13644,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment_label: equipmentLabel,
         requester_labels: requesterLabels,
         producto_id: item.producto_id,
-        producto_label:
-          this.buildProductoLabel(producto) ?? item.producto_id,
+        producto_label: emailLabel('Material sin registro', this.buildProductoLabel(producto)),
         bodega_id: String(item.bodega_id),
-        bodega_label:
-          this.buildBodegaLabel(bodega) ?? String(item.bodega_id),
+        bodega_label: emailLabel('Bodega sin registro', this.buildBodegaLabel(bodega)),
         sucursal_id: bodega?.sucursal_id ?? null,
         cantidad_reservada: this.toNumeric(item.cantidad),
         stock_actual:
@@ -13867,6 +13947,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const { productMap, warehouseMap } = await this.buildInventoryCatalogMaps(
       keys.map((key) => key.split('|')[0]!),
       keys.map((key) => key.split('|')[1]!),
+      true,
     );
 
     return keys
@@ -13877,10 +13958,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         return {
           producto_id: productoId,
           bodega_id: bodegaId,
-          producto_label:
-            this.buildProductoLabel(productMap.get(productoId)) ?? productoId,
-          bodega_label:
-            this.buildBodegaLabel(warehouseMap.get(bodegaId)) ?? bodegaId,
+          producto_label: emailLabel('Material sin registro', this.buildProductoLabel(productMap.get(productoId))),
+          bodega_label: emailLabel('Bodega sin registro', this.buildBodegaLabel(warehouseMap.get(bodegaId))),
           cantidad_reservada: cantidadReservada,
           cantidad_entregada: cantidadEntregada,
           cantidad_pendiente: Math.max(cantidadReservada - cantidadEntregada, 0),
@@ -14065,9 +14144,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     const context = {
       workOrder,
-      equipmentLabel: equipment
-        ? this.buildEquipmentReportLabel(equipment)
-        : 'Equipo no disponible',
+      equipmentLabel: await this.buildEmailEquipmentLabel(equipment),
       requesterLabels,
       issuerLabel:
         this.firstNonEmptyString(actor?.displayName, actor?.username) ??
@@ -14081,7 +14158,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (transporter) {
       for (const recipient of recipients) {
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
             subject: `[Inventario] Salida de material realizada · OT ${workOrder.code}`,
@@ -14146,7 +14223,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (transporter) {
       for (const { recipient, items: recipientItems } of scopedRecipients) {
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
             subject: `[Inventario] Reserva de materiales · OT ${workOrder.code}`,
@@ -14380,9 +14457,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           where: { id: workOrder.equipment_id, is_deleted: false },
         })
       : null;
-    const equipoLabel =
-      this.firstNonEmptyString(equipo?.nombre, equipo?.nombre_real, equipo?.codigo) ??
-      'Equipo';
+    const equipoLabel = await this.buildEmailEquipmentLabel(equipo);
+    const orderLabel = emailLabel('Orden de trabajo', workOrder.code, workOrder.title);
 
     const transporter = await this.getAlertMailTransporter();
     const workOrdersUrl = this.buildAppModuleUrl('work-orders');
@@ -14398,14 +14474,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const email = this.normalizeEmail(supervisor.email)!;
         const nombre = this.buildSecurityUserDisplayName(supervisor);
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: email,
-            subject: `[Revision OT ${workOrder.code ?? workOrder.id}] ${equipoLabel} · ${semaforo.etiqueta} · ${consumo.galones.toFixed(2)} gal`,
+            subject: `[Revision OT ${orderLabel}] ${equipoLabel} · ${semaforo.etiqueta} · ${consumo.galones.toFixed(2)} gal`,
             html: this.buildEnterpriseEmailLayout({
               moduleLabel: 'Justice KPI · Ordenes de trabajo',
               title: 'Orden de trabajo en revision',
-              summary: `La orden ${workOrder.code ?? workOrder.id} paso a revision. Consumo de aceite: ${consumo.galones.toFixed(2)} galones.`,
+              summary: `La orden ${orderLabel} paso a revision. Consumo de aceite: ${consumo.galones.toFixed(2)} galones.`,
               accent: semaforo.color,
               contentHtml: `
                 <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
@@ -14421,12 +14497,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                   <div style="font-size:13px;color:#5a728a;">${this.escapeHtml(semaforo.detalle)}</div>
                 </div>
                 ${this.buildEmailInfoTable([
-                  { label: 'Orden', value: workOrder.code ?? workOrder.id },
+                  { label: 'Orden', value: orderLabel },
                   { label: 'Titulo', value: workOrder.title },
                   { label: 'Descripcion', value: workOrder.description },
                   { label: 'Equipo', value: equipoLabel },
                   { label: 'Aceite', value: consumo.productos ?? 'Sin consumo registrado' },
-                  { label: 'Costo del aceite', value: consumo.costo.toFixed(2) },
+                  ...(this.puedeVerCostos(supervisor.roleName)
+                    ? [{ label: 'Costo del aceite', value: consumo.costo.toFixed(2) }] : []),
                   {
                     label: 'Paso a revision',
                     value: this.formatAlertEmailDate(new Date()),
@@ -14451,7 +14528,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             text: [
               `Hola ${nombre},`,
               '',
-              `La orden ${workOrder.code ?? workOrder.id} paso a revision.`,
+              `La orden ${orderLabel} paso a revision.`,
               '',
               `Equipo: ${equipoLabel}`,
               `Consumo de aceite: ${consumo.galones.toFixed(2)} galones`,
@@ -14719,6 +14796,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       valid
         .map((item) => this.firstNonEmptyString(item.bodega_id))
         .filter((value): value is string => Boolean(value)),
+      true,
     );
 
     const items = valid.map((item) => {
@@ -14729,9 +14807,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const cantidad = this.toNumeric(item.cantidad, 0);
       const costoUnitario = this.toNumeric(item.costo_unitario, 0);
       return {
-        producto_label:
-          this.buildProductoLabel(producto) ?? item.producto_id,
-        bodega_label: this.buildBodegaLabel(bodega) ?? 'Sin bodega',
+        producto_label: emailLabel('Material sin registro', this.buildProductoLabel(producto)),
+        bodega_label: emailLabel('Sin bodega', this.buildBodegaLabel(bodega)),
         cantidad,
         costo_unitario: costoUnitario,
         subtotal:
@@ -14742,6 +14819,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       };
     });
 
+    const equipmentLabel = await this.resolveWorkOrderEmailEquipment(workOrder);
+    const orderLabel = emailLabel('Orden de trabajo', workOrder.code, workOrder.title);
     const alertPayload: Record<string, unknown> = {
       work_order_id: workOrder.id,
       actor_user_id: this.firstNonEmptyString(actor?.userId),
@@ -14767,28 +14846,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           recipient.displayName || recipient.username || 'usuario';
         const showCosts = this.destinatarioPuedeVerCostos(recipient);
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
-            subject: `[OT ${workOrder.code ?? workOrder.id}] Consumos registrados · ${items.length} material(es)`,
+            subject: `[OT ${orderLabel}] Consumos registrados · ${items.length} material(es)`,
             html: this.buildEnterpriseEmailLayout({
               moduleLabel: 'Justice KPI · Órdenes de trabajo',
               title: 'Consumos registrados en la OT',
-              summary: `Se registraron ${items.length} material(es) de consumo en la orden ${workOrder.code ?? workOrder.id}.`,
+              summary: `Se registraron ${items.length} material(es) de consumo en la orden ${orderLabel}.`,
               accent: '#245b84',
               contentHtml: `
                 <p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#405a70;">
                   Hola <strong>${this.escapeHtml(recipientLabel)}</strong>, este es el detalle consolidado de los materiales consumidos.
                 </p>
                 ${this.buildEmailInfoTable([
-                  { label: 'Orden', value: workOrder.code ?? workOrder.id },
+                  { label: 'Orden', value: orderLabel },
+                  { label: 'Equipo', value: equipmentLabel },
                   { label: 'Título', value: workOrder.title },
                   { label: 'Descripción', value: workOrder.description },
                   {
                     label: 'Estado',
-                    value: this.normalizeWorkflowStatus(
+                    value: emailEnumLabel(this.normalizeWorkflowStatus(
                       workOrder.status_workflow,
-                    ),
+                    )),
                   },
                   { label: 'Materiales', value: items.length },
                 ])}
@@ -14804,7 +14884,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
                 'Correo automático del módulo de órdenes de trabajo de Justice KPI.',
             }),
             text: [
-              `Consumos registrados en la OT ${workOrder.code ?? workOrder.id}.`,
+              `Consumos registrados en la OT ${orderLabel}.`,
+              `Equipo: ${equipmentLabel}`,
               '',
               ...items.map((item) => {
                 const costoText = showCosts
@@ -32708,16 +32789,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : null;
 
     const context = {
-      bodegaLabel: this.buildBodegaLabel(bodega) ?? bodegaId,
-      productoLabel: this.buildProductoLabel(producto) ?? productoId,
+      bodegaLabel: emailLabel('Bodega sin registro', this.buildBodegaLabel(bodega)),
+      productoLabel: emailLabel('Material sin registro', this.buildProductoLabel(producto)),
       cantidadSolicitada,
       stockActual: this.getOperationalStockAmount(stock),
       workOrderLabel: [workOrder.code, workOrder.title]
         .filter(Boolean)
         .join(' - '),
-      equipmentLabel: equipment
-        ? this.buildEquipmentReportLabel(equipment)
-        : 'Equipo no disponible',
+      equipmentLabel: await this.buildEmailEquipmentLabel(equipment),
       solicitanteLabel:
         this.firstNonEmptyString(actor?.displayName, actor?.username) ??
         'Bodega',
@@ -32730,7 +32809,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (transporter) {
       for (const recipient of recipients) {
         try {
-          await transporter.sendMail({
+          await this.sendReadableEmail(transporter, {
             from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
             to: recipient.email,
             subject: `[Inventario] ${context.bodegaLabel} solicita material a matriz · OT ${workOrder.code}`,
