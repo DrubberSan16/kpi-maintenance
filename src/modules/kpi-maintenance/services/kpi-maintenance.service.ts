@@ -2172,14 +2172,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         : raw,
     );
     if (Number.isNaN(parsed.getTime())) return null;
-    if (isDateOnly) {
-      parsed.setHours(
-        options?.endOfDay ? 23 : 0,
-        options?.endOfDay ? 59 : 0,
-        options?.endOfDay ? 59 : 0,
-        options?.endOfDay ? 999 : 0,
-      );
-    }
     return parsed;
   }
 
@@ -2673,13 +2665,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private resolveWorkOrderReferenceDate(workOrder?: WorkOrderEntity | null) {
     if (!workOrder) return null;
-    return (
-      this.parseOilUsageDate(workOrder.closed_at, { endOfDay: true }) ??
-      this.parseOilUsageDate(workOrder.started_at, { endOfDay: true }) ??
-      this.parseOilUsageDate(workOrder.scheduled_start, { endOfDay: true }) ??
-      this.parseOilUsageDate(workOrder.updated_at, { endOfDay: true }) ??
-      this.parseOilUsageDate(workOrder.created_at, { endOfDay: true })
-    );
+    for (const value of [workOrder.closed_at, workOrder.started_at, workOrder.created_at, workOrder.scheduled_start, workOrder.updated_at]) {
+      if (!value) continue;
+      const date = value instanceof Date ? value : new Date(value);
+      if (!Number.isNaN(date.getTime())) {
+        return new Date(`${this.currentGuayaquilDateString(date)}T23:59:59.999-05:00`);
+      }
+    }
+    return null;
   }
 
   private normalizeSystemReportGroupBy(
@@ -2733,8 +2726,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return {
       fromDate,
       toDate,
-      from: fromDate.toISOString().slice(0, 10),
-      to: toDate.toISOString().slice(0, 10),
+      from: this.currentGuayaquilDateString(fromDate),
+      to: this.currentGuayaquilDateString(toDate),
       label: `${this.formatOilUsageDateLabel(fromDate)} - ${this.formatOilUsageDateLabel(toDate)}`,
     };
   }
@@ -28581,25 +28574,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     if (fechaDesde) {
       qb.andWhere(
-        `COALESCE(
-          NULLIF((wo.valor_json->>'approved_at')::text, ''),
-          NULLIF((wo.valor_json->>'processed_at')::text, ''),
-          wo.closed_at::text,
-          wo.started_at::text,
-          wo.created_at::text
-        )::timestamp >= :fechaDesde`,
+        `COALESCE(wo.closed_at, wo.started_at, wo.created_at) >= :fechaDesde`,
         { fechaDesde },
       );
     }
     if (fechaHasta) {
       qb.andWhere(
-        `COALESCE(
-          NULLIF((wo.valor_json->>'approved_at')::text, ''),
-          NULLIF((wo.valor_json->>'processed_at')::text, ''),
-          wo.closed_at::text,
-          wo.started_at::text,
-          wo.created_at::text
-        )::timestamp <= :fechaHasta`,
+        `COALESCE(wo.closed_at, wo.started_at, wo.created_at) <= :fechaHasta`,
         { fechaHasta },
       );
     }
