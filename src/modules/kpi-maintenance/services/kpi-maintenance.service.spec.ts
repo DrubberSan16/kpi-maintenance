@@ -4548,26 +4548,26 @@ describe('KpiMaintenanceService programacion automatica de OT de Cebado', () => 
     ).toBe(pastDate);
   });
 
-  it('bloquea bloques semanales nuevos en el pasado sin impedir los historicos existentes', () => {
+  it('bloquea bloques semanales nuevos en el pasado sin impedir los historicos existentes', async () => {
     const today = (service as any).todayDateOnly();
     const previousDay = new Date(`${today}T00:00:00.000Z`);
     previousDay.setUTCDate(previousDay.getUTCDate() - 1);
     const pastDate = previousDay.toISOString().slice(0, 10);
 
-    expect(() =>
+    await expect(
       (service as any).assertCronogramaSemanalFechasNoPasadas([
         { fecha_actividad: pastDate },
       ]),
-    ).toThrow(BadRequestException);
+    ).rejects.toThrow(BadRequestException);
 
-    expect(() =>
+    await expect(
       (service as any).assertCronogramaSemanalFechasNoPasadas(
         [{ fecha_actividad: pastDate }],
         [pastDate],
       ),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
 
-    expect(() =>
+    await expect(
       (service as any).assertCronogramaSemanalFechasNoPasadas(
         [
           { fecha_actividad: pastDate },
@@ -4575,7 +4575,7 @@ describe('KpiMaintenanceService programacion automatica de OT de Cebado', () => 
         ],
         [pastDate],
       ),
-    ).toThrow(BadRequestException);
+    ).rejects.toThrow(BadRequestException);
   });
 
   it('rechaza una fecha inexistente', () => {
@@ -4695,6 +4695,136 @@ describe('KpiMaintenanceService programacion automatica de OT de Cebado', () => 
 
     expect(result).toBe('2026-09-18');
     expect(workOrder.valor_json.fecha_programacion).toBe('2026-09-18');
+  });
+});
+
+describe('KpiMaintenanceService fechas de programaciones y OT emergentes', () => {
+  let repos: RepoBag;
+  let service: KpiMaintenanceService;
+  const today = '2026-10-03';
+  const pastDate = '2026-10-02';
+
+  beforeEach(() => {
+    repos = createRepos();
+    service = createService(repos, createDataSourceMock());
+    jest.spyOn(service as any, 'todayDateOnly').mockReturnValue(today);
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1', equipment_id: 'equipo-1', plan_id: 'plan-1', is_emergency: true,
+    });
+    repos.equipoRepo.findOne.mockResolvedValue({ id: 'equipo-1', horometro_actual: 100 });
+    repos.planRepo.findOne.mockResolvedValue({ id: 'plan-1' });
+    repos.programacionRepo.findOne.mockResolvedValue({
+      id: 'prog-1', work_order_id: 'wo-1', equipo_id: 'equipo-1',
+      plan_id: 'plan-1', proxima_fecha: today, payload_json: {},
+    });
+    jest.spyOn(service as any, 'ensureProgramacionWorkOrderDateAvailability').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'mirrorProgramacionDateIntoCebadoWorkOrder').mockResolvedValue(null);
+    jest.spyOn(service as any, 'recalculateProgramacionFields').mockImplementation(async (row) => row);
+    jest.spyOn(service as any, 'syncReprogrammingHorometer').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'writeSecurityLog').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'registerProcessEvent').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'resolveWorkOrderReportHours').mockResolvedValue(2);
+    jest.spyOn(service as any, 'resolveProgramacionMensualProcedure').mockResolvedValue({
+      procedimiento_id: null, plan_id: null, es_sincronizable: false,
+    });
+  });
+
+  it.each(['crear', 'actualizar'])('%s permite fechas anteriores para una OT guardada como emergente', async (action) => {
+    const dto = { work_order_id: 'wo-1', proxima_fecha: pastDate };
+    if (action === 'crear') await service.createProgramacion(dto as any);
+    else await service.updateProgramacion('prog-1', dto as any);
+    expect(repos.programacionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ work_order_id: 'wo-1', proxima_fecha: pastDate }),
+    );
+  });
+
+  it.each(['crear', 'actualizar'])('%s rechaza fechas anteriores para OT normal aunque el payload diga emergente', async (action) => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1', equipment_id: 'equipo-1', plan_id: 'plan-1', is_emergency: false,
+    });
+    const dto = { work_order_id: 'wo-1', proxima_fecha: pastDate, payload_json: { is_emergency: true } };
+    const result = action === 'crear'
+      ? service.createProgramacion(dto as any)
+      : service.updateProgramacion('prog-1', dto as any);
+    await expect(result).rejects.toThrow(BadRequestException);
+    expect(repos.programacionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it.each([today, '2026-10-04'])('permite la fecha %s para una OT normal', async (date) => {
+    repos.woRepo.findOne.mockResolvedValue({
+      id: 'wo-1', equipment_id: 'equipo-1', plan_id: 'plan-1', is_emergency: false,
+    });
+    await service.createProgramacion({ work_order_id: 'wo-1', proxima_fecha: date } as any);
+    expect(repos.programacionRepo.save).toHaveBeenCalledWith(expect.objectContaining({ proxima_fecha: date }));
+  });
+
+  it.each([true, false, null])('bloque mensual: fecha pasada con OT emergente=%s', async (emergency) => {
+    repos.woRepo.findOne.mockResolvedValue({ id: 'wo-1', is_emergency: emergency });
+    const result = (service as any).prepareProgramacionMensualDetailInput({
+      equipo_codigo: 'UG-01', fecha_programada: pastDate, valor_crudo: '2 h',
+      payload_json: { work_order_id: emergency === null ? null : 'wo-1', is_emergency: true },
+    });
+    if (emergency === true) {
+      await expect(result).resolves.toMatchObject({ fechaProgramada: pastDate });
+    } else {
+      await expect(result).rejects.toThrow(BadRequestException);
+    }
+  });
+
+  it.each([true, false, null])('bloque semanal: fecha pasada con OT emergente=%s', async (emergency) => {
+    repos.woRepo.findOne.mockResolvedValue({ id: 'wo-1', is_emergency: emergency });
+    const result = (service as any).assertCronogramaSemanalFechasNoPasadas([
+      { fecha_actividad: pastDate, work_order_id: emergency === null ? undefined : 'wo-1', is_emergency: true },
+    ]);
+    if (emergency === true) await expect(result).resolves.toBeUndefined();
+    else await expect(result).rejects.toThrow(BadRequestException);
+  });
+
+  it('rechaza una OT eliminada o inexistente en un bloque semanal pasado', async () => {
+    repos.woRepo.findOne.mockResolvedValue(null);
+    await expect((service as any).assertCronogramaSemanalFechasNoPasadas([
+      { fecha_actividad: pastDate, work_order_id: 'wo-eliminada' },
+    ])).rejects.toThrow(NotFoundException);
+  });
+
+  it.each([true, false])('reprogramacion mensual en el pasado con OT emergente=%s', async (emergency) => {
+    repos.woRepo.findOne.mockResolvedValue({ id: 'wo-1', is_emergency: emergency });
+    repos.programacionMensualRepo.findOne.mockResolvedValue({ id: 'mensual-1', codigo: 'M-01' });
+    repos.programacionMensualDetRepo.findOne.mockResolvedValue({
+      id: 'detalle-1', programacion_mensual_id: 'mensual-1', equipo_id: 'equipo-1',
+      equipo_codigo: 'UG-01', fecha_programada: today, valor_crudo: '2 h',
+      payload_json: { work_order_id: 'wo-1' },
+    });
+    jest.spyOn(service as any, 'createProgramacionMensualReprogramAlert').mockResolvedValue(null);
+    jest.spyOn(service as any, 'buildProgramacionMensualPayload').mockResolvedValue({ id: 'mensual-1' });
+    const result = service.reprogramProgramacionMensualDetalle('detalle-1', {
+      fecha_programada: pastDate, observacion_reprogramacion: 'Registro de trabajo emergente',
+    } as any);
+    if (emergency) {
+      await expect(result).resolves.toBeDefined();
+      expect(repos.programacionMensualDetRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ fecha_programada: pastDate }),
+      );
+    } else {
+      await expect(result).rejects.toThrow(BadRequestException);
+      expect(repos.programacionMensualDetRepo.save).not.toHaveBeenCalled();
+    }
+  });
+
+  it('reprogramar no reutiliza la excepcion emergente al cambiar la OT vinculada por una normal', async () => {
+    repos.woRepo.findOne.mockImplementation(async ({ where }: any) => ({
+      id: where.id, is_emergency: where.id === 'wo-emergente',
+    }));
+    repos.programacionMensualRepo.findOne.mockResolvedValue({ id: 'mensual-1' });
+    repos.programacionMensualDetRepo.findOne.mockResolvedValue({
+      id: 'detalle-1', programacion_mensual_id: 'mensual-1', equipo_id: 'equipo-1',
+      fecha_programada: today, payload_json: { work_order_id: 'wo-emergente' },
+    });
+    await expect(service.reprogramProgramacionMensualDetalle('detalle-1', {
+      fecha_programada: pastDate, observacion_reprogramacion: 'Cambio de orden',
+      payload_json: { work_order_id: 'wo-normal', is_emergency: true },
+    } as any)).rejects.toThrow(BadRequestException);
+    expect(repos.programacionMensualDetRepo.save).not.toHaveBeenCalled();
   });
 });
 

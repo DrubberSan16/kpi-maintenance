@@ -16240,7 +16240,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Una fecha programada debe ser hoy o futura. La unica excepcion es la fecha
-   * capturada al guardar una OT emergente, que puede documentar un trabajo ya
+   * vinculada a una OT emergente, que puede documentar un trabajo ya
    * ocurrido. Al editar se permite conservar una fecha historica sin cambiarla.
    */
   private assertFechaProgramadaNoPasada(
@@ -16264,8 +16264,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return normalized;
   }
 
-  private assertCronogramaSemanalFechasNoPasadas(
-    details: Array<{ fecha_actividad?: unknown }> | null | undefined,
+  private async assertCronogramaSemanalFechasNoPasadas(
+    details: Array<{ fecha_actividad?: unknown; work_order_id?: string }> | null | undefined,
     previousDates: unknown[] = [],
   ) {
     if (!details?.length) return;
@@ -16283,6 +16283,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const today = this.todayDateOnly();
+    const emergencyOrders = new Map<string, boolean>();
     for (const detail of details) {
       const normalized = this.normalizeDateOnlyInput(detail.fecha_actividad);
       if (!normalized || normalized >= today) continue;
@@ -16291,6 +16292,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (available > 0) {
         availablePreviousDates.set(normalized, available - 1);
         continue;
+      }
+      const workOrderId = String(detail.work_order_id || '').trim();
+      if (workOrderId) {
+        if (!emergencyOrders.has(workOrderId)) {
+          const workOrder = await this.resolveProgramacionWorkOrder(workOrderId);
+          emergencyOrders.set(workOrderId, workOrder?.is_emergency === true);
+        }
+        if (emergencyOrders.get(workOrderId)) continue;
       }
       throw new BadRequestException(
         `La fecha de la actividad semanal no puede ser anterior a hoy (${today}). Se recibio ${normalized}.`,
@@ -18869,7 +18878,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
     const nextDate = this.safeDateOnlyString(dto.proxima_fecha);
-    this.assertFechaProgramadaNoPasada(nextDate, 'La fecha programada');
+    this.assertFechaProgramadaNoPasada(nextDate, 'La fecha programada', {
+      allowPast: linkedWorkOrder.is_emergency === true,
+    });
     await this.ensureProgramacionWorkOrderDateAvailability({
       workOrderId: linkedWorkOrder.id,
       proximaFecha: nextDate,
@@ -19021,6 +19032,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     this.assertFechaProgramadaNoPasada(nextDate, 'La fecha programada', {
       previous: p.proxima_fecha,
+      allowPast: linkedWorkOrder.is_emergency === true,
     });
     await this.ensureProgramacionWorkOrderDateAvailability({
       workOrderId: linkedWorkOrder.id,
@@ -22579,11 +22591,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
     const currentFechaProgramada = this.toDateOnlyString(current?.fecha_programada);
-    this.assertFechaProgramadaNoPasada(
-      fechaProgramada,
-      'La fecha del bloque mensual',
-      { previous: currentFechaProgramada },
-    );
     if (
       current &&
       !options?.allowScheduleDateChange &&
@@ -22627,6 +22634,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       nextPayload.horometro_equipo_referencia = equipmentHorometer;
     }
     const workOrderId = this.firstNonEmptyString(nextPayload.work_order_id);
+    let allowPast = false;
     if (workOrderId) {
       const workOrder = await this.findOneOrFail(this.woRepo, {
         id: workOrderId,
@@ -22638,6 +22646,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         );
       }
       const workOrderHours = await this.resolveWorkOrderReportHours(workOrder);
+      allowPast = workOrder.is_emergency === true;
       nextPayload.work_order_id = workOrder.id;
       nextPayload.work_order_code = workOrder.code ?? null;
       nextPayload.work_order_title = workOrder.title ?? null;
@@ -22646,6 +22655,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         maintenanceHours = workOrderHours;
       }
     }
+    this.assertFechaProgramadaNoPasada(
+      fechaProgramada,
+      'La fecha del bloque mensual',
+      { previous: currentFechaProgramada, allowPast },
+    );
     const horometroUltimo =
       nextPayload.horometro_ultimo != null
         ? this.toNumeric(nextPayload.horometro_ultimo, 0)
@@ -22854,9 +22868,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'El bloque mensual no tiene una fecha base para reprogramar.',
       );
     }
+    const nextWorkOrderPayload = {
+      ...(detail.payload_json ?? {}),
+      ...payloadOverrides,
+    };
+    const linkedWorkOrder = await this.resolveProgramacionWorkOrder(
+      this.firstNonEmptyString(nextWorkOrderPayload.work_order_id),
+    );
     this.assertFechaProgramadaNoPasada(
       nextDate,
       'La nueva fecha de reprogramacion',
+      { allowPast: linkedWorkOrder?.is_emergency === true },
     );
     if (nextDate === previousDate) {
       throw new BadRequestException(
@@ -23643,7 +23665,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: CreateCronogramaSemanalDto,
     scopedSucursalId?: string | null,
   ) {
-    this.assertCronogramaSemanalFechasNoPasadas(dto.detalles);
+    await this.assertCronogramaSemanalFechasNoPasadas(dto.detalles);
     const sucursal = await this.resolveSucursalForWrite(
       dto.sucursal_id,
       scopedSucursalId,
@@ -23772,7 +23794,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const current = await detalleRepo.find({
           where: { cronograma_id: row.id, is_deleted: false },
         });
-        this.assertCronogramaSemanalFechasNoPasadas(
+        await this.assertCronogramaSemanalFechasNoPasadas(
           dto.detalles,
           current.map((item) => item.fecha_actividad),
         );
