@@ -34,6 +34,7 @@ function createService(overrides: Record<string, any> = {}): ServiceUnderTest {
     findOneOrFail: jest.fn().mockResolvedValue(workOrder),
     assertWorkOrderAllowsMaterialReservation: jest.fn(),
     assertOperatorAssignedToWorkOrder: jest.fn().mockResolvedValue(undefined),
+    assertCanCloseOrVoidWorkOrder: jest.fn().mockResolvedValue(undefined),
     assertWorkOrderNotBlockedByActiveAnnex: jest.fn().mockResolvedValue(undefined),
     createConsumoWithManager: jest.fn(async (_manager: unknown, _wo: unknown, item: any) => ({
       saved: { id: `consumo-${item.producto_id}`, costo_unitario: '10.5' },

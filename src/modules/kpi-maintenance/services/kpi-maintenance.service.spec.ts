@@ -94,8 +94,17 @@ const createDataSourceMock = () =>
     })),
   }) as unknown as DataSource;
 
-const createService = (repos: RepoBag, ds: DataSource) =>
-  new KpiMaintenanceService(
+const createService = (repos: RepoBag, ds: DataSource) => {
+  if (!(ds as any).transaction) {
+    const repositoryFor = (entity: any) => entity === WorkOrderEntity ? repos.woRepo : entity === EquipoEntity ? repos.equipoRepo : repos.woHistoryRepo;
+    const manager = {
+      findOne: jest.fn((entity, options) => repositoryFor(entity).findOne(options)),
+      save: jest.fn((entity, value) => repositoryFor(entity).save(value)),
+      create: jest.fn((_entity, value) => value),
+    };
+    (ds as any).transaction = jest.fn(async callback => callback(manager));
+  }
+  return new KpiMaintenanceService(
     repos.equipoRepo as any,
     repos.equipoTipoRepo as any,
     repos.equipoComponenteRepo as any,
@@ -144,6 +153,7 @@ const createService = (repos: RepoBag, ds: DataSource) =>
     repos.equipoHorometroHistorialRepo as any,
     ds,
   );
+};
 
 describe('KpiMaintenanceService alerts', () => {
   let repos: RepoBag;
@@ -1181,13 +1191,10 @@ describe('KpiMaintenanceService alerts', () => {
     expect((service as any).resolveWorkOrderElapsedHours(workOrder)).not.toBeNull();
   });
 
-  it('la salida de material solo la registran bodega y los perfiles administrativos', () => {
+  it('la salida de material solo la registra el perfil bodega', () => {
     const permitidos = [
       'BODEGA',
       'Bodeguero',
-      'ADMINISTRADOR',
-      'Super Administrador',
-      'GERENTE GENERAL',
     ];
     for (const rol of permitidos) {
       expect((service as any).canRegisterMaterialIssue(rol)).toBe(true);
@@ -1197,12 +1204,12 @@ describe('KpiMaintenanceService alerts', () => {
     }
 
     // Quien levanta la OT reserva el material, pero no lo saca.
-    const rechazados = ['OPERADOR', 'SUPERVISOR', 'TECNICO', '', null];
+    const rechazados = ['ADMINISTRADOR', 'Super Administrador', 'GERENTE GENERAL', 'OPERADOR', 'SUPERVISOR', 'TECNICO', '', null];
     for (const rol of rechazados) {
       expect((service as any).canRegisterMaterialIssue(rol)).toBe(false);
       expect(() =>
         (service as any).assertCanRegisterMaterialIssue({ roleName: rol }),
-      ).toThrow(/solo la puede registrar/i);
+      ).toThrow(/solo.*perfil bodega/i);
     }
   });
 
@@ -3471,6 +3478,7 @@ describe('KpiMaintenanceService work orders', () => {
   it('registrar consumo crea o incrementa la reserva de stock para la OT', async () => {
     repos.woRepo.findOne.mockResolvedValue({
       id: 'wo-1',
+      created_by: 'creador',
       status_workflow: 'PLANNED',
       is_deleted: false,
     });
@@ -3505,7 +3513,7 @@ describe('KpiMaintenanceService work orders', () => {
       producto_id: 'producto-1',
       bodega_id: 'bodega-1',
       cantidad: 15,
-    } as any);
+    } as any, { username: "creador" });
 
     expect(repos.reservaRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -4362,6 +4370,7 @@ describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
     const workOrder = {
       id: 'wo-1',
       code: 'OT-A00005',
+      created_by: 'tester',
       status: 'CERRADA',
       status_workflow: 'CLOSED',
       valor_json: {},
@@ -4427,7 +4436,8 @@ describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
     ).resolves.toBe(true);
   });
 
-  it('rechaza la anulacion cuando el usuario no tiene rol ni permiso de eliminacion', async () => {
+  it('rechaza la anulacion cuando el usuario no es el creador aunque tenga permisos', async () => {
+    repos.woRepo.findOne.mockResolvedValue({ id: 'wo-1', created_by: 'otro', status_workflow: 'IN_PROGRESS' });
     jest
       .spyOn(service as any, 'getJson')
       .mockResolvedValue([
@@ -4445,7 +4455,7 @@ describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
         roleName: 'OPERADOR',
       } as any),
     ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(repos.woRepo.findOne).not.toHaveBeenCalled();
+    expect(repos.woRepo.findOne).toHaveBeenCalled();
   });
 });
 

@@ -35,21 +35,21 @@ describe('Horas operativas y cierre al encender', () => {
     expect(service.operationalHorometer({ ...equipment, horometro_operativo_desde: null }, now)).toBe(1000);
     expect(service.operationalHorometer(equipment, new Date('2026-10-01T12:00:00Z'))).toBe(1000);
   });
-  it('al encender congela la OT y libera reservas dentro de la misma transacción', async () => {
-    const { service, manager, order, orderRepo, historyRepo } = fixture();
-    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id, displayName: 'Operador' });
-    expect(order.status_workflow).toBe('CLOSED');
-    expect(order.valor_json).toMatchObject({ horometro_actual: 1000, cierre_por_encendido: true });
-    expect(orderRepo.save).toHaveBeenCalledWith(order);
-    expect(service.releaseOpenReservationsForWorkOrder).toHaveBeenCalledWith(order.id, manager, id);
-    expect(historyRepo.save).toHaveBeenCalledWith(expect.objectContaining({ from_status: 'IN_PROGRESS', to_status: 'CLOSED' }));
-    expect(service.syncProgramacionExecutionFromLinkedWorkOrder).toHaveBeenCalledWith(order);
-  });
-  it('no enciende ni cierra si falta una captura obligatoria', async () => {
-    const { service, equipmentRepo, orderRepo } = fixture();
-    service.assertWorkOrderTaskCapturesReadyForClosure.mockRejectedValue(new Error('Captura pendiente'));
-    await expect(service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' })).rejects.toThrow('Captura pendiente');
+  it.each(['IN_PROGRESS', 'REVIEW', 'BLOCKED'])('rechaza encender con una OT activa en %s sin cerrar ni liberar reservas', async state => {
+    const { service, order, orderRepo, equipmentRepo, historyRepo } = fixture();
+    order.status_workflow = state;
+    await expect(service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id })).rejects.toThrow('Finaliza o anula');
+    expect(order.status_workflow).toBe(state);
+    expect(orderRepo.save).not.toHaveBeenCalled();
     expect(equipmentRepo.save).not.toHaveBeenCalled();
+    expect(historyRepo.save).not.toHaveBeenCalled();
+    expect(service.releaseOpenReservationsForWorkOrder).not.toHaveBeenCalled();
+  });
+  it('permite registrar el encendido cuando ninguna OT está activa', async () => {
+    const { service, orderRepo, equipmentRepo } = fixture();
+    orderRepo.find.mockResolvedValue([]);
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' });
+    expect(equipmentRepo.save).toHaveBeenCalledWith(expect.objectContaining({ estado_funcionamiento: 'FUNCIONAMIENTO' }));
     expect(orderRepo.save).not.toHaveBeenCalled();
   });
   it('apagar no finaliza las OT y repetir el estado no duplica eventos', async () => {
@@ -61,34 +61,13 @@ describe('Horas operativas y cierre al encender', () => {
     expect(stopped.equipmentRepo.save).not.toHaveBeenCalled();
     expect(stopped.historyRepo.save).not.toHaveBeenCalled();
   });
-  it.each(['assertCanCloseOrVoidWorkOrder', 'assertWorkOrderNotBlockedByActiveAnnex', 'assertMaterialShortfallAcknowledged'])('no enciende si falla %s', async guard => {
-    const { service, equipmentRepo, orderRepo } = fixture();
-    service[guard].mockRejectedValue(new Error('Cierre no permitido'));
-    await expect(service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' })).rejects.toThrow('Cierre no permitido');
-    expect(equipmentRepo.save).not.toHaveBeenCalled();
-    expect(orderRepo.save).not.toHaveBeenCalled();
-  });
-  it('el encendido no cierra proyectos ni OT anuladas', async () => {
-    for (const project of [true, false]) {
-      const { service, order, orderRepo } = fixture();
-      if (project) order.maintenance_kind = 'PROYECTO';
-      else Object.assign(order.valor_json, { approval_action: 'ANULADA' });
-      await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' });
-      expect(orderRepo.save).not.toHaveBeenCalled();
-    }
-  });
-  it('conserva los campos obligatorios de causa, acción y prevención al cerrar', async () => {
-    const { service, order, equipmentRepo } = fixture();
-    order.valor_json.causa = '';
-    await expect(service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' })).rejects.toThrow();
-    expect(equipmentRepo.save).not.toHaveBeenCalled();
-  });
-  it('la edición general del equipo también cierra la OT al reencender', async () => {
-    const { service, equipment, order } = fixture();
+  it('la edición general del equipo tampoco permite encender mientras una OT sigue activa', async () => {
+    const { service, equipment, order, equipmentRepo } = fixture();
     service.findEquipoOrFail = jest.fn().mockResolvedValue(equipment);
     service.resolveEquipmentServiceSchedule = jest.fn().mockReturnValue({});
-    await service.updateEquipo(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id });
-    expect(order.status_workflow).toBe('CLOSED');
+    await expect(service.updateEquipo(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id })).rejects.toThrow('Finaliza o anula');
+    expect(order.status_workflow).toBe('IN_PROGRESS');
+    expect(equipmentRepo.save).not.toHaveBeenCalled();
   });
   it('editar datos del equipo conserva las fracciones acumuladas del horómetro', async () => {
     const { service, equipment } = fixture();

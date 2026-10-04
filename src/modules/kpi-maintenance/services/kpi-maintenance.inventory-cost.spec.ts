@@ -53,6 +53,7 @@ describe('Costo automático de materiales de OT', () => {
     const { service, product, consumptionRepo } = fixture();
     service.findOneOrFail = jest.fn().mockResolvedValue({ id: 'order', status_workflow: 'PLANNED' });
     service.assertOperatorAssignedToWorkOrder = jest.fn();
+    service.assertCanCloseOrVoidWorkOrder = jest.fn();
     service.assertWorkOrderNotBlockedByActiveAnnex = jest.fn();
     service.applyWorkOrderAuditStamp = jest.fn();
     service.appendWorkOrderHistory = jest.fn();

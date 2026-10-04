@@ -2442,6 +2442,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
+  @ApiOperation({ summary: 'Confirmar egreso consolidado e iniciar automáticamente la OT y la parada del equipo. Solo Bodega.' })
+  @Post('work-orders/:id/issue-documents/confirm')
+  confirmIssueDocuments(@Param('id') id: string, @Req() req: any) {
+    return this.service.confirmWorkOrderIssue(id, getRequestActor(req), getSucursalScopeId(req));
+  }
+
+  @ApiTags('Work Orders')
   @ApiOperation({ summary: 'Eliminar fisicamente las salidas de materiales de una OT' })
   @Delete('work-orders/:id/issue-materials/purge-all')
   purgeIssueMaterialsByWorkOrder(

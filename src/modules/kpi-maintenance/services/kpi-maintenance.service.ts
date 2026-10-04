@@ -35,6 +35,8 @@ import {
   FindOptionsWhere,
   In,
   IsNull,
+  MoreThan,
+  Not,
   ObjectLiteral,
   Repository,
   SelectQueryBuilder,
@@ -6098,11 +6100,32 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertWorkOrderAllowsMaterialIssue(workOrder: WorkOrderEntity) {
-    if (this.normalizeWorkflowStatus(workOrder.status_workflow) !== 'IN_PROGRESS') {
+    if (this.isWorkOrderAnnulled(workOrder) || !['PLANNED', 'REVIEW'].includes(this.normalizeWorkflowStatus(workOrder.status_workflow))) {
       throw new ForbiddenException(
-        'Solo se puede registrar salida real de materiales cuando la orden de trabajo está en proceso.',
+        'La salida de materiales se registra durante la planificación o la revisión, antes de imprimir el egreso.',
       );
     }
+  }
+
+  private resolveManualWorkOrderStatus(current: unknown, requested: unknown, isNew = false) {
+    if (isNew) return 'PLANNED';
+    const previous = this.normalizeWorkflowStatus(current);
+    const next = this.normalizeWorkflowStatus(requested ?? current);
+    if (next === previous || (next === 'CLOSED' && previous !== 'CLOSED')) return next;
+    if (previous === 'IN_PROGRESS' && next === 'REVIEW') return next;
+    throw new ForbiddenException('El estado es automático. Para iniciar la ejecución, Bodega debe imprimir el egreso. El creador puede pasar a En revisión, Finalizada o Anulada.');
+  }
+
+  /** Los datos de autoría y de ejecución pertenecen al servidor. */
+  private protectWorkOrderLifecyclePayload(previous: Record<string, unknown> | null, incoming: Record<string, unknown> | null) {
+    const merged = { ...(previous ?? {}), ...(incoming ?? {}) };
+    for (const key of Object.keys(merged)) {
+      if (/^(created_|approved_|execution_start$|planned_at$|annulment$|approval_action$)/.test(key)) {
+        if (previous && key in previous) merged[key] = previous[key];
+        else delete merged[key];
+      }
+    }
+    return merged;
   }
 
   private assertWorkOrderAllowsMaterialReservation(workOrder: WorkOrderEntity) {
@@ -9088,16 +9111,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    * no protege el endpoint.
    */
   private readonly MATERIAL_ISSUE_ROLES = [
-    'ADMINISTRADOR',
-    'ADMINISTRADOR DEL SISTEMA',
-    'ADMIN',
-    'SUPER ADMINISTRADOR',
-    'SUPERADMINISTRADOR',
-    'SUPER_ADMINISTRADOR',
-    'SUPER ADMIN',
-    'SUPER_ADMIN',
-    'GERENTE GENERAL',
-    'GERENCIA GENERAL',
     'BODEGA',
     'BODEGUERO',
   ];
@@ -9111,7 +9124,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private assertCanRegisterMaterialIssue(actor?: RequestActorContext | null) {
     if (this.canRegisterMaterialIssue(actor?.roleName)) return;
     throw new ForbiddenException(
-      'La salida de materiales solo la puede registrar Bodega, Administracion, Super Administracion o Gerencia General.',
+      'Solo el perfil Bodega puede registrar salidas de materiales y confirmar el egreso de una OT.',
     );
   }
 
@@ -16086,7 +16099,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         actorDisplayName ?? this.firstNonEmptyString(payload.created_by_name);
       payload.created_by_email =
         actorEmail ?? this.normalizeEmail(payload.created_by_email);
-      payload.created_at = payload.created_at ?? now;
+      payload.created_at = now;
+      payload.planned_at = now;
     } else if (mode === 'PROCESSED') {
       payload.processed_by_user_id = actorUserId ?? null;
       payload.processed_by_username = actorUsername ?? null;
@@ -16847,11 +16861,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
     linkedProgramacion?: ProgramacionPlanEntity | null,
   ) {
-    const roleName = String(actor?.roleName || '')
-      .trim()
-      .toUpperCase();
-    if (roleName.includes('ADMIN')) return true;
-
     const actorUserId = this.firstNonEmptyString(actor?.userId);
     const actorUsername = this.normalizeUsername(actor?.username);
     if (!actorUserId && !actorUsername) return false;
@@ -16874,22 +16883,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const workOrderPayload =
       ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
         {}) as Record<string, unknown>;
-    const ownershipHints = this.resolveWorkOrderOwnershipHints(workOrderPayload);
     addOwnerUserId(
       workOrder.requested_by,
       workOrderPayload.created_by_user_id,
-      workOrderPayload.actor_user_id,
-      workOrderPayload.requested_by_user_id,
-      ownershipHints.userId,
     );
     addOwnerUsername(
       workOrder.created_by,
       workOrderPayload.created_by_username,
-      workOrderPayload.actor_username,
       workOrderPayload.created_by,
-      workOrderPayload.updated_by,
-      workOrderPayload.requested_by,
-      ownershipHints.username,
     );
 
     const isDirectOwner =
@@ -16903,15 +16904,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
-    plannerHints.userIds.forEach((value) => ownerUserIds.add(value));
-    plannerHints.usernames.forEach((value) => ownerUsernames.add(value));
-
-    return (
-      isDirectOwner ||
-      (!!actorUserId && ownerUserIds.has(actorUserId)) ||
-      (!!actorUsername && ownerUsernames.has(actorUsername))
-    );
+    return isDirectOwner;
   }
 
   private async assertCanCloseOrVoidWorkOrder(
@@ -16945,7 +16938,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const plannerHints = this.collectProgramacionPlannerHints(linkedProgramacion);
     const ownerLabel =
       this.firstNonEmptyString(workOrder.created_by, plannerHints.ownerLabel) ||
-      'el usuario que creó o planificó la orden';
+      'el usuario que creó la orden';
     throw new ForbiddenException(
       `Solo ${ownerLabel} puede ${actionLabel} esta orden de trabajo.`,
     );
@@ -18128,33 +18121,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
   private async closeWorkOrdersOnRestart(manager: EntityManager, equipment: EquipoEntity, actor?: RequestActorContext | null) {
-    const closedOrders: WorkOrderEntity[] = [];
-    const { id: changedById, label: changedByLabel } = this.resolveHorometerActor(actor);
-    const workOrders = await manager.getRepository(WorkOrderEntity).find({
-      where: { equipment_id: equipment.id, is_deleted: false, status_workflow: In(['IN_PROGRESS', 'REVIEW', 'BLOCKED']) },
-      lock: { mode: 'pessimistic_write' },
-      order: { created_at: 'ASC' },
+    const base = { equipment_id: equipment.id, is_deleted: false, closed_at: IsNull() };
+    const active = await manager.getRepository(WorkOrderEntity).find({
+      where: [
+        { ...base, status_workflow: In(['IN_PROGRESS', 'REVIEW']) },
+        { ...base, status_workflow: 'BLOCKED', started_at: Not(IsNull()) },
+      ], lock: { mode: 'pessimistic_write' }, order: { created_at: 'ASC' },
     });
-    for (const order of workOrders) {
-      if (this.isProyectoMaintenanceKind(order.maintenance_kind) || this.isWorkOrderAnnulled(order)) continue;
-      await this.assertCanCloseOrVoidWorkOrder(order, actor, 'cerrar al encender el equipo');
-      await this.assertWorkOrderNotBlockedByActiveAnnex(order, manager, 'encender el equipo y cerrar la OT');
-      await this.assertWorkOrderTaskCapturesReadyForClosure(manager, order.id);
-      this.assertRequiredWorkOrderOutcomePayload(order.valor_json, order.maintenance_kind);
-      await this.assertMaterialShortfallAcknowledged(manager, order.id, order.valor_json as Record<string, unknown> | null);
-      const fromStatus = order.status_workflow;
-      order.valor_json = { ...(order.valor_json || {}), horometro_actual: Number(equipment.horometro_actual), cierre_por_encendido: true };
-      order.status_workflow = 'CLOSED';
-      this.applyWorkflowDates(order, fromStatus, 'CLOSED');
-      this.applyWorkOrderAuditStamp(order, actor, 'APPROVED', { action: 'CERRADA' });
-      order.updated_by = changedByLabel || order.updated_by;
-      await manager.getRepository(WorkOrderEntity).save(order);
-      await this.releaseOpenReservationsForWorkOrder(order.id, manager, changedById);
-      const history = manager.getRepository(WorkOrderStatusHistoryEntity);
-      await history.save(history.create({ work_order_id: order.id, from_status: fromStatus, to_status: 'CLOSED', changed_by: changedById, note: 'OT cerrada al encender la unidad. Horómetro final congelado.' }));
-      closedOrders.push(order);
-    }
-    return closedOrders;
+    if (active.length) throw new ConflictException(`Finaliza o anula la OT ${active[0].code} antes de registrar el encendido del equipo.`);
+    return [] as WorkOrderEntity[];
   }
 
   private async syncClosedWorkOrders(orders: WorkOrderEntity[]) {
@@ -28911,7 +28886,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     manager: EntityManager,
     workOrder: WorkOrderEntity,
     dto: IssueMaterialsDto,
+    actor?: RequestActorContext | null,
   ) {
+    this.assertCanRegisterMaterialIssue(actor);
+    await this.lockWorkOrderEquipmentForIssue(manager, workOrder);
     this.assertWorkOrderAllowsMaterialIssue(workOrder);
     const entregaRepo = manager.getRepository(EntregaMaterialEntity);
     const movimientoRepo = manager.getRepository(MovimientoInventarioEntity);
@@ -28932,7 +28910,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.observacion,
     );
     const movementUser =
-      this.firstNonEmptyString(workOrder.updated_by, workOrder.created_by) ||
+      this.firstNonEmptyString(actor?.username, actor?.displayName, workOrder.updated_by, workOrder.created_by) ||
       'SYSTEM';
 
     const entrega = await entregaRepo.save(
@@ -28985,6 +28963,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
       const stock = await manager.findOne(StockBodegaEntity, {
         where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!stock || Number(stock.stock_actual) < item.cantidad) {
         throw new ConflictException('Stock insuficiente');
@@ -29511,12 +29490,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const workOrderRepo = manager.getRepository(WorkOrderEntity);
     const planRepo = manager.getRepository(PlanMantenimientoEntity);
     const isNew = !workOrderId;
-    const workOrder = workOrderId
+    let workOrder = workOrderId
       ? await this.findOneOrFail(workOrderRepo, {
           id: workOrderId,
           is_deleted: false,
         } as FindOptionsWhere<WorkOrderEntity>)
       : null;
+    if (workOrder) {
+      if (workOrder.equipment_id) await manager.findOne(EquipoEntity, {
+        where: { id: workOrder.equipment_id }, lock: { mode: 'pessimistic_write' },
+      });
+      workOrder = await manager.findOne(WorkOrderEntity, {
+        where: { id: workOrder.id, is_deleted: false }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!workOrder) throw new NotFoundException('Orden de trabajo no encontrada');
+      if (this.isWorkOrderAnnulled(workOrder)) throw new BadRequestException('La OT está anulada.');
+      if (header.equipment_id && header.equipment_id !== workOrder.equipment_id && workOrder.started_at) {
+        throw new ConflictException('No se puede cambiar el equipo después de iniciar la ejecución de la OT.');
+      }
+    }
     if (workOrderId) {
       await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
       await this.assertWorkOrderNotBlockedByActiveAnnex(
@@ -29633,8 +29625,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       existingLegacyOfficialName:
         workOrder?.equipo_componente_nombre_oficial ?? null,
     });
-    const nextWorkflowStatus = this.normalizeWorkflowStatus(
-      header.status_workflow ?? workOrder?.status_workflow ?? 'PLANNED',
+    const nextWorkflowStatus = this.resolveManualWorkOrderStatus(
+      workOrder?.status_workflow ?? 'PLANNED', header.status_workflow, isNew,
     );
     const nextBlockedByWorkOrderId =
       header.blocked_by_work_order_id !== undefined
@@ -29664,6 +29656,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
+    }
+    if (workOrder && nextWorkflowStatus === 'REVIEW' && previousStatus !== 'REVIEW') {
+      await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'pasar a revisión');
     }
     if (nextWorkflowStatus === 'IN_PROGRESS' && previousStatus !== 'IN_PROGRESS') {
       await this.assertWorkOrderCanMoveToInProgress({
@@ -29704,8 +29699,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           });
       const nextHeaderPayload = this.buildWorkOrderHorometerPayload(
         {
-          ...((entity.valor_json as Record<string, unknown> | null) ?? {}),
-          ...((header.valor_json ?? {}) as Record<string, unknown>),
+          ...this.protectWorkOrderLifecyclePayload(entity.valor_json as Record<string, unknown> | null, header.valor_json as Record<string, unknown> | null),
           ...(header.procedimiento_id
             ? { procedimiento_id: header.procedimiento_id }
             : {}),
@@ -29817,6 +29811,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           : entity.blocked_reason,
         manager,
       );
+      if (isNew) entity.status_workflow = 'PLANNED';
 
       if (nextWorkflowStatus === 'CLOSED') {
         this.applyWorkOrderAuditStamp(entity, actor, 'APPROVED', {
@@ -29834,6 +29829,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
       try {
         saved = await workOrderRepo.save(entity);
+        if (!isNew && previousStatus !== saved.status_workflow) await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
+          work_order_id: saved.id, from_status: previousStatus, to_status: saved.status_workflow,
+          changed_at: new Date(), changed_by: this.resolveActorHistoryUserId(actor),
+          note: saved.status_workflow === 'REVIEW' ? 'Ejecución puesta en revisión para verificar el trabajo o registrar materiales adicionales.' : 'Orden de trabajo finalizada por su creador.',
+        }));
         break;
       } catch (error: any) {
         if (!isNew || !this.isDuplicateWorkOrderCodeError(error) || attempt >= 2) {
@@ -29932,6 +29932,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...(dto.consumos_pendientes ?? []),
       ...(dto.consumo_pendiente ? [dto.consumo_pendiente] : []),
     ];
+    if (!workOrderId && !consumosPendientes.some(item => Number(item.cantidad) > 0)) throw new BadRequestException('Añade al menos un material en Consumos antes de crear la OT.');
     const reservedConsumos: Array<
       CreateConsumoDto & { costo_unitario: number; subtotal: number }
     > = [];
@@ -30033,6 +30034,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
+        if (consumosPendientes.length && !headerResult.isNew) await this.assertCanCloseOrVoidWorkOrder(headerResult.workOrder, actor, 'registrar materiales en Consumos de');
         for (const [index, consumo] of consumosPendientes.entries()) {
           currentPhase = `reservar el material ${index + 1} de ${consumosPendientes.length}`;
           const reserved = await this.createConsumoWithManager(
@@ -30053,6 +30055,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             manager,
             headerResult.workOrder,
             dto.salida_materiales_pendiente,
+            actor,
           );
         }
 
@@ -30159,18 +30162,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'Orden de trabajo creada y detalle guardado correctamente',
         { changedBy: this.resolveActorHistoryUserId(actor) },
       ));
-    } else if (transactionResult.previousStatus !== normalizedSavedStatus) {
-      await safePostCommit('el historial de cambio de estado', () =>
-        this.appendWorkOrderHistory(
-        saved.id,
-        normalizedSavedStatus,
-        `Orden de trabajo guardada (${transactionResult.previousStatus} -> ${normalizedSavedStatus})`,
-        {
-          fromStatus: transactionResult.previousStatus,
-          changedBy: this.resolveActorHistoryUserId(actor),
-        },
-      ));
-    } else {
+    } else if (transactionResult.previousStatus === normalizedSavedStatus) {
       await safePostCommit('el historial de actualizacion', () =>
         this.appendWorkOrderHistory(
         saved.id,
@@ -30418,7 +30410,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         })
       : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
-    const normalizedStatus = this.normalizeWorkflowStatus(dto.status_workflow ?? 'PLANNED');
+    const normalizedStatus = this.resolveManualWorkOrderStatus('PLANNED', dto.status_workflow, true);
     this.assertBlockedWorkflowHasBlockingOrder(
       normalizedStatus,
       dto.blocked_by_work_order_id,
@@ -30541,6 +30533,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.blocked_by_work_order_id ?? null,
         dto.blocked_reason ?? null,
       );
+      entity.status_workflow = 'PLANNED';
       this.applyWorkOrderAuditStamp(entity, actor, 'CREATED');
       if (this.normalizeWorkflowStatus(entity.status_workflow) === 'CLOSED') {
         this.applyWorkOrderAuditStamp(entity, actor, 'APPROVED', {
@@ -30752,8 +30745,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       existingLegacyName: wo.equipo_componente_nombre ?? null,
       existingLegacyOfficialName: wo.equipo_componente_nombre_oficial ?? null,
     });
-    const nextWorkflowStatus = this.normalizeWorkflowStatus(
-      dto.status_workflow ?? wo.status_workflow,
+    const nextWorkflowStatus = this.resolveManualWorkOrderStatus(
+      wo.status_workflow, dto.status_workflow,
     );
     const nextBlockedByWorkOrderId =
       dto.blocked_by_work_order_id !== undefined
@@ -30770,6 +30763,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         wo.id,
       );
     }
+    if (nextWorkflowStatus === 'REVIEW' && previousStatus !== 'REVIEW') {
+      await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'pasar a revisión');
+    }
     const emergencyState = this.resolveWorkOrderEmergencyState(
       wo.is_emergency,
       wo.emergency_reason,
@@ -30782,7 +30778,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     const nextHeaderPayload = {
       ...((wo.valor_json as Record<string, unknown> | null) ?? {}),
-      ...(dto.valor_json ?? {}),
+      ...this.protectWorkOrderLifecyclePayload(wo.valor_json as Record<string, unknown> | null, dto.valor_json as Record<string, unknown> | null),
       ...(dto.procedimiento_id
         ? { procedimiento_id: dto.procedimiento_id }
         : {}),
@@ -30848,6 +30844,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     Object.assign(wo, {
       ...dtoColumnas,
+      requested_by: wo.requested_by,
+      created_by: wo.created_by,
       plan_id: resolvedPlanId,
       equipo_componente_id: componentContext.legacyComponentId,
       equipo_componente_nombre: componentContext.legacyComponentName,
@@ -30913,7 +30911,30 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.blocked_reason !== undefined ? dto.blocked_reason : wo.blocked_reason,
     );
     this.applyWorkflowDates(wo, previousStatus, wo.status_workflow);
-    const saved = await this.woRepo.save(wo);
+    const saved = await this.dataSource.transaction(async manager => {
+      if (wo.equipment_id) await manager.findOne(EquipoEntity, {
+        where: { id: wo.equipment_id }, lock: { mode: 'pessimistic_write' },
+      });
+      const current = await manager.findOne(WorkOrderEntity, {
+        where: { id: wo.id, is_deleted: false }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!current || this.isWorkOrderAnnulled(current) || this.normalizeWorkflowStatus(current.status_workflow) !== previousStatus) {
+        throw new ConflictException('La OT cambió de estado mientras se editaba. Actualiza la pantalla antes de guardar.');
+      }
+      if (current.updated_at && wo.updated_at && new Date(current.updated_at).getTime() !== new Date(wo.updated_at).getTime()) {
+        throw new ConflictException('La OT recibió cambios mientras se editaba. Actualiza la pantalla antes de guardar.');
+      }
+      if (nextWorkflowStatus !== previousStatus) {
+        await this.assertCanCloseOrVoidWorkOrder(current, actor, 'cambiar el estado de');
+      }
+      const persisted = await manager.save(WorkOrderEntity, wo);
+      if (previousStatus !== persisted.status_workflow) await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
+        work_order_id: persisted.id, from_status: previousStatus, to_status: persisted.status_workflow,
+        changed_at: new Date(), changed_by: this.resolveActorHistoryUserId(actor),
+        note: persisted.status_workflow === 'REVIEW' ? 'Ejecución puesta en revisión para verificar el trabajo o registrar materiales adicionales.' : 'Orden de trabajo finalizada por su creador.',
+      }));
+      return persisted;
+    });
     await this.replaceWorkOrderProyectoDetail(
       this.dataSource.manager,
       saved.id,
@@ -30966,9 +30987,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.releaseBlockedWorkOrdersFor(saved);
       await this.syncProgramacionExecutionFromLinkedWorkOrder(saved);
     }
-    if (previousStatus !== saved.status_workflow) {
-      await this.appendWorkOrderHistory(saved.id, saved.status_workflow, `Cambio de estado ${previousStatus} → ${saved.status_workflow}`, { fromStatus: previousStatus, changedBy: this.resolveActorHistoryUserId(actor) });
-    } else {
+    if (previousStatus === saved.status_workflow) {
       await this.appendWorkOrderHistory(saved.id, saved.status_workflow, 'Cabecera de OT actualizada', { fromStatus: previousStatus, changedBy: this.resolveActorHistoryUserId(actor) });
     }
     if (
@@ -31693,8 +31712,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
     options?: { motivo?: string | null },
   ) {
-    await this.assertWorkOrderAnnulmentAllowed(actor);
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'anular');
     const currentAudit = (wo.valor_json ?? {}) as Record<string, unknown>;
     if (
       this.normalizeRoleName(currentAudit.approval_action) === 'ANULADA' ||
@@ -31717,10 +31736,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const annulledAt = new Date();
 
     const reversal = await this.dataSource.transaction(async (manager) => {
+      if (wo.equipment_id) await manager.findOne(EquipoEntity, {
+        where: { id: wo.equipment_id }, lock: { mode: 'pessimistic_write' },
+      });
       const workOrder = await manager.findOne(WorkOrderEntity, {
-        where: { id, is_deleted: false },
+        where: { id, is_deleted: false }, lock: { mode: 'pessimistic_write' },
       });
       if (!workOrder) throw new NotFoundException('Registro no encontrado');
+      if (this.isWorkOrderAnnulled(workOrder)) throw new ConflictException('La OT ya fue anulada mientras se procesaba la solicitud.');
 
       // El desecho se revierte primero: al anular su transferencia queda
       // marcado is_deleted el egreso de chatarra, de modo que la reversion de
@@ -33229,6 +33252,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: workOrderId,
       is_deleted: false,
     });
+    await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'registrar materiales en Consumos de');
     this.assertWorkOrderAllowsMaterialReservation(workOrder);
     await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
     await this.assertWorkOrderNotBlockedByActiveAnnex(
@@ -33318,6 +33342,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const items = dto.items ?? [];
+    const consumptionOrder = await this.findOneOrFail(this.woRepo, { id: workOrderId, is_deleted: false });
+    await this.assertCanCloseOrVoidWorkOrder(consumptionOrder, actor, 'registrar materiales en Consumos de');
     if (!items.length) {
       throw new BadRequestException('Indica al menos un material para reservar.');
     }
@@ -33794,6 +33820,99 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /** El bloqueo del equipo serializa salidas e inicios de sus distintas OT. */
+  private async lockWorkOrderEquipmentForIssue(manager: EntityManager, workOrder: WorkOrderEntity) {
+    if (!workOrder.equipment_id) return null;
+    const equipment = await manager.findOne(EquipoEntity, {
+      where: { id: workOrder.equipment_id, is_deleted: false },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!equipment) throw new NotFoundException('Equipo no encontrado');
+    const base = { equipment_id: equipment.id, id: Not(workOrder.id), is_deleted: false, closed_at: IsNull() };
+    const active = await manager.findOne(WorkOrderEntity, {
+      where: [
+        { ...base, status_workflow: In(['IN_PROGRESS', 'REVIEW']) },
+        { ...base, status_workflow: 'BLOCKED', started_at: Not(IsNull()) },
+      ],
+      order: { created_at: 'ASC' },
+    });
+    if (active) throw new ConflictException(`El equipo tiene la OT ${active.code} en ejecución. Finalízala o anúlala antes de registrar salidas o imprimir el egreso de otra OT.`);
+    return equipment;
+  }
+
+  async confirmWorkOrderIssue(workOrderId: string, actor?: RequestActorContext | null, sucursalId?: string | null) {
+    this.assertCanRegisterMaterialIssue(actor);
+    const result = await this.dataSource.transaction(async manager => {
+      const candidate = await manager.findOne(WorkOrderEntity, { where: { id: workOrderId, is_deleted: false } });
+      if (!candidate) throw new NotFoundException('Orden de trabajo no encontrada');
+      await this.assertWorkOrderVisibleForSucursal(candidate, sucursalId);
+      if (this.isWorkOrderAnnulled(candidate)) throw new ForbiddenException('La OT está anulada y no tiene un egreso vigente.');
+      const previous = this.normalizeWorkflowStatus(candidate.status_workflow);
+      // Reimprimir una OT iniciada o finalizada no modifica su ejecución.
+      if (previous === 'CLOSED' || previous === 'IN_PROGRESS') return { workOrder: candidate, started: false };
+      const equipment = await this.lockWorkOrderEquipmentForIssue(manager, candidate);
+      const workOrder = await manager.findOne(WorkOrderEntity, {
+        where: { id: workOrderId, is_deleted: false }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!workOrder) throw new NotFoundException('Orden de trabajo no encontrada');
+      if (this.normalizeWorkflowStatus(workOrder.status_workflow) === 'IN_PROGRESS') return { workOrder, started: false };
+      this.assertWorkOrderAllowsMaterialIssue(workOrder);
+      await this.assertWorkOrderNotBlockedByActiveAnnex(workOrder, manager, 'imprimir el egreso e iniciar la ejecución');
+      await this.assertWorkOrderCanMoveToInProgress({ maintenanceKind: workOrder.maintenance_kind,
+        workOrderId: workOrder.id, fallbackValorJson: workOrder.valor_json as Record<string, unknown> | null });
+      const movements = await this.findWorkOrderIssueMovements(manager, workOrder.id);
+      if (!movements.length) throw new BadRequestException('Registra la salida de los materiales antes de imprimir el egreso.');
+      const actualIssues = await manager.count(EntregaMaterialDetEntity, {
+        where: { entrega_id: In((await manager.find(EntregaMaterialEntity, {
+          where: { work_order_id: workOrder.id, is_deleted: false },
+        })).map(row => row.id)), cantidad: MoreThan(0) },
+      });
+      if (!actualIssues) throw new BadRequestException('El egreso debe incluir al menos un material con salida registrada.');
+      const now = new Date();
+      const actorId = this.resolveActorHistoryUserId(actor);
+      const actorName = this.firstNonEmptyString(actor?.displayName, actor?.username) || 'Usuario de bodega';
+      const hadStarted = Boolean(workOrder.started_at);
+      workOrder.status_workflow = 'IN_PROGRESS';
+      if (!workOrder.started_at) workOrder.started_at = now;
+      this.applyWorkflowDates(workOrder, previous, 'IN_PROGRESS');
+      this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
+      if (!hadStarted) workOrder.valor_json = { ...(workOrder.valor_json ?? {}), execution_start: workOrder.valor_json?.execution_start ?? {
+        at: now.toISOString(), by_user_id: actorId, by_username: actor?.username ?? null, by_name: actorName,
+        issue_document_ids: movements.map(row => row.id), issue_document_numbers: movements.map(row => row.numero_documento),
+      } };
+      workOrder.updated_by = actor?.username || actorName;
+      await manager.save(WorkOrderEntity, workOrder);
+      if (equipment && equipment.estado_funcionamiento !== 'PARADO') {
+        const since = equipment.estado_funcionamiento_actualizado_en ? new Date(equipment.estado_funcionamiento_actualizado_en) : null;
+        await manager.save(EquipoFuncionamientoHistorialEntity, manager.create(EquipoFuncionamientoHistorialEntity, {
+          equipo_id: equipment.id, estado_anterior: equipment.estado_funcionamiento, estado_nuevo: 'PARADO',
+          estado_anterior_desde: since, duracion_estado_anterior_segundos: since ? Math.max(0, Math.floor((now.getTime() - since.getTime()) / 1000)) : null,
+          changed_at: now, changed_by_id: actorId, changed_by: actorName,
+        }));
+        if (equipment.horometro_operativo_desde) equipment.horometro_actual = this.operationalHorometer(equipment, now);
+        equipment.horometro_operativo_desde = null;
+        equipment.estado_funcionamiento = 'PARADO';
+        equipment.estado_funcionamiento_actualizado_en = now;
+        equipment.updated_by = actorName;
+        await manager.save(EquipoEntity, equipment);
+      }
+      await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
+        work_order_id: workOrder.id, from_status: previous, to_status: 'IN_PROGRESS', changed_at: now, changed_by: actorId,
+        note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}. Equipo en estado Parado.`,
+      }));
+      return { workOrder, started: true };
+    });
+    if (result.started) {
+      try {
+        await this.syncProgramacionExecutionFromLinkedWorkOrder(result.workOrder);
+        await this.syncAlertsForWorkOrder(result.workOrder);
+      } catch (error) {
+        this.logger.warn(`Egreso confirmado para ${result.workOrder.code}; no se pudo actualizar una notificación: ${error instanceof Error ? error.message : 'Error'}`);
+      }
+    }
+    return this.listWorkOrderIssueDocuments(workOrderId, sucursalId, actor);
+  }
+
   async issueMaterials(
     workOrderId: string,
     dto: IssueMaterialsDto,
@@ -33803,15 +33922,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     await qr.connect();
     await qr.startTransaction();
     try {
-      const workOrder = await this.findOneOrFail(this.woRepo, {
+      const candidate = await this.findOneOrFail(qr.manager.getRepository(WorkOrderEntity), {
         id: workOrderId,
         is_deleted: false,
       });
       this.assertCanRegisterMaterialIssue(actor);
+      await this.lockWorkOrderEquipmentForIssue(qr.manager, candidate);
+      const workOrder = await qr.manager.findOne(WorkOrderEntity, {
+        where: { id: workOrderId, is_deleted: false }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!workOrder) throw new NotFoundException('Orden de trabajo no encontrada');
       await this.assertOperatorAssignedToWorkOrder(workOrderId, actor);
       await this.assertWorkOrderNotBlockedByActiveAnnex(
         workOrder,
-        undefined,
+        qr.manager,
         'registrar salidas de materiales',
       );
       this.assertWorkOrderAllowsMaterialIssue(workOrder);
@@ -33879,6 +34003,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const productLabel = this.buildProductoLabel(producto) ?? producto.id;
         const stock = await qr.manager.findOne(StockBodegaEntity, {
           where: { producto_id: item.producto_id, bodega_id: item.bodega_id },
+          lock: { mode: 'pessimistic_write' },
         });
         if (!stock || Number(stock.stock_actual) < item.cantidad)
           throw new ConflictException('Stock insuficiente');

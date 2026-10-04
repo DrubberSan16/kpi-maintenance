@@ -1,0 +1,19 @@
+JUSTICE COMPANY — NUEVO PROCESO DE ÓRDENES DE TRABAJO
+
+Según lo acordado con Gerencia, a partir de ahora las órdenes de trabajo se manejarán así:
+
+1. El creador registra la OT y al menos un material en Consumos. La OT queda Planificada automáticamente.
+2. Bodega registra las salidas de materiales durante la planificación.
+3. Bodega pulsa Imprimir egreso: se genera inmediatamente un solo documento con todos los materiales que tienen salida, la OT pasa a En proceso y el equipo queda Parado.
+4. El creador elige Finalizada o Anulada. El equipo permanece Parado hasta registrar su encendido.
+
+MATERIALES ADICIONALES
+En proceso → En revisión → Salida adicional → Imprimir el mismo egreso → En proceso.
+El creador pulsa Pasar a revisión y registra los materiales adicionales en Consumos. Bodega realiza las salidas, que actualizan el egreso existente, y lo imprime nuevamente para reanudar. El inicio original se conserva. Cada transición guarda fecha, hora y usuario.
+
+Mientras una OT del equipo siga en ejecución o revisión, otra OT del mismo equipo no podrá registrar salidas ni imprimir su egreso para iniciar. Primero debe finalizarse o anularse la OT activa.
+
+Los reportes PDF y Excel mostrarán nombres descriptivos, fecha y hora de planificación, inicio, finalización o anulación. El histórico permitirá seguir cada transición con un formato uniforme.
+
+Gracias por aplicar este procedimiento y mantener actualizada la información de cada OT.
+Abrir Justice KPI: https://justicecompany-ec.com/
