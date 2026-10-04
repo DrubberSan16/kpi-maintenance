@@ -1191,10 +1191,15 @@ describe('KpiMaintenanceService alerts', () => {
     expect((service as any).resolveWorkOrderElapsedHours(workOrder)).not.toBeNull();
   });
 
-  it('la salida de material solo la registra el perfil bodega', () => {
+  it('la salida de material la registran Bodega y Super Administrador', () => {
     const permitidos = [
       'BODEGA',
       'Bodeguero',
+      'Súper Administrador',
+      'SUPERADMINISTRADOR',
+      'SUPER_ADMINISTRADOR',
+      'SUPER ADMIN',
+      'SUPER_ADMIN',
     ];
     for (const rol of permitidos) {
       expect((service as any).canRegisterMaterialIssue(rol)).toBe(true);
@@ -1204,12 +1209,12 @@ describe('KpiMaintenanceService alerts', () => {
     }
 
     // Quien levanta la OT reserva el material, pero no lo saca.
-    const rechazados = ['ADMINISTRADOR', 'Super Administrador', 'GERENTE GENERAL', 'OPERADOR', 'SUPERVISOR', 'TECNICO', '', null];
+    const rechazados = ['ADMINISTRADOR', 'GERENTE GENERAL', 'OPERADOR', 'SUPERVISOR', 'TECNICO', '', null];
     for (const rol of rechazados) {
       expect((service as any).canRegisterMaterialIssue(rol)).toBe(false);
       expect(() =>
         (service as any).assertCanRegisterMaterialIssue({ roleName: rol }),
-      ).toThrow(/solo.*perfil bodega/i);
+      ).toThrow(/solo.*perfiles Bodega y Super Administrador/i);
     }
   });
 

@@ -9104,7 +9104,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   /**
    * Quien puede registrar la salida REAL de material de una OT.
    *
-   * La salida mueve stock y genera kardex: es un acto de bodega. Operadores,
+   * Bodega y Super Administrador pueden mover stock y generar kardex. Operadores,
    * supervisores y tecnicos reservan el material en la OT, pero no lo sacan.
    *
    * Se valida en el servidor y no solo escondiendo la pestana: ocultar un boton
@@ -9113,6 +9113,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private readonly MATERIAL_ISSUE_ROLES = [
     'BODEGA',
     'BODEGUERO',
+    'SUPER ADMINISTRADOR',
+    'SUPERADMINISTRADOR',
+    'SUPER_ADMINISTRADOR',
+    'SUPER ADMIN',
+    'SUPER_ADMIN',
   ];
 
   private canRegisterMaterialIssue(roleName?: string | null): boolean {
@@ -9124,7 +9129,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private assertCanRegisterMaterialIssue(actor?: RequestActorContext | null) {
     if (this.canRegisterMaterialIssue(actor?.roleName)) return;
     throw new ForbiddenException(
-      'Solo el perfil Bodega puede registrar salidas de materiales y confirmar el egreso de una OT.',
+      'Solo los perfiles Bodega y Super Administrador pueden registrar salidas de materiales y confirmar el egreso de una OT.',
     );
   }
 

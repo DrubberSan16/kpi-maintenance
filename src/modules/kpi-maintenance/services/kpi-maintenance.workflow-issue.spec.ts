@@ -19,7 +19,7 @@ function fixture(state = 'PLANNED') {
     findWorkOrderIssueMovements: jest.fn().mockResolvedValue([{ id: 'egreso', numero_documento: 'EB-42' }]),
     listWorkOrderIssueDocuments: jest.fn().mockResolvedValue({ data: [{ id: 'egreso' }] }),
     syncProgramacionExecutionFromLinkedWorkOrder: jest.fn(), syncAlertsForWorkOrder: jest.fn(),
-    logger: { warn: jest.fn() }, MATERIAL_ISSUE_ROLES: ["BODEGA", "BODEGUERO"],
+    logger: { warn: jest.fn() }, MATERIAL_ISSUE_ROLES: ["BODEGA", "BODEGUERO", "SUPER ADMINISTRADOR", "SUPERADMINISTRADOR", "SUPER_ADMINISTRADOR", "SUPER ADMIN", "SUPER_ADMIN"],
   });
   return { service, manager, wo, equipment, saves };
 }
@@ -88,6 +88,15 @@ describe('Flujo automático de OT y egreso', () => {
   it('el cliente no puede reemplazar la identidad del creador ni del inicio', () => {
     const { service } = fixture();
     expect(service.protectWorkOrderLifecyclePayload({ created_by_username: 'creador', execution_start: { by_name: 'Ana' } }, { created_by_username: 'intruso', execution_start: { by_name: 'Otra' }, causa: 'Ajuste' })).toEqual({ created_by_username: 'creador', execution_start: { by_name: 'Ana' }, causa: 'Ajuste' });
+  });
+  it('Super Administrador puede imprimir el egreso y queda registrado como quien inició la OT', async () => {
+    const { service, wo, equipment, saves } = fixture();
+    const superAdmin = { ...actor, roleName: 'Súper Administrador', displayName: 'María Administradora' };
+    await service.confirmWorkOrderIssue('wo', superAdmin);
+    expect(wo.status_workflow).toBe('IN_PROGRESS');
+    expect(wo.valor_json.execution_start).toMatchObject({ by_name: superAdmin.displayName, by_user_id: superAdmin.userId });
+    expect(equipment.estado_funcionamiento).toBe('PARADO');
+    expect(saves.find(row => row.entity === WorkOrderStatusHistoryEntity).value.changed_by).toBe(superAdmin.userId);
   });
   it('una salida adicional reutiliza el número y la apertura del egreso existente', async () => {
     const { service, manager, wo } = fixture('REVIEW');
