@@ -1131,7 +1131,7 @@ describe('KpiMaintenanceService alerts', () => {
     expect(repos.equipoRepo.save).not.toHaveBeenCalled();
   });
 
-  it('la OT conserva el horómetro editable, su valor anterior y las horas-hombre', () => {
+  it('los reportes conservan las lecturas históricas y las horas de la plantilla', () => {
     const result = (service as any).buildWorkOrderHorometerPayload(
       { horometro_actual: 999, horas_a_realizar: 25 },
       { horometro_actual: 150 },
@@ -1226,7 +1226,7 @@ describe('KpiMaintenanceService alerts', () => {
       { horometro_actual: 15286 },
       null,
     );
-    expect(auditPayload.horometro_anterior).toBe(15286);
+    expect(auditPayload.horometro_anterior).toBe(15226);
 
     (service as any).restoreStoredPreviousHorometer(auditPayload, {
       horometro_actual: 15228,
@@ -1251,7 +1251,7 @@ describe('KpiMaintenanceService alerts', () => {
     expect(auditPayload.horometro_anterior).toBe(150);
   });
 
-  it('sincroniza el horómetro editado en la OT con el equipo y su historial', async () => {
+  it('auditar una OT no permite modificar el contador del equipo', async () => {
     const equipment = {
       id: 'equipo-1',
       codigo: 'EQ-1',
@@ -1272,26 +1272,10 @@ describe('KpiMaintenanceService alerts', () => {
       { username: 'supervisor' },
     );
 
-    expect(repos.equipoRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ horometro_actual: 90 }),
-    );
-    expect(repos.equipoHorometroHistorialRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        equipo_id: 'equipo-1',
-        horometro_anterior: 125,
-        horometro_nuevo: 90,
-        fuente: 'ORDEN_TRABAJO',
-        observacion: expect.stringContaining('OT-A00001'),
-      }),
-    );
-    expect(result).toEqual(
-      expect.objectContaining({
-        equipmentUpdated: true,
-        notes: expect.arrayContaining([
-          expect.stringContaining('Horómetro del equipo actualizado desde la OT'),
-        ]),
-      }),
-    );
+    expect(repos.equipoRepo.save).not.toHaveBeenCalled();
+    expect(repos.equipoHorometroHistorialRepo.save).not.toHaveBeenCalled();
+    expect(result.equipmentUpdated).toBe(false);
+    expect(result.notes).toEqual([expect.stringContaining('Horómetro automático OT actualizado')]);
   });
 
   it('la actualización manual del equipo registra historial interno', async () => {
@@ -1449,57 +1433,23 @@ describe('KpiMaintenanceService alerts', () => {
     expect(updateSpy).not.toHaveBeenCalled();
   });
 
-  it('la OT nueva exige que el horómetro avance sobre la lectura del equipo', () => {
-    const equipo = { horometro_actual: 15286 } as any;
-
-    // Al crear: la lectura tiene que avanzar, o el par del informe se lee como
-    // un horómetro que retrocede.
-    expect(() =>
-      (service as any).buildWorkOrderHorometerPayload(
-        { horometro_actual: 15200 },
-        equipo,
-        null,
-        { requireIncrease: true },
-      ),
-    ).toThrow(/debe ser mayor que la lectura vigente/i);
-
-    expect(() =>
-      (service as any).buildWorkOrderHorometerPayload(
-        { horometro_actual: 15286 },
-        equipo,
-        null,
-        { requireIncrease: true },
-      ),
-    ).toThrow(/debe ser mayor que la lectura vigente/i);
-
-    const payload = (service as any).buildWorkOrderHorometerPayload(
-      { horometro_actual: 15300 },
-      equipo,
-      null,
-      { requireIncrease: true },
+  it('la OT nueva toma el contador del servidor aunque el cliente mande otra lectura', async () => {
+    const equipment = { id: 'equipo-1', horometro_actual: 15286, estado_funcionamiento: 'PARADO' } as any;
+    repos.woRepo.findOne.mockResolvedValue({ code: 'OT-ANTERIOR', valor_json: { horometro_actual: 15200 } });
+    for (const input of [15200, 15286, 15300, -10, 'incorrecto']) {
+      const payload = await (service as any).buildAutomaticWorkOrderHorometerPayload(
+        { horometro_actual: input, horometro_anterior: 999 }, equipment, null,
+      );
+      expect(payload.horometro_actual).toBe(15286);
+      expect(payload.horometro_anterior).toBe(15200);
+      expect(payload.horometro_ot_anterior_codigo).toBe('OT-ANTERIOR');
+    }
+    const edited = await (service as any).buildAutomaticWorkOrderHorometerPayload(
+      { horometro_actual: 90000 }, equipment, null,
+      { storedPayload: { horometro_actual: 15200, horometro_anterior: 15100 } },
     );
-    expect(payload.horometro_anterior).toBe(15286);
-    expect(payload.horometro_actual).toBe(15300);
-
-    const emergencyPayload = (service as any).buildWorkOrderHorometerPayload(
-      { horometro_actual: 15200 },
-      equipo,
-      null,
-      { requireIncrease: false },
-    );
-    expect(emergencyPayload.horometro_anterior).toBe(15286);
-    expect(emergencyPayload.horometro_actual).toBe(15200);
-
-    // Editar una OT ya guardada no exige avance: el equipo siguió trabajando
-    // con órdenes posteriores y comparar contra la lectura viva rechazaría una
-    // edición legítima.
-    expect(() =>
-      (service as any).buildWorkOrderHorometerPayload(
-        { horometro_actual: 15200 },
-        equipo,
-        null,
-      ),
-    ).not.toThrow();
+    expect(edited.horometro_actual).toBe(15200);
+    expect(edited.horometro_anterior).toBe(15100);
   });
 
   it('acepta inspeccion como tipo de mantenimiento de una OT', () => {

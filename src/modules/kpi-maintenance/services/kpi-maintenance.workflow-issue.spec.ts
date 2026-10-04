@@ -39,10 +39,17 @@ describe('Flujo automático de OT y egreso', () => {
   });
   it('imprimir inicia la OT, apaga el equipo y registra al usuario de bodega en una transacción', async () => {
     const { service, wo, equipment, saves } = fixture();
+    const now = new Date();
+    Object.assign(equipment, { horometro_actual: 1000.25, horometro_operativo_desde: new Date(now.getTime() - 3600000) });
+    wo.valor_json = { horometro_actual: 999, horometro_anterior: 900, horas_plantilla: 1.5 };
     await service.confirmWorkOrderIssue('wo', actor);
     expect(wo.status_workflow).toBe('IN_PROGRESS');
     expect(wo.valor_json.execution_start).toMatchObject({ by_name: 'Ana Bodega', by_user_id: actor.userId });
     expect(equipment.estado_funcionamiento).toBe('PARADO');
+    expect(wo.valor_json.horometro_actual).toBeCloseTo(1001.25, 3);
+    expect(equipment.horometro_actual).toBe(wo.valor_json.horometro_actual);
+    expect(wo.valor_json.horometro_anterior).toBe(900);
+    expect(wo.valor_json.cebado_horometro).toMatchObject({ horas: 1.5, pendiente: true });
     expect(saves.filter(row => row.entity === WorkOrderStatusHistoryEntity)[0].value).toMatchObject({ from_status: 'PLANNED', to_status: 'IN_PROGRESS', changed_by: actor.userId });
     expect(saves.some(row => row.entity === EquipoFuncionamientoHistorialEntity)).toBe(true);
     for (const row of saves.filter(row => [WorkOrderStatusHistoryEntity, EquipoFuncionamientoHistorialEntity].includes(row.entity))) {

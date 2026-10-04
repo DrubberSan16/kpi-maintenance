@@ -2328,120 +2328,73 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     source: Record<string, unknown> | null | undefined,
     ...keys: string[]
   ) {
-    return this.normalizeHorometro(
-      this.extractNumericRecordValue(source, ...keys),
-    );
+    if (!source) return null;
+    for (const key of keys) {
+      const value = source[key];
+      if (value === null || value === undefined || String(value).trim() === '') continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return Number(number.toFixed(6));
+    }
+    return null;
   }
 
-  private buildWorkOrderHorometerPayload(
+  /** The equipment clock is authoritative. Client readings never change it. */
+  private async buildAutomaticWorkOrderHorometerPayload(
     payload: Record<string, unknown> | null | undefined,
-    equipmentOfOrder?: EquipoEntity | null,
+    equipment?: EquipoEntity | null,
     procedure?: ProcedimientoPlantillaEntity | null,
-    options?: {
-      requireIncrease?: boolean;
-      previousHorometer?: unknown;
-      maintenanceKind?: unknown;
-    },
+    options?: { maintenanceKind?: unknown; storedPayload?: Record<string, unknown> | null; manager?: EntityManager },
   ) {
-    // Una OT de Proyecto no toca ningun horometro, aunque lleve un proyecto
-    // asociado: un proyecto es un equipo solo en la base, no una maquina a la
-    // que medirle horas. Sin este corte, la lectura del proyecto (0) se copiaba
-    // a la OT y la regla de que "la lectura debe avanzar" rechazaba el guardado.
-    const isProyecto = this.isProyectoMaintenanceKind(options?.maintenanceKind);
-    const equipment = isProyecto ? null : equipmentOfOrder;
-    const requireIncrease = isProyecto ? false : options?.requireIncrease;
-    const {
-      horometro_proyectado: _horometroProyectado,
-      horometro_equipo_referencia: _horometroEquipoReferencia,
-      ...basePayload
-    } = payload ? { ...payload } : {};
-    const hasRequestedHorometer =
-      Object.prototype.hasOwnProperty.call(basePayload, 'horometro_actual') &&
-      basePayload.horometro_actual !== null &&
-      basePayload.horometro_actual !== undefined &&
-      String(basePayload.horometro_actual).trim() !== '';
-    const requestedHorometer = this.normalizeHorometroRecordValue(
-      basePayload,
-      'horometro_actual',
-    );
-    if (hasRequestedHorometer && requestedHorometer == null) {
-      throw new BadRequestException('El horometro actual de la OT no es valido.');
+    const stored = options?.storedPayload ?? null;
+    const base = this.protectWorkOrderLifecyclePayload(stored, payload ?? null);
+    const project = this.isProyectoMaintenanceKind(options?.maintenanceKind);
+    const current = equipment && !project ? this.operationalHorometer(equipment) : null;
+    let previous = this.normalizeHorometroRecordValue(stored, 'horometro_anterior');
+    if (!stored && equipment && !project) {
+      const repo = options?.manager ? options.manager.getRepository(WorkOrderEntity) : this.woRepo;
+      const previousOrder = await repo.findOne({
+        where: { equipment_id: equipment.id, is_deleted: false }, order: { created_at: 'DESC', id: 'DESC' },
+      });
+      previous = this.normalizeHorometroRecordValue(previousOrder?.valor_json as Record<string, unknown> | null, 'horometro_actual')
+        ?? Number(equipment.horometro_actual || 0);
+      if (previousOrder) base.horometro_ot_anterior_codigo = previousOrder.code;
     }
-    if (requestedHorometer != null && requestedHorometer < 0) {
-      throw new BadRequestException('El horometro actual no puede ser negativo.');
-    }
-    // Al CREAR la OT la lectura tiene que avanzar sobre la del equipo. Es lo
-    // que hace que el par "anterior -> actual" del informe signifique algo: el
-    // anterior es la lectura con la que llego la maquina y el actual el que se
-    // anota al abrir la orden. Con una lectura igual o menor el par se lee como
-    // un horometro que retrocede.
-    //
-    // Solo al crear: en una OT ya guardada el campo queda bloqueado, y el
-    // equipo pudo avanzar con OT posteriores, asi que comparar contra la
-    // lectura viva rechazaria una edicion legitima.
-    const lecturaVigente = this.normalizeHorometro(equipment?.horometro_actual);
-    const previousHorometer = this.normalizeHorometro(options?.previousHorometer);
-    const requestedHorometerChanged =
-      previousHorometer == null ||
-      (requestedHorometer != null &&
-        this.haveDifferentNumericValue(requestedHorometer, previousHorometer));
-    if (
-      requireIncrease &&
-      requestedHorometerChanged &&
-      hasRequestedHorometer &&
-      requestedHorometer != null &&
-      lecturaVigente != null &&
-      requestedHorometer <= lecturaVigente
-    ) {
-      throw new BadRequestException(
-        `El horometro de la OT debe ser mayor que la lectura vigente del equipo (${lecturaVigente}). Se recibio ${requestedHorometer}.`,
-      );
-    }
-    const horometroActual = hasRequestedHorometer
-      ? requestedHorometer
-      : this.normalizeHorometro(equipment?.horometro_actual);
-    const horasARealizar =
-      this.extractNumericRecordValue(
-        basePayload,
-        'horas_a_realizar',
-        'horas_plantilla',
-      ) ??
-      (procedure?.frecuencia_horas != null
-        ? Number(this.toNumeric(procedure.frecuencia_horas, 0).toFixed(2))
-        : null);
-    const equipmentHorometer = this.normalizeHorometro(
-      equipment?.horometro_actual,
-    );
-    const storedPreviousHorometer = this.normalizeHorometroRecordValue(
-      basePayload,
-      'horometro_anterior',
-    );
-    const horometroAnterior =
-      horometroActual != null &&
-      equipmentHorometer != null &&
-      this.haveDifferentNumericValue(horometroActual, equipmentHorometer)
-        ? equipmentHorometer
-        : storedPreviousHorometer ?? equipmentHorometer;
-
+    const hours = procedure?.frecuencia_horas != null
+      ? Number(Number(procedure.frecuencia_horas).toFixed(2))
+      : this.extractNumericRecordValue(stored ?? base, 'horas_a_realizar', 'horas_plantilla');
     return {
-      ...basePayload,
-      horometro_anterior: horometroAnterior,
-      horometro_actual: horometroActual,
-      horas_a_realizar: horasARealizar,
-      horas_plantilla: horasARealizar,
+      ...base,
+      horometro_automatico: !project,
+      horometro_actual: project ? null : this.normalizeHorometroRecordValue(stored, 'horometro_actual') ?? current,
+      horometro_anterior: project ? null : previous ?? Number(equipment?.horometro_actual || 0),
+      horometro_capturado_en: stored?.horometro_capturado_en ?? new Date().toISOString(),
+      horas_a_realizar: hours,
+      horas_plantilla: hours,
     };
   }
 
-  /**
-   * Devuelve al payload leido el horometro anterior que guardo la OT.
-   *
-   * `buildWorkOrderHorometerPayload` lo recalcula contra la lectura VIVA del
-   * equipo, que es lo que hace falta al guardar. Al leer una OT ya cerrada eso
-   * reescribe la historia: el equipo siguio avanzando con las OT posteriores y
-   * el par salia como "15286 -> 15228", un horometro que retrocede. Si la OT
-   * dejo el suyo escrito, ese manda; si no lo dejo, se conserva la referencia
-   * del equipo como unica pista disponible.
-   */
+  /** Read stored OT snapshots without replacing them with today's equipment reading. */
+  private buildWorkOrderHorometerPayload(
+    payload: Record<string, unknown> | null | undefined,
+    equipment?: EquipoEntity | null,
+    procedure?: ProcedimientoPlantillaEntity | null,
+    options?: { maintenanceKind?: unknown },
+  ) {
+    const project = this.isProyectoMaintenanceKind(options?.maintenanceKind);
+    const { horometro_proyectado: _projected, horometro_equipo_referencia: _reference, ...base } = payload ?? {};
+    const hours = this.extractNumericRecordValue(base, 'horas_a_realizar', 'horas_plantilla')
+      ?? (procedure?.frecuencia_horas != null ? Number(procedure.frecuencia_horas) : null);
+    return {
+      ...base,
+      horometro_actual: project ? null : this.normalizeHorometroRecordValue(base, 'horometro_actual')
+        ?? (equipment ? this.operationalHorometer(equipment) : null),
+      horometro_anterior: project ? null : this.normalizeHorometroRecordValue(base, 'horometro_anterior')
+        ?? (equipment ? Number(equipment.horometro_actual || 0) : null),
+      horas_a_realizar: hours,
+      horas_plantilla: hours,
+    };
+  }
+
   private restoreStoredPreviousHorometer(
     auditPayload: Record<string, unknown>,
     storedPayload: Record<string, unknown> | null | undefined,
@@ -2487,109 +2440,26 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return normalized == null ? 'N/D' : String(normalized);
   }
 
+  /** Audit automatic snapshots; saving or editing an OT never resets the equipment clock. */
   private async syncEquipmentHorometerFromWorkOrder(
     workOrder: WorkOrderEntity,
     previousPayload?: Record<string, unknown> | null,
-    actor?: RequestActorContext | null,
-    manager?: EntityManager,
+    _actor?: RequestActorContext | null,
+    _manager?: EntityManager,
   ) {
-    const equipmentId = this.firstNonEmptyString(workOrder.equipment_id);
-    if (!equipmentId) {
+    if (!workOrder.equipment_id || this.isProyectoMaintenanceKind(workOrder.maintenance_kind)
+      || this.normalizeWorkflowStatus(workOrder.status_workflow) === 'CLOSED') {
       return { notes: [] as string[], equipmentUpdated: false };
     }
-    // El proyecto asociado a una OT de Proyecto no es una maquina: su lectura no
-    // se actualiza desde la OT ni deja notas de horometro en el historial.
-    if (this.isProyectoMaintenanceKind(workOrder.maintenance_kind)) {
-      return { notes: [] as string[], equipmentUpdated: false };
-    }
-    if (this.normalizeWorkflowStatus(workOrder.status_workflow) === 'CLOSED') {
-      return { notes: [] as string[], equipmentUpdated: false };
-    }
-    const currentPayload =
-      (workOrder.valor_json as Record<string, unknown> | null | undefined) ?? {};
-    const previousSnapshot = this.extractWorkOrderHorometerSnapshot(
-      previousPayload ?? null,
-    );
-    const currentSnapshot = this.extractWorkOrderHorometerSnapshot(
-      currentPayload,
-    );
+    const before = this.extractWorkOrderHorometerSnapshot(previousPayload ?? null);
+    const after = this.extractWorkOrderHorometerSnapshot(workOrder.valor_json as Record<string, unknown> | null);
     const notes: string[] = [];
-    let equipmentUpdated = false;
-    const currentHorometerChanged = this.haveDifferentNumericValue(
-      previousSnapshot.horometro_actual,
-      currentSnapshot.horometro_actual,
-    );
-
-    if (currentHorometerChanged) {
-      notes.push(
-        previousSnapshot.horometro_actual == null
-          ? `Horómetro actual OT registrado: ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`
-          : `Horómetro actual OT actualizado: ${this.formatHorometerHistoryValue(previousSnapshot.horometro_actual)} -> ${this.formatHorometerHistoryValue(currentSnapshot.horometro_actual)}`,
-      );
+    if (this.haveDifferentNumericValue(before.horometro_actual, after.horometro_actual)) {
+      notes.push(before.horometro_actual == null
+        ? `Horómetro automático OT registrado: ${after.horometro_actual} h`
+        : `Horómetro automático OT actualizado: ${before.horometro_actual} a ${after.horometro_actual} h`);
     }
-
-    if (currentHorometerChanged && currentSnapshot.horometro_actual != null) {
-      const equipmentRepo = manager
-        ? manager.getRepository(EquipoEntity)
-        : this.equipoRepo;
-      const historyRepo = manager
-        ? manager.getRepository(EquipoHorometroHistorialEntity)
-        : this.equipoHorometroHistorialRepo;
-      const equipment = await equipmentRepo.findOne({
-        where: { id: equipmentId, is_deleted: false } as FindOptionsWhere<EquipoEntity>,
-        ...(manager ? { lock: { mode: 'pessimistic_write' as const } } : {}),
-      });
-      if (!equipment) {
-        throw new NotFoundException('Equipo no encontrado');
-      }
-      const previousEquipmentHorometer = this.toNumeric(
-        equipment.horometro_actual,
-        0,
-      );
-      const requestedHorometer = currentSnapshot.horometro_actual;
-      if (
-        this.haveDifferentNumericValue(
-          previousEquipmentHorometer,
-          requestedHorometer,
-        )
-      ) {
-        const changedAt = new Date();
-        const actorSnapshot = this.resolveHorometerActor(
-          actor,
-          workOrder.updated_by,
-        );
-        const isBackwardCorrection =
-          requestedHorometer < previousEquipmentHorometer;
-        equipment.horometro_actual = requestedHorometer;
-        equipment.fecha_ultima_lectura = changedAt;
-        equipment.updated_by = actorSnapshot.label ?? equipment.updated_by ?? null;
-        await equipmentRepo.save(equipment);
-        await historyRepo.save(
-          historyRepo.create({
-            id: randomUUID(),
-            equipo_id: equipmentId,
-            horometro_anterior: previousEquipmentHorometer,
-            horometro_nuevo: requestedHorometer,
-            changed_at: changedAt,
-            changed_by_id: actorSnapshot.id,
-            changed_by: actorSnapshot.label,
-            fuente: 'ORDEN_TRABAJO',
-            observacion: isBackwardCorrection
-              ? `Correccion descendente desde la OT ${workOrder.code}: ${previousEquipmentHorometer} -> ${requestedHorometer}; la nueva lectura se establece como base anterior.`
-              : `Actualizacion desde la OT ${workOrder.code}.`,
-          }),
-        );
-        equipmentUpdated = true;
-        notes.push(
-          `Horómetro del equipo actualizado desde la OT: ${this.formatHorometerHistoryValue(previousEquipmentHorometer)} -> ${this.formatHorometerHistoryValue(requestedHorometer)}`,
-        );
-      }
-    }
-
-    return {
-      notes: [...new Set(notes.filter(Boolean))],
-      equipmentUpdated,
-    };
+    return { notes, equipmentUpdated: false };
   }
 
   private async syncReprogrammingHorometer(options: {
@@ -2614,9 +2484,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       id: equipmentId,
       is_deleted: false,
     } as FindOptionsWhere<EquipoEntity>);
-    const currentHorometer = this.normalizeHorometro(
-      equipment.horometro_actual,
-    );
+    const currentHorometer = this.operationalHorometer(equipment);
     if (currentHorometer == null) return [] as string[];
 
     const actorSnapshot = this.resolveAuditActorSnapshot(options.actor);
@@ -2632,6 +2500,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       } = previousPayload;
       const nextPayload = {
         ...baseWorkOrderPayload,
+        horometro_automatico: true,
         horometro_actual: currentHorometer,
         horometro_actual_reprogramacion: currentHorometer,
         horometro_actual_reprogramado_at: nowIso,
@@ -6120,7 +5989,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private protectWorkOrderLifecyclePayload(previous: Record<string, unknown> | null, incoming: Record<string, unknown> | null) {
     const merged = { ...(previous ?? {}), ...(incoming ?? {}) };
     for (const key of Object.keys(merged)) {
-      if (/^(created_|approved_|execution_start$|planned_at$|annulment$|approval_action$)/.test(key)) {
+      if (/^(created_|approved_|execution_start$|planned_at$|annulment$|approval_action$|cebado_horometro$|horometro_capturado_en$|horometro_ot_anterior_codigo$|horometro_inicio_ejecucion$|horometro_detenido_en$)/.test(key)) {
         if (previous && key in previous) merged[key] = previous[key];
         else delete merged[key];
       }
@@ -17536,7 +17405,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const base = Number(equipment.horometro_actual || 0);
     if (equipment.estado_funcionamiento !== 'FUNCIONAMIENTO' || !equipment.horometro_operativo_desde) return base;
     const elapsed = Math.max(0, now.getTime() - new Date(equipment.horometro_operativo_desde).getTime()) / 3600000;
-    return Number((base + elapsed).toFixed(2));
+    return Number((base + elapsed).toFixed(6));
   }
 
   async listEquipos(query: EquipoQueryDto, sucursalId?: string | null) {
@@ -17975,11 +17844,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         lock: { mode: 'pessimistic_write' },
       });
       if (!e) throw new NotFoundException('Equipo no encontrado');
-      if (e.estado_funcionamiento === 'PARADO' && this.normalizeEquipoEstadoFuncionamiento(dto.estado_funcionamiento) === 'FUNCIONAMIENTO') {
+      const restarting = e.estado_funcionamiento === 'PARADO' && this.normalizeEquipoEstadoFuncionamiento(dto.estado_funcionamiento) === 'FUNCIONAMIENTO';
+      if (restarting) {
         closedOrders.push(...await this.closeWorkOrdersOnRestart(manager, e, actor));
       }
       const previousHorometer = this.toNumeric(e.horometro_actual, 0);
-      if (dto.horometro_actual === undefined) requestedHorometer = previousHorometer;
+      if (restarting || dto.horometro_actual === undefined) requestedHorometer = previousHorometer;
       const isBackwardCorrection = requestedHorometer < previousHorometer;
       const horometerChanged = this.haveDifferentNumericValue(
         previousHorometer,
@@ -18134,6 +18004,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ], lock: { mode: 'pessimistic_write' }, order: { created_at: 'ASC' },
     });
     if (active.length) throw new ConflictException(`Finaliza o anula la OT ${active[0].code} antes de registrar el encendido del equipo.`);
+    const orders = await manager.getRepository(WorkOrderEntity).find({
+      where: { equipment_id: equipment.id, is_deleted: false, status_workflow: 'CLOSED', started_at: Not(IsNull()) },
+      lock: { mode: 'pessimistic_write' }, order: { closed_at: 'ASC', id: 'ASC' },
+    });
+    for (const order of orders) {
+      const credit = order.valor_json?.cebado_horometro as Record<string, unknown> | undefined;
+      if (this.normalizeMaintenanceKind(order.maintenance_kind) !== 'CEBADO'
+        || this.isWorkOrderAnnulled(order) || credit?.pendiente !== true) continue;
+      const hours = Number(credit.horas);
+      if (!Number.isFinite(hours) || hours <= 0) continue;
+      const before = Number(equipment.horometro_actual || 0);
+      const after = Number((before + hours).toFixed(6));
+      const now = new Date();
+      const user = this.resolveHorometerActor(actor);
+      equipment.horometro_actual = after;
+      equipment.fecha_ultima_lectura = now;
+      order.valor_json = { ...order.valor_json, cebado_horometro: { ...credit, pendiente: false,
+        aplicado_en: now.toISOString(), aplicado_por: user.label, horometro_anterior: before, horometro_nuevo: after } };
+      await manager.getRepository(WorkOrderEntity).save(order);
+      const history = manager.getRepository(EquipoHorometroHistorialEntity);
+      await history.save(history.create({ equipo_id: equipment.id, horometro_anterior: before, horometro_nuevo: after,
+        changed_at: now, changed_by_id: user.id, changed_by: user.label, fuente: 'CEBADO_AUTOMATICO',
+        observacion: `${hours} h de la plantilla de la OT ${order.code}, añadidas al registrar el encendido.` }));
+      const events = manager.getRepository(WorkOrderStatusHistoryEntity);
+      await events.save(events.create({ work_order_id: order.id, from_status: 'CLOSED', to_status: 'CLOSED', changed_at: now,
+        changed_by: user.id, note: `Equipo encendido. Se añadieron automáticamente ${hours} h de cebado al horómetro: ${before} a ${after} h.` }));
+    }
     return [] as WorkOrderEntity[];
   }
 
@@ -29702,7 +29599,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             requested_by: ownerUserId,
             created_by: ownerUsername,
           });
-      const nextHeaderPayload = this.buildWorkOrderHorometerPayload(
+      const nextHeaderPayload = await this.buildAutomaticWorkOrderHorometerPayload(
         {
           ...this.protectWorkOrderLifecyclePayload(entity.valor_json as Record<string, unknown> | null, header.valor_json as Record<string, unknown> | null),
           ...(header.procedimiento_id
@@ -29713,8 +29610,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment,
         resolvedProcedure,
         {
-          requireIncrease: !emergencyState.is_emergency,
-          previousHorometer: previousHeaderPayload?.horometro_actual,
+          storedPayload: previousHeaderPayload,
+          manager,
           maintenanceKind: resolvedMaintenanceKind,
         },
       );
@@ -30510,12 +30407,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         created_by: ownerUsername,
         updated_by: this.firstNonEmptyString(actor?.username, ownerUsername) ?? null,
       });
-      entity.valor_json = this.buildWorkOrderHorometerPayload(
+      entity.valor_json = await this.buildAutomaticWorkOrderHorometerPayload(
         (entity.valor_json as Record<string, unknown> | null) ?? {},
         equipment,
         resolvedProcedure,
         {
-          requireIncrease: !emergencyState.is_emergency,
           maintenanceKind: resolvedMaintenanceKind,
         },
       );
@@ -30871,13 +30767,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         wo.updated_by ??
         null,
     });
-    wo.valor_json = this.buildWorkOrderHorometerPayload(
+    wo.valor_json = await this.buildAutomaticWorkOrderHorometerPayload(
       (wo.valor_json as Record<string, unknown> | null) ?? {},
       equipment,
       resolvedProcedure,
       {
-        requireIncrease: !emergencyState.is_emergency,
-        previousHorometer: previousPayload?.horometro_actual,
+        storedPayload: previousPayload,
         maintenanceKind: nextMaintenanceKind,
       },
     );
@@ -33879,6 +33774,21 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const actorId = this.resolveActorHistoryUserId(actor);
       const actorName = this.firstNonEmptyString(actor?.displayName, actor?.username) || 'Usuario de bodega';
       const hadStarted = Boolean(workOrder.started_at);
+      if (!hadStarted && equipment) {
+        const reading = this.operationalHorometer(equipment, now);
+        workOrder.valor_json = { ...(workOrder.valor_json ?? {}), horometro_automatico: true,
+          horometro_actual: reading, horometro_inicio_ejecucion: reading, horometro_detenido_en: now.toISOString() };
+        if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO') {
+          const procedureId = this.firstNonEmptyString(workOrder.valor_json.procedimiento_id);
+          const procedure = procedureId ? await manager.findOne(ProcedimientoPlantillaEntity,
+            { where: { id: procedureId, is_deleted: false } }) : null;
+          const hours = procedure?.frecuencia_horas != null ? Number(procedure.frecuencia_horas)
+            : this.extractNumericRecordValue(workOrder.valor_json, 'horas_plantilla', 'horas_a_realizar') ?? 0;
+          workOrder.valor_json = { ...workOrder.valor_json, cebado_horometro: {
+            horas: Math.max(0, hours), pendiente: hours > 0, preparado_en: now.toISOString(),
+          } };
+        }
+      }
       workOrder.status_workflow = 'IN_PROGRESS';
       if (!workOrder.started_at) workOrder.started_at = now;
       this.applyWorkflowDates(workOrder, previous, 'IN_PROGRESS');

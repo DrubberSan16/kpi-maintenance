@@ -15,7 +15,7 @@ export class EquipoEntity {
   @Column({ default: 'PARADO' }) estado_funcionamiento: string;
   @Column({ type: 'timestamp without time zone', nullable: true })
   estado_funcionamiento_actualizado_en?: Date | null;
-  @Column('numeric', { precision: 18, scale: 2, default: 0 })
+  @Column('numeric', { precision: 22, scale: 6, default: 0 })
   horometro_actual: number;
   @Column({ type: 'timestamp without time zone', nullable: true })
   horometro_operativo_desde?: Date | null;

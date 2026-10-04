@@ -1,0 +1,27 @@
+JUSTICE COMPANY · HORÓMETRO AUTOMÁTICO
+
+Según lo acordado con Gerencia, a partir de ahora el horómetro de los equipos se gestionará automáticamente. Ya no se debe ingresar el horómetro al crear o editar una OT.
+
+1. EQUIPO EN FUNCIONAMIENTO
+El horómetro aumenta con el tiempo real transcurrido. Una hora de funcionamiento suma una hora al contador; se conservan los minutos y segundos acumulados.
+
+2. CREAR LA OT → PLANIFICADA
+La OT toma automáticamente la lectura actual. El horómetro anterior corresponde a la lectura guardada en la OT anterior de ese mismo equipo, para los reportes.
+
+3. REGISTRAR LA SALIDA DE MATERIALES → IMPRIMIR EGRESO → EN PROCESO
+Al imprimir el egreso se registra automáticamente la lectura de inicio, el equipo pasa a Parado y el horómetro deja de avanzar.
+
+4. FINALIZAR O ANULAR LA OT
+El creador finaliza o anula la OT. El equipo y el contador permanecen detenidos hasta registrar el encendido. No se permite encender el equipo mientras una OT siga en ejecución o revisión.
+
+5. REGISTRAR EL ENCENDIDO → EN FUNCIONAMIENTO
+El contador continúa desde su lectura acumulada. Solo para una OT de Cebado finalizada, se suman una sola vez las horas a trabajar de la plantilla seleccionada al registrar el encendido. Las OT anuladas no suman horas de cebado.
+
+DASHBOARD
+Control de Unidades de Generación muestra únicamente esas unidades, con un contador en tiempo real de horas : minutos : segundos e indicador en marcha o detenido. Ejemplo: 1000:30:00 significa 1000 horas y 30 minutos.
+
+SEGUIMIENTO
+Cada OT conserva su lectura para los reportes PDF y Excel. Editar una OT anterior no reemplaza su lectura por la lectura actual del equipo.
+Pasar a revisión y regresar a En proceso conserva el equipo y el contador detenidos, registra cada transición y no repite el inicio ni suma otra vez las horas de cebado.
+
+Ingresar a KPI Justice: https://justicecompany-ec.com/

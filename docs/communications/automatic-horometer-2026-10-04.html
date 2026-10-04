@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Horómetro automático de los equipos</title></head>
+<body style="margin:0;background:#edf2f7;color:#243247;font-family:Arial,Helvetica,sans-serif;line-height:1.6;">
+<div style="display:none;max-height:0;overflow:hidden;">El tiempo de funcionamiento y las lecturas de cada OT se registran automáticamente.</div>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:100%;max-width:640px;background:#ffffff;border-radius:16px;overflow:hidden;">
+<tr><td style="background:#102d4a;color:#ffffff;padding:32px 28px;">
+<div style="font-size:12px;letter-spacing:2px;color:#92d4e5;font-weight:bold;">JUSTICE COMPANY · GESTIÓN DE MANTENIMIENTO</div>
+<h1 style="font-size:29px;line-height:1.25;margin:14px 0 8px;">El horómetro ahora es automático</h1>
+<p style="margin:0;color:#dce8f3;">Cada hora de funcionamiento cuenta. Cada OT conserva su lectura.</p>
+</td></tr>
+<tr><td style="padding:28px;">
+<p style="margin:0 0 20px;">Según lo acordado con <strong>Gerencia</strong>, a partir de ahora el horómetro de los equipos se gestionará automáticamente. <strong>Ya no se debe ingresar el horómetro al crear o editar una OT.</strong></p>
+<h2 style="font-size:19px;margin:0 0 16px;">Así funciona el proceso</h2>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" aria-label="Secuencia de funcionamiento, planificación, ejecución, finalización y encendido">
+<tr><td style="background:#eff8f7;border-left:5px solid #258d86;border-radius:8px;padding:16px;"><strong style="color:#176c66;">1 · EQUIPO EN FUNCIONAMIENTO</strong><br>El horómetro aumenta según el tiempo real transcurrido: una hora de funcionamiento suma una hora al contador. Se conservan también los minutos y segundos acumulados.</td></tr>
+<tr><td align="center" style="font-size:24px;color:#627d96;line-height:1.3;padding:5px;">↓</td></tr>
+<tr><td style="background:#eef6fc;border-left:5px solid #3378b8;border-radius:8px;padding:16px;"><strong style="color:#19578d;">2 · CREAR LA OT</strong><br>La OT queda <strong>Planificada</strong> y toma automáticamente la lectura actual del equipo. Para los reportes, el <strong>horómetro anterior</strong> corresponde a la lectura guardada en la OT anterior de ese mismo equipo.</td></tr>
+<tr><td align="center" style="font-size:24px;color:#627d96;line-height:1.3;padding:5px;">↓</td></tr>
+<tr><td style="background:#eaf0fb;border-left:5px solid #456db8;border-radius:8px;padding:16px;"><strong style="color:#345695;">3 · IMPRIMIR EGRESO E INICIAR LA EJECUCIÓN</strong><br>Después de registrar la salida de los materiales, al pulsar <strong>Imprimir egreso</strong> la OT pasa a <strong>En proceso</strong>. En ese instante se registra automáticamente la lectura de inicio, el equipo queda <strong>Parado</strong> y <strong>el horómetro deja de avanzar</strong>.</td></tr>
+<tr><td align="center" style="font-size:24px;color:#627d96;line-height:1.3;padding:5px;">↓</td></tr>
+<tr><td style="background:#fff7e7;border-left:5px solid #c38c24;border-radius:8px;padding:16px;"><strong style="color:#886013;">4 · FINALIZAR O ANULAR LA OT</strong><br>El creador finaliza o anula la OT. El equipo y su contador permanecen detenidos hasta que se registre el encendido. Mientras una OT esté en ejecución o revisión, no se permite encender ese equipo.</td></tr>
+<tr><td align="center" style="font-size:24px;color:#627d96;line-height:1.3;padding:5px;">↓</td></tr>
+<tr><td style="background:#f0f8ed;border-left:5px solid #5b9143;border-radius:8px;padding:16px;"><strong style="color:#447330;">5 · REGISTRAR EL ENCENDIDO</strong><br>El equipo vuelve a <strong>En funcionamiento</strong> y el contador continúa desde su lectura acumulada. Si se finalizó una OT de <strong>Cebado</strong>, se suman <strong>una sola vez</strong> las horas a trabajar de la plantilla seleccionada, al registrar este encendido. Las OT anuladas no suman horas de cebado.</td></tr>
+</table>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:22px;background:#eef6fc;border:1px solid #cbddeb;border-radius:10px;"><tr><td style="padding:18px;">
+<h2 style="font-size:18px;color:#19578d;margin:0 0 8px;">Contador en tiempo real en el dashboard</h2>
+<div style="font-size:30px;letter-spacing:1px;color:#19578d;font-weight:bold;">1000:30:00</div>
+<p style="margin:4px 0 0;">El panel <strong>Control de Unidades de Generación</strong> muestra únicamente esas unidades y su contador en <strong>horas : minutos : segundos</strong>. En este ejemplo, la lectura es de 1000 horas y 30 minutos. Cada tarjeta indica si el contador está en marcha o detenido.</p>
+</td></tr></table>
+<h2 style="font-size:19px;margin:24px 0 10px;">Seguimiento de las lecturas</h2>
+<p style="margin:0 0 12px;">La lectura de cada OT se conserva para sus reportes PDF y Excel. Editar una OT anterior no sustituye su lectura por el horómetro actual del equipo.</p>
+<p style="margin:0 0 22px;">Pasar de <strong>En proceso</strong> a <strong>En revisión</strong> y volver a <strong>En proceso</strong> mantiene el equipo y el contador detenidos. Cada transición queda en el histórico; no se repite el inicio original ni se suman nuevamente horas de cebado.</p>
+<table role="presentation" cellspacing="0" cellpadding="0"><tr><td style="background:#19578d;border-radius:8px;"><a href="https://justicecompany-ec.com/" style="display:inline-block;padding:12px 22px;color:#ffffff;text-decoration:none;font-weight:bold;">Ingresar a KPI Justice</a></td></tr></table>
+</td></tr>
+<tr><td style="padding:20px 28px;background:#f5f8fb;font-size:12px;color:#64748b;">Justice Company · Actualización del proceso de mantenimiento acordada con Gerencia.</td></tr>
+</table></td></tr></table></body></html>

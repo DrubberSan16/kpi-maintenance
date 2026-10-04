@@ -78,3 +78,59 @@ describe('Horas operativas y cierre al encender', () => {
     expect(equipment.horometro_actual).toBe(1000.25);
   });
 });
+
+describe('Horómetro automático de las OT', () => {
+  it('captura las horas transcurridas del servidor y la última OT sin modificar el equipo', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-04T17:30:00Z'));
+    try {
+      const { service, equipment, equipmentRepo } = fixture('FUNCIONAMIENTO');
+      Object.assign(equipment, { horometro_actual: 1000.125, horometro_operativo_desde: new Date('2026-10-04T16:00:00Z') });
+      service.woRepo = { findOne: jest.fn().mockResolvedValue({ code: 'OT-ANTERIOR', valor_json: { horometro_actual: 980.5 } }) };
+      const snapshot = await service.buildAutomaticWorkOrderHorometerPayload(
+        { horometro_actual: 10, horometro_anterior: 20, horas_a_realizar: 999 }, equipment,
+        { frecuencia_horas: 1.75 }, { maintenanceKind: 'CEBADO' },
+      );
+      expect(snapshot).toMatchObject({ horometro_actual: 1001.625, horometro_anterior: 980.5, horas_plantilla: 1.75 });
+      expect(equipment.horometro_actual).toBe(1000.125);
+      expect(equipmentRepo.save).not.toHaveBeenCalled();
+      const edited = await service.buildAutomaticWorkOrderHorometerPayload(
+        { horometro_actual: 90000, cebado_horometro: { horas: 999, pendiente: true } }, equipment, null,
+        { storedPayload: snapshot },
+      );
+      expect(edited.horometro_actual).toBe(snapshot.horometro_actual);
+      expect(edited.horometro_anterior).toBe(snapshot.horometro_anterior);
+      expect(edited.cebado_horometro).toBeUndefined();
+    } finally { jest.useRealTimers(); }
+  });
+  it('conserva segundos al parar: acumula fracciones sin redondear cada hora a entero', () => {
+    const { service, equipment } = fixture('FUNCIONAMIENTO');
+    Object.assign(equipment, { horometro_actual: 1000.123456, horometro_operativo_desde: new Date('2026-10-04T16:00:00Z') });
+    expect(service.operationalHorometer(equipment, new Date('2026-10-04T16:00:01Z'))).toBe(1000.123734);
+    expect(service.operationalHorometer({ ...equipment, estado_funcionamiento: 'PARADO' }, new Date('2026-10-04T20:00:00Z'))).toBe(1000.123456);
+  });
+  it('suma las horas de cebado al encender una sola vez y conserva la lectura histórica de la OT', async () => {
+    const { service, equipment, order, orderRepo, historyRepo } = fixture();
+    const closed = { ...order, maintenance_kind: 'CEBADO', status_workflow: 'CLOSED', started_at: new Date(),
+      valor_json: { horometro_actual: 1000, horometro_anterior: 950, cebado_horometro: { horas: 2.5, pendiente: true } } };
+    orderRepo.find.mockImplementation(async options => Array.isArray(options.where) ? [] : [closed]);
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { displayName: 'Supervisor' });
+    expect(equipment.horometro_actual).toBe(1002.5);
+    expect(closed.valor_json.horometro_actual).toBe(1000);
+    expect(closed.valor_json.cebado_horometro.pendiente).toBe(false);
+    expect(historyRepo.save).toHaveBeenCalledWith(expect.objectContaining({ fuente: 'CEBADO_AUTOMATICO', horometro_nuevo: 1002.5 }));
+    equipment.estado_funcionamiento = 'PARADO';
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' });
+    expect(equipment.horometro_actual).toBe(1002.5);
+    expect(orderRepo.save).toHaveBeenCalledTimes(1);
+  });
+  it.each(['CORRECTIVO', 'ANULADA'])('no añade horas para %s', async kind => {
+    const { service, equipment, order, orderRepo } = fixture();
+    const closed = { ...order, status_workflow: 'CLOSED', status: kind === 'ANULADA' ? 'ANULADA' : 'ACTIVE',
+      maintenance_kind: kind === 'ANULADA' ? 'CEBADO' : kind,
+      valor_json: { cebado_horometro: { horas: 10, pendiente: true } } };
+    orderRepo.find.mockImplementation(async options => Array.isArray(options.where) ? [] : [closed]);
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' });
+    expect(equipment.horometro_actual).toBe(1000);
+    expect(orderRepo.save).not.toHaveBeenCalled();
+  });
+});
