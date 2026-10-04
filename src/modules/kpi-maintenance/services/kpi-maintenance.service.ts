@@ -29830,6 +29830,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       try {
         saved = await workOrderRepo.save(entity);
         if (!isNew && previousStatus !== saved.status_workflow) await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
+          id: randomUUID(),
           work_order_id: saved.id, from_status: previousStatus, to_status: saved.status_workflow,
           changed_at: new Date(), changed_by: this.resolveActorHistoryUserId(actor),
           note: saved.status_workflow === 'REVIEW' ? 'Ejecución puesta en revisión para verificar el trabajo o registrar materiales adicionales.' : 'Orden de trabajo finalizada por su creador.',
@@ -30929,6 +30930,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
       const persisted = await manager.save(WorkOrderEntity, wo);
       if (previousStatus !== persisted.status_workflow) await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
+        id: randomUUID(),
         work_order_id: persisted.id, from_status: previousStatus, to_status: persisted.status_workflow,
         changed_at: new Date(), changed_by: this.resolveActorHistoryUserId(actor),
         note: persisted.status_workflow === 'REVIEW' ? 'Ejecución puesta en revisión para verificar el trabajo o registrar materiales adicionales.' : 'Orden de trabajo finalizada por su creador.',
@@ -33885,6 +33887,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (equipment && equipment.estado_funcionamiento !== 'PARADO') {
         const since = equipment.estado_funcionamiento_actualizado_en ? new Date(equipment.estado_funcionamiento_actualizado_en) : null;
         await manager.save(EquipoFuncionamientoHistorialEntity, manager.create(EquipoFuncionamientoHistorialEntity, {
+          id: randomUUID(),
           equipo_id: equipment.id, estado_anterior: equipment.estado_funcionamiento, estado_nuevo: 'PARADO',
           estado_anterior_desde: since, duracion_estado_anterior_segundos: since ? Math.max(0, Math.floor((now.getTime() - since.getTime()) / 1000)) : null,
           changed_at: now, changed_by_id: actorId, changed_by: actorName,
@@ -33897,6 +33900,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         await manager.save(EquipoEntity, equipment);
       }
       await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
+        id: randomUUID(),
         work_order_id: workOrder.id, from_status: previous, to_status: 'IN_PROGRESS', changed_at: now, changed_by: actorId,
         note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}. Equipo en estado Parado.`,
       }));

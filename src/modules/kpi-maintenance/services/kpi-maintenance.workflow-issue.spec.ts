@@ -45,6 +45,9 @@ describe('Flujo automático de OT y egreso', () => {
     expect(equipment.estado_funcionamiento).toBe('PARADO');
     expect(saves.filter(row => row.entity === WorkOrderStatusHistoryEntity)[0].value).toMatchObject({ from_status: 'PLANNED', to_status: 'IN_PROGRESS', changed_by: actor.userId });
     expect(saves.some(row => row.entity === EquipoFuncionamientoHistorialEntity)).toBe(true);
+    for (const row of saves.filter(row => [WorkOrderStatusHistoryEntity, EquipoFuncionamientoHistorialEntity].includes(row.entity))) {
+      expect(row.value.id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+    }
   });
   it('reanudar desde revisión agrega un evento y conserva el inicio y su actor originales', async () => {
     const { service, wo, saves } = fixture('REVIEW');
