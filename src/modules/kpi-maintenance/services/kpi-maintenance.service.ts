@@ -18024,11 +18024,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         aplicado_en: now.toISOString(), aplicado_por: user.label, horometro_anterior: before, horometro_nuevo: after } };
       await manager.getRepository(WorkOrderEntity).save(order);
       const history = manager.getRepository(EquipoHorometroHistorialEntity);
-      await history.save(history.create({ equipo_id: equipment.id, horometro_anterior: before, horometro_nuevo: after,
+      await history.save(history.create({ id: randomUUID(), equipo_id: equipment.id, horometro_anterior: before, horometro_nuevo: after,
         changed_at: now, changed_by_id: user.id, changed_by: user.label, fuente: 'CEBADO_AUTOMATICO',
         observacion: `${hours} h de la plantilla de la OT ${order.code}, añadidas al registrar el encendido.` }));
       const events = manager.getRepository(WorkOrderStatusHistoryEntity);
-      await events.save(events.create({ work_order_id: order.id, from_status: 'CLOSED', to_status: 'CLOSED', changed_at: now,
+      await events.save(events.create({ id: randomUUID(), work_order_id: order.id, from_status: 'CLOSED', to_status: 'CLOSED', changed_at: now,
         changed_by: user.id, note: `Equipo encendido. Se añadieron automáticamente ${hours} h de cebado al horómetro: ${before} a ${after} h.` }));
     }
     return [] as WorkOrderEntity[];
