@@ -167,6 +167,127 @@ describe('KpiMaintenanceService alerts', () => {
     service = createService(repos, dataSource);
   });
 
+  describe('correos operativos para bodega', () => {
+    const warehouseUser = (id: string, sucursalIds: string[], extra = {}) => ({
+      id, nameUser: id, nameSurname: id, email: `${id}@example.com`,
+      roleName: 'PERSONAL DE BODEGA', roleNames: ['PERSONAL DE BODEGA'],
+      status: 'ACTIVE', isDeleted: false, sucursalIds,
+      allSucursales: sucursalIds.length === 0, ...extra,
+    });
+    let sendMail: jest.Mock;
+    let users: any[];
+
+    beforeEach(() => {
+      users = [
+        warehouseUser('destino', ['s-destino']),
+        warehouseUser('origen', ['s-origen']),
+        warehouseUser('sin-asignacion', []),
+        warehouseUser('inactivo', ['s-destino'], { status: 'INACTIVE' }),
+        warehouseUser('eliminado', ['s-destino'], { isDeleted: true }),
+        warehouseUser('sin-correo', ['s-destino'], { email: null }),
+      ];
+      jest.spyOn(service as any, 'fetchSecurityUsers').mockResolvedValue(users);
+      sendMail = jest.fn().mockResolvedValue({});
+      jest.spyOn(service as any, 'getAlertMailTransporter').mockResolvedValue({ sendMail });
+      repos.equipoRepo.findOne.mockResolvedValue({ id: 'equipo', location_id: 'location' });
+      repos.locationRepo.findOne.mockResolvedValue({ id: 'location', sucursal_id: 's-destino' });
+      jest.spyOn(service as any, 'resolveWorkOrderEmailEquipment').mockResolvedValue('EQ-001 · Motor');
+      let event: any;
+      repos.eventoProcesoRepo.findOne.mockImplementation(async () => event);
+      repos.eventoProcesoRepo.save.mockImplementation(async (value) => { event = value; return value; });
+    });
+
+    it.each(['CORRECTIVO', 'PREVENTIVO', 'PREDICTIVO', 'CEBADO'])(
+      'notifica la creación de una OT %s solo a bodega de su sucursal', async (maintenance_kind) => {
+        const workOrder = { id: 'wo', code: 'OT-001', title: 'Intervención', equipment_id: 'equipo', maintenance_kind };
+        await (service as any).notifyWarehouseWorkOrderCreated(workOrder);
+        await (service as any).notifyWarehouseWorkOrderCreated(workOrder);
+        expect(sendMail).toHaveBeenCalledTimes(1);
+        expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({
+          to: 'destino@example.com', subject: expect.stringContaining('Nueva OT OT-001'),
+          text: expect.stringContaining('Intervención'),
+        }));
+      },
+    );
+
+    it('resuelve OT Proyecto por sus bodegas y ubicaciones', async () => {
+      repos.woProyectoBodegaRepo.find.mockResolvedValue([{ bodega_id: 'bodega' }]);
+      repos.bodegaRepo.find.mockResolvedValue([{ id: 'bodega', sucursal_id: 's-destino' }]);
+      await (service as any).notifyWarehouseWorkOrderCreated({ id: 'wo', code: 'OTP-001', maintenance_kind: 'PROYECTO' });
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(sendMail.mock.calls[0][0].to).toBe('destino@example.com');
+    });
+
+    it('mantiene el filtro del equipo en alertas por tiempo, horómetro y programación', async () => {
+      for (const origen of ['SYSTEM', 'PROGRAMACION']) {
+        const recipients = await (service as any).resolveWarehouseMaintenanceRecipients({
+          categoria: 'MANTENIMIENTO', origen, equipo_id: 'equipo',
+        });
+        expect(recipients.map((item: any) => item.email)).toEqual(['destino@example.com']);
+      }
+      repos.locationRepo.findOne.mockResolvedValue(null);
+      expect(await (service as any).resolveWarehouseMaintenanceRecipients({
+        categoria: 'MANTENIMIENTO', origen: 'PROGRAMACION', equipo_id: 'equipo',
+      })).toEqual([]);
+      expect(await (service as any).resolveWarehouseMaintenanceRecipients({
+        categoria: 'MANTENIMIENTO', origen: 'WORK_ORDER', equipo_id: 'equipo',
+      })).toEqual([]);
+    });
+
+    it('agrega bodega al correo programado sin duplicar destinatarios existentes', async () => {
+      jest.spyOn(service as any, 'resolveAlertNotificationRecipients').mockResolvedValue([
+        { type: 'SUPERVISOR', email: 'supervisor@example.com' },
+        { type: 'TRANSACTION_OWNER', email: 'destino@example.com' },
+      ]);
+      const result = await (service as any).sendAlertTriggerEmails({
+        id: 'alert', categoria: 'MANTENIMIENTO', origen: 'SYSTEM', equipo_id: 'equipo',
+        tipo_alerta: 'MANTENIMIENTO_PROXIMO', nivel: 'WARNING',
+        fecha_generada: new Date(), payload_json: {},
+      });
+      expect(result.sent.sort()).toEqual(['destino@example.com', 'supervisor@example.com']);
+      expect(sendMail).toHaveBeenCalledTimes(2);
+    });
+
+    it('envía la transferencia solo al destino, sin costos y sin repetir entregas exitosas', async () => {
+      const transferRepo = createRepo();
+      const detailsRepo = createRepo();
+      transferRepo.findOne.mockResolvedValue({
+        id: 'transfer', codigo: 'TB-001', bodega_origen_id: 'b-origen',
+        bodega_destino_id: 'b-destino', fecha_transferencia: new Date(),
+      });
+      detailsRepo.find.mockResolvedValue([{ nombre_producto: 'Filtro', cantidad: 2, costo_unitario: 50 }]);
+      (dataSource as any).getRepository = jest.fn((entity) => entity.name === 'TransferenciaBodegaEntity' ? transferRepo : detailsRepo);
+      repos.bodegaRepo.findOne.mockImplementation(async ({ where }) => ({
+        id: where.id, nombre: where.id,
+        sucursal_id: where.id === 'b-destino' ? 's-destino' : 's-origen',
+      }));
+      await service.notifyWarehouseTransfer('transfer');
+      await service.notifyWarehouseTransfer('transfer');
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(sendMail.mock.calls[0][0]).toMatchObject({
+        to: 'destino@example.com', text: expect.stringContaining('Filtro | Cantidad: 2'),
+      });
+      expect(sendMail.mock.calls[0][0].html).not.toContain('Costo unit.');
+      expect(transferRepo.findOne).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ estado: 'COMPLETADA', is_deleted: false, status: 'ACTIVE' }),
+      }));
+      transferRepo.findOne.mockResolvedValue(null);
+      await service.notifyWarehouseTransfer('anulada');
+      expect(sendMail).toHaveBeenCalledTimes(1);
+    });
+
+    it('reintenta únicamente los destinatarios cuyo envío falló', async () => {
+      const recipients = await (service as any).resolveWarehouseRecipients(['s-destino', 's-origen']);
+      const notice = { reference: 'REF', referenceId: 'id', table: 'table', subject: 'Aviso', html: '<p>Aviso</p>', text: 'Aviso', recipients };
+      sendMail.mockRejectedValueOnce(new Error('SMTP temporal'));
+      await (service as any).sendWarehouseNotice(notice);
+      await (service as any).sendWarehouseNotice(notice);
+      expect(sendMail.mock.calls.map(([message]) => message.to)).toEqual([
+        'destino@example.com', 'origen@example.com', 'destino@example.com',
+      ]);
+    });
+  });
+
   describe('visibilidad de costos de materiales', () => {
     const costItems = [
       {

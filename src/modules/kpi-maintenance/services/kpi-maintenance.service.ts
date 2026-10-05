@@ -7779,6 +7779,209 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .filter((entry) => entry.items.length > 0);
   }
 
+  // Los usuarios se asignan a sucursales; las bodegas y las ubicaciones de
+  // equipos pertenecen a esas mismas sucursales. Sin asignación explícita no
+  // se amplía el alcance de estos avisos de bodega a todo el sistema.
+  private async resolveWarehouseRecipients(sucursalIds: Array<string | null | undefined>) {
+    const scope = new Set(sucursalIds.filter((id): id is string => Boolean(id)));
+    if (!scope.size) return [] as AlertNotificationRecipient[];
+    const users = await this.fetchSecurityUsers();
+    const recipients = users
+      .filter((user) => this.isActiveSecurityUser(user)
+        && this.isInventoryWarehouseStaff(user)
+        && Boolean(this.normalizeEmail(user.email))
+        && (user.sucursalIds ?? []).some((id) => scope.has(id)))
+      .map((user) => ({ ...this.toInventoryRecipient(user), type: 'WAREHOUSE_STAFF' as const }));
+    return [...new Map(recipients.map((item) => [item.email, item])).values()];
+  }
+
+  private async resolveEquipmentSucursalId(equipmentId?: string | null) {
+    if (!equipmentId) return null;
+    const equipment = await this.equipoRepo.findOne({
+      where: { id: equipmentId, is_deleted: false },
+    });
+    if (!equipment?.location_id) return null;
+    const location = await this.locationRepo.findOne({
+      where: { id: equipment.location_id, is_deleted: false },
+    });
+    return location?.sucursal_id ?? null;
+  }
+
+  private async resolveWarehouseMaintenanceRecipients(row: AlertaMantenimientoEntity) {
+    if (row.categoria !== 'MANTENIMIENTO'
+      || !['SYSTEM', 'PROGRAMACION'].includes(row.origen)) return [];
+    const equipmentId = this.firstNonEmptyString(row.equipo_id, row.payload_json?.equipo_id);
+    return this.resolveWarehouseRecipients([await this.resolveEquipmentSucursalId(equipmentId)]);
+  }
+
+  private readonly warehouseEmailJobs = new Map<string, Promise<unknown>>();
+
+  private async sendWarehouseNotice(options: {
+    reference: string;
+    referenceId: string;
+    table: string;
+    subject: string;
+    html: string;
+    text: string;
+    recipients: AlertNotificationRecipient[];
+  }) {
+    const existingJob = this.warehouseEmailJobs.get(options.reference);
+    if (existingJob) return existingJob;
+    const job = this.deliverWarehouseNotice(options);
+    this.warehouseEmailJobs.set(options.reference, job);
+    try {
+      return await job;
+    } finally {
+      this.warehouseEmailJobs.delete(options.reference);
+    }
+  }
+
+  private async deliverWarehouseNotice(options: {
+    reference: string;
+    referenceId: string;
+    table: string;
+    subject: string;
+    html: string;
+    text: string;
+    recipients: AlertNotificationRecipient[];
+  }) {
+    const previous = await this.eventoProcesoRepo.findOne({
+      where: { referencia_codigo: options.reference, accion: 'EMAIL_BODEGA', is_deleted: false },
+      order: { created_at: 'DESC' },
+    });
+    const recorded = previous?.payload_notificacion?.email_sent;
+    const delivered = new Set(Array.isArray(recorded) ? recorded.map(String) : []);
+    const pending = options.recipients.filter((item) => !delivered.has(item.email));
+    if (!pending.length) return { sent: 0, failed: 0, recipients: options.recipients.length };
+    const transporter = await this.getAlertMailTransporter();
+    let sent = 0;
+    const failed: string[] = [];
+    for (const recipient of pending) {
+      try {
+        if (!transporter) throw new Error('SMTP no configurado');
+        await this.sendReadableEmail(transporter, {
+          from: `"${this.alertMailFromName}" <${this.alertMailFromAddress}>`,
+          to: recipient.email,
+          subject: options.subject,
+          html: options.html,
+          text: options.text,
+        });
+        delivered.add(recipient.email);
+        sent++;
+      } catch (error: any) {
+        failed.push(recipient.email);
+        this.logger.warn(`[WarehouseEmail:${options.reference}] ${error?.message ?? 'Error de envio'}`);
+      }
+    }
+    await this.eventoProcesoRepo.save(this.eventoProcesoRepo.create({
+      ...(previous ?? {}),
+      tipo_proceso: 'INVENTARIO',
+      accion: 'EMAIL_BODEGA',
+      referencia_tabla: options.table,
+      referencia_id: options.referenceId,
+      referencia_codigo: options.reference,
+      fecha_evento: new Date(),
+      estado: failed.length ? 'FAILED' : 'COMPLETED',
+      notificacion_enviada: delivered.size > 0,
+      payload_notificacion: { email_sent: [...delivered], email_failed: failed },
+      payload_kpi: { subject: options.subject },
+      created_by: 'SYSTEM',
+    }));
+    return { sent, failed: failed.length, recipients: options.recipients.length };
+  }
+
+  private async notifyWarehouseWorkOrderCreated(workOrder: WorkOrderEntity) {
+    try {
+      const sucursalIds = [await this.resolveEquipmentSucursalId(workOrder.equipment_id)];
+      if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'PROYECTO') {
+        const [sites, warehouses] = await Promise.all([
+          this.woProyectoUbicacionRepo.find({ where: { work_order_id: workOrder.id, is_deleted: false } }),
+          this.woProyectoBodegaRepo.find({ where: { work_order_id: workOrder.id, is_deleted: false } }),
+        ]);
+        const [locations, bodegas] = await Promise.all([
+          sites.length ? this.locationRepo.find({ where: { id: In(sites.map((item) => item.location_id)), is_deleted: false } }) : [],
+          warehouses.length ? this.bodegaRepo.find({ where: { id: In(warehouses.map((item) => item.bodega_id)), is_deleted: false } }) : [],
+        ]);
+        sucursalIds.push(...locations.map((item) => item.sucursal_id ?? null), ...bodegas.map((item) => item.sucursal_id ?? null));
+      }
+      const recipients = await this.resolveWarehouseRecipients(sucursalIds);
+      if (!recipients.length) return;
+      const equipment = await this.resolveWorkOrderEmailEquipment(workOrder);
+      const rows = [
+        { label: 'Orden de trabajo', value: workOrder.code },
+        { label: 'Título', value: workOrder.title },
+        { label: 'Descripción', value: workOrder.description },
+        { label: 'Equipo', value: equipment },
+        { label: 'Tipo de mantenimiento', value: emailEnumLabel(workOrder.maintenance_kind) },
+        { label: 'Fecha programada', value: workOrder.scheduled_start ? this.formatAlertEmailDate(workOrder.scheduled_start) : 'Sin fecha programada' },
+      ];
+      return await this.sendWarehouseNotice({
+        reference: `BODEGA:OT_CREADA:${workOrder.id}`,
+        referenceId: workOrder.id,
+        table: 'kpi_process.tb_work_order',
+        recipients,
+        subject: `[Bodega] Nueva OT ${workOrder.code} · ${equipment}`,
+        html: this.buildEnterpriseEmailLayout({
+          moduleLabel: 'Justice KPI · Órdenes de trabajo',
+          title: 'Nueva orden de trabajo',
+          summary: 'Se creó una OT de su sucursal. Revise los materiales necesarios para la intervención.',
+          contentHtml: this.buildEmailInfoTable(rows),
+        }),
+        text: ['Nueva orden de trabajo', ...rows.map((row) => `${row.label}: ${row.value ?? 'No disponible'}`)].join('\n'),
+      });
+    } catch (error: any) {
+      this.logger.warn(`[WarehouseWorkOrder:${workOrder.id}] ${error?.message ?? 'Error de notificacion'}`);
+    }
+  }
+
+  async notifyWarehouseTransfer(transferId: string) {
+    const transfer = await this.dataSource.getRepository(TransferenciaBodegaEntity).findOne({
+      where: { id: transferId, is_deleted: false, estado: 'COMPLETADA', status: 'ACTIVE' },
+    });
+    if (!transfer) return this.wrap({ sent: 0, failed: 0, recipients: 0 }, 'Transferencia no vigente');
+    const [destination, source] = await Promise.all([
+      this.bodegaRepo.findOne({ where: { id: transfer.bodega_destino_id, is_deleted: false } }),
+      this.bodegaRepo.findOne({ where: { id: transfer.bodega_origen_id, is_deleted: false } }),
+    ]);
+    const recipients = await this.resolveWarehouseRecipients([destination?.sucursal_id]);
+    if (!recipients.length) return this.wrap({ sent: 0, failed: 0, recipients: 0 }, 'Sin destinatarios de bodega destino');
+    const details = await this.dataSource.getRepository(TransferenciaBodegaDetEntity).find({
+      where: { transferencia_bodega_id: transfer.id, is_deleted: false },
+    });
+    const destinationLabel = emailLabel('Bodega destino', this.buildBodegaLabel(destination ?? undefined));
+    const items = details.map((item) => ({
+      producto_label: emailLabel('Material sin registro', item.nombre_producto, item.codigo_producto),
+      bodega_label: destinationLabel,
+      cantidad: this.toNumeric(item.cantidad, 0),
+      costo_unitario: 0,
+      subtotal: 0,
+      observacion: item.observacion ?? null,
+    }));
+    const rows = [
+      { label: 'Transferencia', value: transfer.codigo },
+      { label: 'Bodega origen', value: emailLabel('Bodega origen', this.buildBodegaLabel(source ?? undefined)) },
+      { label: 'Bodega destino', value: destinationLabel },
+      { label: 'Fecha', value: this.formatAlertEmailDate(transfer.fecha_transferencia) },
+      { label: 'Observación', value: transfer.observacion },
+    ];
+    const result = await this.sendWarehouseNotice({
+      reference: `BODEGA:TRANSFERENCIA:${transfer.id}`,
+      referenceId: transfer.id,
+      table: 'kpi_inventory.tb_transferencia_bodega',
+      recipients,
+      subject: `[Bodega] Transferencia ${transfer.codigo} recibida · ${destinationLabel}`,
+      html: this.buildEnterpriseEmailLayout({
+        moduleLabel: 'Justice KPI · Transferencias de bodega',
+        title: 'Transferencia recibida en su bodega',
+        summary: 'Se confirmó una transferencia de materiales hacia su bodega.',
+        contentHtml: this.buildEmailInfoTable(rows) + this.buildConsumoEmailTableHtml(items, false),
+      }),
+      text: ['Transferencia recibida en su bodega', ...rows.map((row) => `${row.label}: ${row.value ?? '-'}`),
+        ...items.map((item) => `${item.producto_label} | Cantidad: ${item.cantidad}`)].join('\n'),
+    });
+    return this.wrap(result, 'Transferencia notificada a bodega destino');
+  }
+
   private getAlertNotificationRecipientsUserIds(
     recipients: AlertNotificationRecipient[],
   ) {
@@ -8490,6 +8693,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const recipients =
       recipientOverride ??
       (await this.resolveAlertNotificationRecipients(payload));
+    if (!recipientOverride) {
+      const warehouseRecipients = await this.resolveWarehouseMaintenanceRecipients(row);
+      for (const recipient of warehouseRecipients) {
+        if (!recipients.some((item) => item.email === recipient.email)) {
+          recipients.push(recipient);
+        }
+      }
+    }
     if (!recipients.length) {
       this.logger.warn(
         `[AlertEmail:${row.id}] Sin destinatarios resueltos para la alerta.`,
@@ -30058,6 +30269,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
 
     if (transactionResult.isNew) {
+      await safePostCommit('el correo de nueva OT a bodega', () =>
+        this.notifyWarehouseWorkOrderCreated(saved),
+      );
       await safePostCommit('el historial de creacion', () =>
         this.appendWorkOrderHistory(
         saved.id,
@@ -30558,6 +30772,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (this.normalizeWorkflowStatus(created.status_workflow) === 'CLOSED') {
       await this.syncProgramacionExecutionFromLinkedWorkOrder(created);
     }
+    await this.notifyWarehouseWorkOrderCreated(created);
     const enriched = await this.enrichWorkOrder(created, actor);
     const responsePayload = {
       ...enriched,

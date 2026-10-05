@@ -1114,6 +1114,13 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Alertas')
+  @ApiOperation({ summary: 'Notificar una transferencia confirmada al personal de la bodega destino' })
+  @Post('alertas/transferencias-bodega/:id/notificar')
+  notifyWarehouseTransfer(@Param('id') id: string) {
+    return this.service.notifyWarehouseTransfer(id);
+  }
+
+  @ApiTags('Alertas')
   @ApiOperation({
     summary:
       'Enviar a supervisores únicamente las alertas activas de equipo que aún no recibieron',
