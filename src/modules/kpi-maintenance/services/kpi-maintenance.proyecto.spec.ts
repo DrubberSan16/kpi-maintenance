@@ -4,6 +4,9 @@ import {
   WorkOrderProyectoBodegaEntity,
   WorkOrderProyectoPersonalEntity,
   WorkOrderProyectoUbicacionEntity,
+  WorkOrderEntity,
+  EquipoEntity,
+  EquipoFuncionamientoHistorialEntity,
 } from '../entities/kpi-maintenance.entity';
 
 /**
@@ -42,6 +45,7 @@ function createService(overrides: Record<string, any> = {}) {
       'PROYECTO',
     ],
     PROCEDIMIENTO_TIPO_PROCESO_PROYECTO: 'PROYECTO',
+    MATERIAL_ISSUE_ROLES: ['BODEGA', 'BODEGUERO', 'SUPER ADMINISTRADOR', 'SUPERADMINISTRADOR', 'SUPER_ADMINISTRADOR', 'SUPER ADMIN', 'SUPER_ADMIN'],
     locationRepo: createRepo(),
     bodegaRepo: createRepo(),
     woProyectoUbicacionRepo: createRepo(),
@@ -519,15 +523,14 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
     describe('horometro', () => {
       it('una OT de Proyecto no copia la lectura del proyecto ni exige que avance', () => {
         const service = createService();
-        // El front de una OT normal manda la lectura del equipo; aqui llegaria
-        // un 0 igual al del proyecto, que en una OT de mantenimiento se rechaza.
+        // Un proyecto nunca tiene horómetro, aunque el cliente envíe una lectura.
         const result = service.buildWorkOrderHorometerPayload(
           { horometro_actual: 0 },
           proyecto,
           null,
           { requireIncrease: true, maintenanceKind: 'PROYECTO' },
         );
-        expect(result.horometro_actual).toBe(0);
+        expect(result.horometro_actual).toBeNull();
         expect(result.horometro_anterior).toBeNull();
 
         const sinLectura = service.buildWorkOrderHorometerPayload(
@@ -540,7 +543,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
         expect(sinLectura.horometro_anterior).toBeNull();
       });
 
-      it('una OT de mantenimiento sigue copiando la lectura del equipo', () => {
+      it('consultar una OT antes de iniciar no inventa una captura del equipo', () => {
         const service = createService();
         const result = service.buildWorkOrderHorometerPayload(
           {},
@@ -548,10 +551,10 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
           null,
           { requireIncrease: true, maintenanceKind: 'CORRECTIVO' },
         );
-        expect(result.horometro_actual).toBe(15286);
+        expect(result.horometro_actual).toBeNull();
       });
 
-      it('una OT de mantenimiento sigue exigiendo que la lectura avance', () => {
+      it('leer una captura guardada no exige que supere el contador actual del equipo', () => {
         const service = createService();
         expect(() =>
           service.buildWorkOrderHorometerPayload(
@@ -560,7 +563,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
             null,
             { requireIncrease: true, maintenanceKind: 'CORRECTIVO' },
           ),
-        ).toThrow(/debe ser mayor/);
+        ).not.toThrow();
       });
 
       it('la OT de Proyecto no actualiza el horometro del proyecto ni deja notas', async () => {
@@ -583,7 +586,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
         expect(equipoHorometroHistorialRepo.save).not.toHaveBeenCalled();
       });
 
-      it('la OT de mantenimiento si actualiza el horometro del equipo', async () => {
+      it('guardar una captura de mantenimiento no modifica el reloj del equipo', async () => {
         const equipoRepo = createRepo();
         equipoRepo.findOne.mockResolvedValue({ ...maquina });
         const equipoHorometroHistorialRepo = createRepo();
@@ -598,11 +601,151 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
           maintenance_kind: 'CORRECTIVO',
           valor_json: { horometro_actual: 15300 },
         });
-        expect(result.equipmentUpdated).toBe(true);
-        expect(equipoRepo.save).toHaveBeenCalledWith(
-          expect.objectContaining({ horometro_actual: 15300 }),
-        );
+        expect(result.equipmentUpdated).toBe(false);
+        expect(equipoRepo.findOne).not.toHaveBeenCalled();
+        expect(equipoRepo.save).not.toHaveBeenCalled();
+        expect(equipoHorometroHistorialRepo.save).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('captura del horómetro al iniciar la ejecución', () => {
+    const now = new Date('2026-10-10T14:00:00.000Z');
+    const equipment = () => ({
+      id: 'eq-automatico',
+      horometro_actual: 15286,
+      estado_funcionamiento: 'FUNCIONAMIENTO',
+      horometro_operativo_desde: new Date('2026-10-10T12:00:00.000Z'),
+      estado_funcionamiento_actualizado_en: new Date('2026-10-10T12:00:00.000Z'),
+    });
+    const actor = { roleName: 'BODEGA', username: 'bodega', displayName: 'Usuario Bodega' };
+
+    beforeEach(() => { jest.useFakeTimers(); jest.setSystemTime(now); });
+    afterEach(() => { jest.useRealTimers(); });
+
+    function executionFixture(overrides: Record<string, unknown> = {}) {
+      const machine = equipment();
+      const workOrder: any = {
+        id: 'wo-automatico', code: 'OT-A00302', equipment_id: machine.id,
+        maintenance_kind: 'CORRECTIVO', status_workflow: 'PLANNED',
+        valor_json: { horometro_actual: null, horometro_anterior: 15200 },
+        started_at: null, is_deleted: false, ...overrides,
+      };
+      const manager = {
+        findOne: jest.fn(async () => workOrder),
+        find: jest.fn(async () => [{ id: 'entrega-1' }]),
+        count: jest.fn(async () => 1),
+        save: jest.fn(async (_entity: unknown, value: unknown) => value),
+        create: jest.fn((_entity: unknown, value: unknown) => value),
+      };
+      const service = createService({
+        dataSource: { transaction: jest.fn(async (callback: any) => callback(manager)) },
+        assertWorkOrderVisibleForSucursal: jest.fn().mockResolvedValue(undefined),
+        lockWorkOrderEquipmentForIssue: jest.fn().mockResolvedValue(machine),
+        assertWorkOrderNotBlockedByActiveAnnex: jest.fn().mockResolvedValue(undefined),
+        assertWorkOrderCanMoveToInProgress: jest.fn().mockResolvedValue(undefined),
+        findWorkOrderIssueMovements: jest.fn().mockResolvedValue([{ id: 'egreso-1', numero_documento: 'EB-000001' }]),
+        syncProgramacionExecutionFromLinkedWorkOrder: jest.fn().mockResolvedValue(undefined),
+        syncAlertsForWorkOrder: jest.fn().mockResolvedValue(undefined),
+        listWorkOrderIssueDocuments: jest.fn().mockResolvedValue([]),
+      });
+      return { service, machine, workOrder, manager };
+    }
+
+    it('crear y editar una OT planificada conserva el horómetro sin captura hasta iniciar', async () => {
+      const woRepo = createRepo();
+      woRepo.findOne.mockResolvedValue({ code: 'OT-ANTERIOR', valor_json: { horometro_actual: 15200 } });
+      const service = createService({ woRepo });
+      const machine = equipment();
+      const created = await service.buildAutomaticWorkOrderHorometerPayload(
+        { horometro_actual: 99999 }, machine, null, { maintenanceKind: 'CORRECTIVO' },
+      );
+      expect(created.horometro_actual).toBeNull();
+      expect(created.horometro_capturado_en ?? null).toBeNull();
+      expect(created.horometro_anterior).toBe(15200);
+
+      jest.advanceTimersByTime(3600000);
+      const edited = await service.buildAutomaticWorkOrderHorometerPayload(
+        { observacion: 'Editar título', horometro_actual: 77777 }, machine, null,
+        { maintenanceKind: 'CORRECTIVO', storedPayload: created },
+      );
+      expect(edited.horometro_actual).toBeNull();
+      expect(edited.horometro_capturado_en ?? null).toBeNull();
+      expect(service.operationalHorometer(machine)).toBe(15289);
+    });
+
+    it('EN PROCESO captura una vez y el reloj automático del equipo continúa', async () => {
+      const { service, machine, workOrder, manager } = executionFixture();
+      const originalEquipment = { ...machine };
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(workOrder.valor_json.horometro_actual).toBe(15288);
+      expect(workOrder.valor_json.horometro_inicio_ejecucion).toBe(15288);
+      expect(manager.save).toHaveBeenCalledWith(WorkOrderEntity, expect.objectContaining({ status_workflow: 'IN_PROGRESS' }));
+      expect(manager.save.mock.calls.some(([entity]) => entity === EquipoEntity || entity === EquipoFuncionamientoHistorialEntity)).toBe(false);
+      expect(machine).toEqual(originalEquipment);
+
+      jest.advanceTimersByTime(3600000);
+      expect(service.operationalHorometer(machine)).toBe(15289);
+      expect(workOrder.valor_json.horometro_actual).toBe(15288);
+      const callsBeforeReprint = manager.save.mock.calls.length;
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(manager.save.mock.calls).toHaveLength(callsBeforeReprint);
+      expect(workOrder.valor_json.horometro_actual).toBe(15288);
+    });
+
+    it('editar una OT iniciada ignora lecturas del cliente y conserva su captura y fecha', async () => {
+      const woRepo = createRepo();
+      const service = createService({ woRepo });
+      const stored = { horometro_actual: 15288, horometro_anterior: 15200,
+        horometro_inicio_ejecucion: 15288, horometro_capturado_en: now.toISOString() };
+      jest.advanceTimersByTime(3600000);
+      const payload = await service.buildAutomaticWorkOrderHorometerPayload(
+        { horometro_actual: 99999, horometro_capturado_en: '2099-01-01', observacion: 'Cambio de observación' }, equipment(), null,
+        { storedPayload: stored, maintenanceKind: 'CORRECTIVO' },
+      );
+      expect(payload).toMatchObject(stored);
+      expect(service.buildWorkOrderHorometerPayload(payload, equipment(), null, { maintenanceKind: 'CORRECTIVO' }).horometro_actual).toBe(15288);
+      expect(woRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('reanudar desde revisión conserva el inicio original sin recapturar ni detener equipo', async () => {
+      const start = new Date('2026-10-10T13:00:00.000Z');
+      const { service, machine, workOrder, manager } = executionFixture({
+        status_workflow: 'REVIEW', started_at: start,
+        valor_json: { horometro_actual: 15287, horometro_inicio_ejecucion: 15287, horometro_capturado_en: start.toISOString() },
+      });
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(workOrder.started_at).toEqual(start);
+      expect(workOrder.valor_json.horometro_actual).toBe(15287);
+      expect(workOrder.valor_json.horometro_capturado_en).toBe(start.toISOString());
+      expect(machine.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+      expect(manager.save.mock.calls.some(([entity]) => entity === EquipoEntity)).toBe(false);
+    });
+
+    it('una OT de proyecto puede iniciar sin capturar ni activar un horómetro', async () => {
+      const { service, workOrder } = executionFixture({ maintenance_kind: 'PROYECTO',
+        valor_json: { horometro_actual: null, horometro_anterior: null } });
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(workOrder.valor_json.horometro_actual).toBeNull();
+      expect(workOrder.valor_json.horometro_inicio_ejecucion ?? null).toBeNull();
+    });
+
+    it('reprogramar una OT iniciada conserva la captura original', async () => {
+      const machine = equipment();
+      const workOrder = { id: 'wo-programacion', equipment_id: machine.id, status_workflow: 'IN_PROGRESS',
+        valor_json: { horometro_actual: 15287, horometro_capturado_en: '2026-10-10T13:00:00.000Z' } };
+      const woRepo = createRepo();
+      woRepo.findOne.mockResolvedValue(workOrder);
+      const equipoRepo = createRepo();
+      equipoRepo.findOne.mockResolvedValue(machine);
+      const service = createService({ woRepo, equipoRepo, appendWorkOrderHistory: jest.fn().mockResolvedValue(undefined) });
+      await service.syncReprogrammingHorometer({ workOrderId: workOrder.id, actor });
+      expect(workOrder.valor_json.horometro_actual).toBe(15287);
+      expect(workOrder.valor_json.horometro_capturado_en).toBe('2026-10-10T13:00:00.000Z');
+      expect(equipoRepo.save).not.toHaveBeenCalled();
     });
   });
 });

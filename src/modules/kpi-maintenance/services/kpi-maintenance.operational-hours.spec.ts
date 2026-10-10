@@ -25,7 +25,7 @@ function fixture(state = 'PARADO') {
   return { service, manager, equipment, order, orderRepo, equipmentRepo, historyRepo };
 }
 
-describe('Horas operativas y cierre al encender', () => {
+describe('Horas operativas independientes de las OT', () => {
   it('acumula solo mientras funciona y conserva lecturas sin referencia temporal', () => {
     const service = Object.create(KpiMaintenanceService.prototype) as any;
     const now = new Date('2026-10-01T15:00:00Z');
@@ -35,14 +35,14 @@ describe('Horas operativas y cierre al encender', () => {
     expect(service.operationalHorometer({ ...equipment, horometro_operativo_desde: null }, now)).toBe(1000);
     expect(service.operationalHorometer(equipment, new Date('2026-10-01T12:00:00Z'))).toBe(1000);
   });
-  it.each(['IN_PROGRESS', 'REVIEW', 'BLOCKED'])('rechaza encender con una OT activa en %s sin cerrar ni liberar reservas', async state => {
+  it.each(['IN_PROGRESS', 'REVIEW', 'BLOCKED'])('permite controlar el equipo con OT en %s sin cerrar ni liberar reservas', async state => {
     const { service, order, orderRepo, equipmentRepo, historyRepo } = fixture();
     order.status_workflow = state;
-    await expect(service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id })).rejects.toThrow('Finaliza o anula');
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id });
     expect(order.status_workflow).toBe(state);
     expect(orderRepo.save).not.toHaveBeenCalled();
-    expect(equipmentRepo.save).not.toHaveBeenCalled();
-    expect(historyRepo.save).not.toHaveBeenCalled();
+    expect(equipmentRepo.save).toHaveBeenCalledWith(expect.objectContaining({ estado_funcionamiento: 'FUNCIONAMIENTO' }));
+    expect(historyRepo.save).toHaveBeenCalledTimes(1);
     expect(service.releaseOpenReservationsForWorkOrder).not.toHaveBeenCalled();
   });
   it('permite registrar el encendido cuando ninguna OT está activa', async () => {
@@ -61,13 +61,13 @@ describe('Horas operativas y cierre al encender', () => {
     expect(stopped.equipmentRepo.save).not.toHaveBeenCalled();
     expect(stopped.historyRepo.save).not.toHaveBeenCalled();
   });
-  it('la edición general del equipo tampoco permite encender mientras una OT sigue activa', async () => {
+  it('la edición del estado del equipo conserva independiente el estado de la OT activa', async () => {
     const { service, equipment, order, equipmentRepo } = fixture();
     service.findEquipoOrFail = jest.fn().mockResolvedValue(equipment);
     service.resolveEquipmentServiceSchedule = jest.fn().mockReturnValue({});
-    await expect(service.updateEquipo(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id })).rejects.toThrow('Finaliza o anula');
+    await service.updateEquipo(id, { estado_funcionamiento: 'FUNCIONAMIENTO' }, { userId: id });
     expect(order.status_workflow).toBe('IN_PROGRESS');
-    expect(equipmentRepo.save).not.toHaveBeenCalled();
+    expect(equipmentRepo.save).toHaveBeenCalledWith(expect.objectContaining({ estado_funcionamiento: 'FUNCIONAMIENTO' }));
   });
   it('editar datos del equipo conserva las fracciones acumuladas del horómetro', async () => {
     const { service, equipment } = fixture();
@@ -80,7 +80,7 @@ describe('Horas operativas y cierre al encender', () => {
 });
 
 describe('Horómetro automático de las OT', () => {
-  it('captura las horas transcurridas del servidor y la última OT sin modificar el equipo', async () => {
+  it('la planificación conserva la última OT y deja pendiente la captura sin modificar el equipo', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-10-04T17:30:00Z'));
     try {
       const { service, equipment, equipmentRepo } = fixture('FUNCIONAMIENTO');
@@ -90,7 +90,7 @@ describe('Horómetro automático de las OT', () => {
         { horometro_actual: 10, horometro_anterior: 20, horas_a_realizar: 999 }, equipment,
         { frecuencia_horas: 1.75 }, { maintenanceKind: 'CEBADO' },
       );
-      expect(snapshot).toMatchObject({ horometro_actual: 1001.625, horometro_anterior: 980.5, horas_plantilla: 1.75 });
+      expect(snapshot).toMatchObject({ horometro_actual: null, horometro_capturado_en: null, horometro_anterior: 980.5, horas_plantilla: 1.75 });
       expect(equipment.horometro_actual).toBe(1000.125);
       expect(equipmentRepo.save).not.toHaveBeenCalled();
       const edited = await service.buildAutomaticWorkOrderHorometerPayload(

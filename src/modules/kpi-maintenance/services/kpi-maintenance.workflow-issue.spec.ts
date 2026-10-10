@@ -37,7 +37,7 @@ describe('Flujo automático de OT y egreso', () => {
     await expect(service.confirmWorkOrderIssue('wo', { ...actor, roleName })).rejects.toThrow(ForbiddenException);
     expect(service.dataSource.transaction).not.toHaveBeenCalled();
   });
-  it('imprimir inicia la OT, apaga el equipo y registra al usuario de bodega en una transacción', async () => {
+  it('imprimir inicia la OT, captura el contador y conserva el funcionamiento independiente del equipo', async () => {
     const { service, wo, equipment, saves } = fixture();
     const now = new Date();
     Object.assign(equipment, { horometro_actual: 1000.25, horometro_operativo_desde: new Date(now.getTime() - 3600000) });
@@ -45,13 +45,13 @@ describe('Flujo automático de OT y egreso', () => {
     await service.confirmWorkOrderIssue('wo', actor);
     expect(wo.status_workflow).toBe('IN_PROGRESS');
     expect(wo.valor_json.execution_start).toMatchObject({ by_name: 'Ana Bodega', by_user_id: actor.userId });
-    expect(equipment.estado_funcionamiento).toBe('PARADO');
+    expect(equipment.estado_funcionamiento).toBe('FUNCIONAMIENTO');
     expect(wo.valor_json.horometro_actual).toBeCloseTo(1001.25, 3);
-    expect(equipment.horometro_actual).toBe(wo.valor_json.horometro_actual);
+    expect(equipment.horometro_actual).toBe(1000.25);
     expect(wo.valor_json.horometro_anterior).toBe(900);
     expect(wo.valor_json.cebado_horometro).toMatchObject({ horas: 1.5, pendiente: true });
     expect(saves.filter(row => row.entity === WorkOrderStatusHistoryEntity)[0].value).toMatchObject({ from_status: 'PLANNED', to_status: 'IN_PROGRESS', changed_by: actor.userId });
-    expect(saves.some(row => row.entity === EquipoFuncionamientoHistorialEntity)).toBe(true);
+    expect(saves.some(row => row.entity === EquipoFuncionamientoHistorialEntity || row.entity === EquipoEntity)).toBe(false);
     for (const row of saves.filter(row => [WorkOrderStatusHistoryEntity, EquipoFuncionamientoHistorialEntity].includes(row.entity))) {
       expect(row.value.id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
     }
@@ -102,7 +102,8 @@ describe('Flujo automático de OT y egreso', () => {
     await service.confirmWorkOrderIssue('wo', superAdmin);
     expect(wo.status_workflow).toBe('IN_PROGRESS');
     expect(wo.valor_json.execution_start).toMatchObject({ by_name: superAdmin.displayName, by_user_id: superAdmin.userId });
-    expect(equipment.estado_funcionamiento).toBe('PARADO');
+    expect(equipment.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+    expect(saves.some(row => row.entity === EquipoEntity || row.entity === EquipoFuncionamientoHistorialEntity)).toBe(false);
     expect(saves.find(row => row.entity === WorkOrderStatusHistoryEntity).value.changed_by).toBe(superAdmin.userId);
   });
   it('una salida adicional reutiliza el número y la apertura del egreso existente', async () => {

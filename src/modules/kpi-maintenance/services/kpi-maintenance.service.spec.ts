@@ -269,11 +269,39 @@ describe('KpiMaintenanceService alerts', () => {
       });
       expect(sendMail.mock.calls[0][0].html).not.toContain('Costo unit.');
       expect(transferRepo.findOne).toHaveBeenCalledWith(expect.objectContaining({
-        where: expect.objectContaining({ estado: 'COMPLETADA', is_deleted: false, status: 'ACTIVE' }),
+        where: expect.objectContaining({ is_deleted: false, status: 'ACTIVE' }),
       }));
       transferRepo.findOne.mockResolvedValue(null);
       await service.notifyWarehouseTransfer('anulada');
       expect(sendMail).toHaveBeenCalledTimes(1);
+    });
+
+    it('notifica pendiente y cada aprobación parcial una sola vez sin avisar como recibido antes de aprobar', async () => {
+      const transfer: any = { id: 'transfer', codigo: 'TB-001', bodega_origen_id: 'b-origen', bodega_destino_id: 'b-destino', fecha_transferencia: new Date(), estado: 'PENDIENTE_RECEPCION', recepcion_requerida: true };
+      const detail: any = { id: 'detail', nombre_producto: 'Filtro', cantidad: 5, cantidad_recibida: 0 };
+      (dataSource as any).getRepository = jest.fn(entity => entity.name === 'TransferenciaBodegaEntity'
+        ? { findOne: jest.fn(async () => transfer) } : { find: jest.fn(async () => [detail]) });
+      repos.bodegaRepo.findOne.mockImplementation(async ({ where }) => ({ id: where.id, nombre: where.id, sucursal_id: 's-destino' }));
+      const events = new Map<string, any>();
+      repos.eventoProcesoRepo.findOne.mockImplementation(async ({ where }) => events.get(where.referencia_codigo));
+      repos.eventoProcesoRepo.save.mockImplementation(async value => { events.set(value.referencia_codigo, value); return value; });
+      await service.notifyWarehouseTransfer('transfer');
+      await service.notifyWarehouseTransfer('transfer');
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(sendMail.mock.calls[0][0].subject).toContain('pendiente de recepción');
+      transfer.estado = 'PARCIALMENTE_RECIBIDA'; detail.cantidad_recibida = 2;
+      await service.notifyWarehouseTransfer('transfer');
+      await service.notifyWarehouseTransfer('transfer');
+      detail.cantidad_recibida = 3;
+      await service.notifyWarehouseTransfer('transfer');
+      transfer.estado = 'COMPLETADA'; detail.cantidad_recibida = 5;
+      await service.notifyWarehouseTransfer('transfer');
+      await service.notifyWarehouseTransfer('transfer');
+      expect(sendMail).toHaveBeenCalledTimes(4);
+      expect(sendMail.mock.calls[1][0].text).toContain('Aprobado: 2 · Pendiente: 3');
+      expect(sendMail.mock.calls[2][0].text).toContain('Aprobado: 3 · Pendiente: 2');
+      expect(sendMail.mock.calls[3][0].text).toContain('Aprobado: 5 · Pendiente: 0');
+      expect(events.size).toBe(4);
     });
 
     it('reintenta únicamente los destinatarios cuyo envío falló', async () => {
@@ -1554,14 +1582,15 @@ describe('KpiMaintenanceService alerts', () => {
     expect(updateSpy).not.toHaveBeenCalled();
   });
 
-  it('la OT nueva toma el contador del servidor aunque el cliente mande otra lectura', async () => {
+  it('la OT nueva espera al inicio para capturar el contador e ignora la lectura del cliente', async () => {
     const equipment = { id: 'equipo-1', horometro_actual: 15286, estado_funcionamiento: 'PARADO' } as any;
     repos.woRepo.findOne.mockResolvedValue({ code: 'OT-ANTERIOR', valor_json: { horometro_actual: 15200 } });
     for (const input of [15200, 15286, 15300, -10, 'incorrecto']) {
       const payload = await (service as any).buildAutomaticWorkOrderHorometerPayload(
         { horometro_actual: input, horometro_anterior: 999 }, equipment, null,
       );
-      expect(payload.horometro_actual).toBe(15286);
+      expect(payload.horometro_actual).toBeNull();
+      expect(payload.horometro_capturado_en).toBeNull();
       expect(payload.horometro_anterior).toBe(15200);
       expect(payload.horometro_ot_anterior_codigo).toBe('OT-ANTERIOR');
     }
@@ -4062,6 +4091,7 @@ describe('KpiMaintenanceService anulacion de ordenes de trabajo', () => {
       typeof entity === 'function' ? entity.name : String(entity);
 
     const manager: any = {
+      query: jest.fn().mockResolvedValue([]),
       create: (entity: any, value: any) => ({
         id: value?.id ?? `${nameOf(entity)}-${++sequence}`,
         ...value,

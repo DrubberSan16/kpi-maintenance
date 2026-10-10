@@ -987,6 +987,7 @@ export class TransferenciaBodegaEntity {
   fecha_transferencia: Date;
   @Column({ type: 'text', nullable: true }) observacion?: string | null;
   @Column({ default: 'COMPLETADA' }) estado: string;
+  @Column({ default: false }) recepcion_requerida: boolean;
   @Column({ type: 'integer', default: 0 }) total_items: number;
   @Column('numeric', { precision: 18, scale: 6, default: 0 })
   total_cantidad: number;
@@ -1017,6 +1018,7 @@ export class TransferenciaBodegaDetEntity {
   codigo_producto?: string | null;
   @Column({ type: 'varchar', length: 200 }) nombre_producto: string;
   @Column('numeric', { precision: 18, scale: 6, default: 0 }) cantidad: number;
+  @Column('numeric', { precision: 18, scale: 6, default: 0 }) cantidad_recibida: number;
   @Column('numeric', { precision: 14, scale: 4, default: 0 })
   costo_unitario: number;
   @Column('numeric', { precision: 18, scale: 4, default: 0 }) subtotal: number;

@@ -99,6 +99,7 @@ import {
 } from '../entities/kpi-maintenance.entity';
 import { MaterialPriceTimeline } from '../../../common/pricing/material-price-history.util';
 import { FifoCostEngine } from '../../../common/pricing/fifo-cost.engine';
+import { getPendingTransferStock } from '../../../common/utils/transfer-pending-stock.util';
 import {
   AnalisisAceiteKpiQueryDto,
   AlertaQueryDto,
@@ -2348,7 +2349,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const stored = options?.storedPayload ?? null;
     const base = this.protectWorkOrderLifecyclePayload(stored, payload ?? null);
     const project = this.isProyectoMaintenanceKind(options?.maintenanceKind);
-    const current = equipment && !project ? this.operationalHorometer(equipment) : null;
     let previous = this.normalizeHorometroRecordValue(stored, 'horometro_anterior');
     if (!stored && equipment && !project) {
       const repo = options?.manager ? options.manager.getRepository(WorkOrderEntity) : this.woRepo;
@@ -2365,9 +2365,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return {
       ...base,
       horometro_automatico: !project,
-      horometro_actual: project ? null : this.normalizeHorometroRecordValue(stored, 'horometro_actual') ?? current,
+      horometro_actual: project ? null : this.normalizeHorometroRecordValue(stored, 'horometro_actual'),
       horometro_anterior: project ? null : previous ?? Number(equipment?.horometro_actual || 0),
-      horometro_capturado_en: stored?.horometro_capturado_en ?? new Date().toISOString(),
+      horometro_capturado_en: stored?.horometro_capturado_en ?? null,
       horas_a_realizar: hours,
       horas_plantilla: hours,
     };
@@ -2386,8 +2386,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ?? (procedure?.frecuencia_horas != null ? Number(procedure.frecuencia_horas) : null);
     return {
       ...base,
-      horometro_actual: project ? null : this.normalizeHorometroRecordValue(base, 'horometro_actual')
-        ?? (equipment ? this.operationalHorometer(equipment) : null),
+      horometro_actual: project ? null : this.normalizeHorometroRecordValue(base, 'horometro_actual'),
       horometro_anterior: project ? null : this.normalizeHorometroRecordValue(base, 'horometro_anterior')
         ?? (equipment ? Number(equipment.horometro_actual || 0) : null),
       horas_a_realizar: hours,
@@ -2501,7 +2500,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const nextPayload = {
         ...baseWorkOrderPayload,
         horometro_automatico: true,
-        horometro_actual: currentHorometer,
         horometro_actual_reprogramacion: currentHorometer,
         horometro_actual_reprogramado_at: nowIso,
         reprogramado_horometro_at: nowIso,
@@ -3520,7 +3518,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       bodegaId,
       manager,
     );
-    const availableQty = Math.max(stockActual - reservedQty, 0);
+    const pendingTransfer = await getPendingTransferStock(manager ?? this.dataSource, bodegaId, productoId);
+    const pendingOperational = stock && this.getStockNuevoAmount(stock) + this.getStockUsadoAmount(stock) > 0.000001
+      ? pendingTransfer.nuevo + pendingTransfer.usado : pendingTransfer.critico;
+    const availableQty = Math.max(stockActual - reservedQty - pendingOperational, 0);
 
     return {
       producto,
@@ -3528,6 +3529,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       stock,
       stockActual,
       reservedQty,
+      pendingTransferQty: pendingTransfer.total,
+      pendingTransfer,
       availableQty,
       faltante: Math.max(normalizedRequested - availableQty, 0),
     };
@@ -6194,6 +6197,25 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private async assertStockNotCommittedToTransfer(
+    manager: EntityManager,
+    stock: StockBodegaEntity,
+    quantity: number,
+    condition: 'NUEVO' | 'USADO' | 'CRITICO',
+    productLabel: string,
+  ) {
+    const pending = await getPendingTransferStock(manager, stock.bodega_id, stock.producto_id);
+    const conditionStock = condition === 'USADO' ? this.getStockUsadoAmount(stock)
+      : condition === 'CRITICO' ? this.getStockCriticoAmount(stock) : this.getStockNuevoAmount(stock);
+    const committed = condition === 'USADO' ? pending.usado : condition === 'CRITICO' ? pending.critico : pending.nuevo;
+    const available = Math.max(conditionStock - committed, 0);
+    if (available + 0.000001 < quantity) {
+      throw new ConflictException(
+        `Stock ${condition.toLowerCase()} insuficiente para ${productLabel}. Disponible ${available.toFixed(2)}, pendiente de recepción ${committed.toFixed(2)}, requerido ${quantity.toFixed(2)}.`,
+      );
+    }
+  }
+
   private resolveAutomaticMaterialCondition(
     stock: StockBodegaEntity,
   ): 'NUEVO' | 'USADO' | 'CRITICO' {
@@ -7936,9 +7958,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async notifyWarehouseTransfer(transferId: string) {
     const transfer = await this.dataSource.getRepository(TransferenciaBodegaEntity).findOne({
-      where: { id: transferId, is_deleted: false, estado: 'COMPLETADA', status: 'ACTIVE' },
+      where: { id: transferId, is_deleted: false, status: 'ACTIVE' },
     });
     if (!transfer) return this.wrap({ sent: 0, failed: 0, recipients: 0 }, 'Transferencia no vigente');
+    const state = transfer.estado || 'COMPLETADA';
+    if (!['PENDIENTE_RECEPCION', 'PARCIALMENTE_RECIBIDA', 'COMPLETADA'].includes(state)) {
+      return this.wrap({ sent: 0, failed: 0, recipients: 0 }, 'Transferencia no vigente');
+    }
+    const stateLabel = state === 'PENDIENTE_RECEPCION' ? 'pendiente de recepción'
+      : state === 'PARCIALMENTE_RECIBIDA' ? 'recibida parcialmente' : 'recibida';
+    const title = state === 'PENDIENTE_RECEPCION' ? 'Transferencia pendiente de recepción en su bodega'
+      : state === 'PARCIALMENTE_RECIBIDA' ? 'Recepción parcial aprobada en su bodega' : 'Transferencia recibida en su bodega';
     const [destination, source] = await Promise.all([
       this.bodegaRepo.findOne({ where: { id: transfer.bodega_destino_id, is_deleted: false } }),
       this.bodegaRepo.findOne({ where: { id: transfer.bodega_origen_id, is_deleted: false } }),
@@ -7955,29 +7985,36 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       cantidad: this.toNumeric(item.cantidad, 0),
       costo_unitario: 0,
       subtotal: 0,
-      observacion: item.observacion ?? null,
+      observacion: transfer.recepcion_requerida
+        ? `Aprobado: ${this.toNumeric(item.cantidad_recibida, 0)} · Pendiente: ${Math.max(this.toNumeric(item.cantidad, 0) - this.toNumeric(item.cantidad_recibida, 0), 0)}${item.observacion ? ` · ${item.observacion}` : ''}`
+        : item.observacion ?? null,
     }));
     const rows = [
       { label: 'Transferencia', value: transfer.codigo },
       { label: 'Bodega origen', value: emailLabel('Bodega origen', this.buildBodegaLabel(source ?? undefined)) },
       { label: 'Bodega destino', value: destinationLabel },
       { label: 'Fecha', value: this.formatAlertEmailDate(transfer.fecha_transferencia) },
+      { label: 'Estado', value: stateLabel },
       { label: 'Observación', value: transfer.observacion },
     ];
     const result = await this.sendWarehouseNotice({
-      reference: `BODEGA:TRANSFERENCIA:${transfer.id}`,
+      reference: transfer.recepcion_requerida
+        ? `BODEGA:TRANSFERENCIA:${transfer.id}:${state}:${createHash('sha256').update(details.map(item => `${item.id}:${this.toNumeric(item.cantidad_recibida, 0)}`).sort().join('|')).digest('hex').slice(0, 16)}`
+        : `BODEGA:TRANSFERENCIA:${transfer.id}`,
       referenceId: transfer.id,
       table: 'kpi_inventory.tb_transferencia_bodega',
       recipients,
-      subject: `[Bodega] Transferencia ${transfer.codigo} recibida · ${destinationLabel}`,
+      subject: `[Bodega] Transferencia ${transfer.codigo} ${stateLabel} · ${destinationLabel}`,
       html: this.buildEnterpriseEmailLayout({
         moduleLabel: 'Justice KPI · Transferencias de bodega',
-        title: 'Transferencia recibida en su bodega',
-        summary: 'Se confirmó una transferencia de materiales hacia su bodega.',
+        title,
+        summary: state === 'PENDIENTE_RECEPCION'
+          ? 'Revise los materiales, registre observaciones y adjuntos y apruebe lo efectivamente recibido. El stock se moverá al aprobar la recepción.'
+          : 'Se aplicó únicamente el material aprobado. Las cantidades pendientes siguen comprometidas en origen hasta una nueva recepción o la resolución de la transferencia.',
         contentHtml: this.buildEmailInfoTable(rows) + this.buildConsumoEmailTableHtml(items, false),
       }),
-      text: ['Transferencia recibida en su bodega', ...rows.map((row) => `${row.label}: ${row.value ?? '-'}`),
-        ...items.map((item) => `${item.producto_label} | Cantidad: ${item.cantidad}`)].join('\n'),
+      text: [title, ...rows.map((row) => `${row.label}: ${row.value ?? '-'}`),
+        ...items.map((item) => `${item.producto_label} | Cantidad: ${item.cantidad}${item.observacion ? ` | ${item.observacion}` : ''}`)].join('\n'),
     });
     return this.wrap(result, 'Transferencia notificada a bodega destino');
   }
@@ -13772,9 +13809,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       } as any,
     });
     for (const row of rows) {
+      const pending = await getPendingTransferStock(this.dataSource, row.bodega_id, row.producto_id);
+      const pendingOperational = this.getStockNuevoAmount(row) + this.getStockUsadoAmount(row) > 0.000001
+        ? pending.nuevo + pending.usado : pending.critico;
       map.set(
         `${row.producto_id}|${row.bodega_id}`,
-        this.getOperationalStockAmount(row),
+        Math.max(this.getOperationalStockAmount(row) - pendingOperational, 0),
       );
     }
     return map;
@@ -18208,13 +18248,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
   private async closeWorkOrdersOnRestart(manager: EntityManager, equipment: EquipoEntity, actor?: RequestActorContext | null) {
     const base = { equipment_id: equipment.id, is_deleted: false, closed_at: IsNull() };
-    const active = await manager.getRepository(WorkOrderEntity).find({
-      where: [
-        { ...base, status_workflow: In(['IN_PROGRESS', 'REVIEW']) },
-        { ...base, status_workflow: 'BLOCKED', started_at: Not(IsNull()) },
-      ], lock: { mode: 'pessimistic_write' }, order: { created_at: 'ASC' },
-    });
-    if (active.length) throw new ConflictException(`Finaliza o anula la OT ${active[0].code} antes de registrar el encendido del equipo.`);
     const orders = await manager.getRepository(WorkOrderEntity).find({
       where: { equipment_id: equipment.id, is_deleted: false, status_workflow: 'CLOSED', started_at: Not(IsNull()) },
       lock: { mode: 'pessimistic_write' }, order: { closed_at: 'ASC', id: 'ASC' },
@@ -29085,6 +29118,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         stock,
         item.condicion_material,
       );
+      await this.assertStockNotCommittedToTransfer(manager, stock, item.cantidad, condition, productLabel);
 
       const costo = this.resolveDatedMaterialUnitCost(priceTimeline, {
         productoId: item.producto_id,
@@ -31332,6 +31366,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       userName: args.actorName,
     });
     const previousStockActual = this.toNumeric(stock.stock_actual, 0);
+    if (signedQuantity < 0) await this.assertStockNotCommittedToTransfer(manager, stock, args.cantidad, args.condicion, productLabel);
     const stockAfter = this.applyStockDeltaByConditionForMaintenance(
       stock,
       signedQuantity,
@@ -32598,6 +32633,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         row,
       ]),
     );
+    const transferPendingMap = new Map<string, Awaited<ReturnType<typeof getPendingTransferStock>>>();
+    await Promise.all(stockRows.map(async stock => transferPendingMap.set(
+      `${stock.producto_id}|${stock.bodega_id}`,
+      await getPendingTransferStock(this.dataSource, stock.bodega_id, stock.producto_id),
+    )));
     const groupedTotals = new Map<
       string,
       { plannedQty: number; issuedQty: number; pendingQty: number }
@@ -32622,6 +32662,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const key = `${row.producto_id}|${row.bodega_id || ''}`;
         const totals = groupedTotals.get(key);
         const stock = stockMap.get(key);
+        const pending = transferPendingMap.get(key);
         return {
           ...this.mapConsumoWithCatalogs(row, productMap, warehouseMap),
           cantidad_reservada: totals?.plannedQty ?? this.toNumeric(row.cantidad, 0),
@@ -32634,6 +32675,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           stock_critico: this.getStockCriticoAmount(
             stock ?? ({} as StockBodegaEntity),
           ),
+          cantidad_pendiente_transferencia: pending?.total ?? 0,
+          stock_disponible_nuevo: Math.max(this.getStockNuevoAmount(stock) - (pending?.nuevo ?? 0), 0),
+          stock_disponible_usado: Math.max(this.getStockUsadoAmount(stock) - (pending?.usado ?? 0), 0),
+          stock_disponible_critico: Math.max(this.getStockCriticoAmount(stock) - (pending?.critico ?? 0), 0),
         };
       }),
       'Consumos listados',
@@ -33443,6 +33488,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         stock_nuevo: this.getStockNuevoAmount(reservableStock.stock),
         stock_usado: this.getStockUsadoAmount(reservableStock.stock),
         stock_critico: this.getStockCriticoAmount(reservableStock.stock),
+        cantidad_pendiente_transferencia: reservableStock.pendingTransferQty,
+        stock_disponible_nuevo: Math.max(this.getStockNuevoAmount(reservableStock.stock) - (reservableStock.pendingTransfer?.nuevo ?? 0), 0),
+        stock_disponible_usado: Math.max(this.getStockUsadoAmount(reservableStock.stock) - (reservableStock.pendingTransfer?.usado ?? 0), 0),
+        stock_disponible_critico: Math.max(this.getStockCriticoAmount(reservableStock.stock) - (reservableStock.pendingTransfer?.critico ?? 0), 0),
       },
       'Consumo registrado',
     );
@@ -33989,10 +34038,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const actorId = this.resolveActorHistoryUserId(actor);
       const actorName = this.firstNonEmptyString(actor?.displayName, actor?.username) || 'Usuario de bodega';
       const hadStarted = Boolean(workOrder.started_at);
-      if (!hadStarted && equipment) {
+      if (!hadStarted && equipment && !this.isProyectoMaintenanceKind(workOrder.maintenance_kind)) {
         const reading = this.operationalHorometer(equipment, now);
         workOrder.valor_json = { ...(workOrder.valor_json ?? {}), horometro_automatico: true,
-          horometro_actual: reading, horometro_inicio_ejecucion: reading, horometro_detenido_en: now.toISOString() };
+          horometro_actual: reading, horometro_inicio_ejecucion: reading, horometro_capturado_en: now.toISOString() };
         if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO') {
           const procedureId = this.firstNonEmptyString(workOrder.valor_json.procedimiento_id);
           const procedure = procedureId ? await manager.findOne(ProcedimientoPlantillaEntity,
@@ -34014,25 +34063,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       } };
       workOrder.updated_by = actor?.username || actorName;
       await manager.save(WorkOrderEntity, workOrder);
-      if (equipment && equipment.estado_funcionamiento !== 'PARADO') {
-        const since = equipment.estado_funcionamiento_actualizado_en ? new Date(equipment.estado_funcionamiento_actualizado_en) : null;
-        await manager.save(EquipoFuncionamientoHistorialEntity, manager.create(EquipoFuncionamientoHistorialEntity, {
-          id: randomUUID(),
-          equipo_id: equipment.id, estado_anterior: equipment.estado_funcionamiento, estado_nuevo: 'PARADO',
-          estado_anterior_desde: since, duracion_estado_anterior_segundos: since ? Math.max(0, Math.floor((now.getTime() - since.getTime()) / 1000)) : null,
-          changed_at: now, changed_by_id: actorId, changed_by: actorName,
-        }));
-        if (equipment.horometro_operativo_desde) equipment.horometro_actual = this.operationalHorometer(equipment, now);
-        equipment.horometro_operativo_desde = null;
-        equipment.estado_funcionamiento = 'PARADO';
-        equipment.estado_funcionamiento_actualizado_en = now;
-        equipment.updated_by = actorName;
-        await manager.save(EquipoEntity, equipment);
-      }
       await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
         id: randomUUID(),
         work_order_id: workOrder.id, from_status: previous, to_status: 'IN_PROGRESS', changed_at: now, changed_by: actorId,
-        note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}. Equipo en estado Parado.`,
+        note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}.`,
       }));
       return { workOrder, started: true };
     });
@@ -34145,6 +34179,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           stock,
           item.condicion_material,
         );
+        await this.assertStockNotCommittedToTransfer(qr.manager, stock, item.cantidad, condition, productLabel);
         const costo = this.resolveDatedMaterialUnitCost(priceTimeline, {
           productoId: item.producto_id,
           bodegaId: item.bodega_id,
@@ -34573,6 +34608,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         const materialCondition = this.resolveAutomaticMaterialCondition(
           sourceStock,
         );
+        await this.assertStockNotCommittedToTransfer(qr.manager, sourceStock, quantity, materialCondition, product.nombre || product.id);
         const sourceStockAfter = this.applyIssuedStockByCondition(
           sourceStock,
           quantity,
@@ -34973,6 +35009,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         producto_id: args.productoId,
         is_deleted: false,
       },
+      lock: { mode: 'pessimistic_write' },
     });
     if (existing) return existing;
 
