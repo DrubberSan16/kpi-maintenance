@@ -1071,7 +1071,7 @@ export class KpiMaintenanceController {
   @ApiQuery({
     name: 'bloque',
     required: true,
-    enum: ['cebado', 'repuestos', 'correctivos', 'disponibilidad'],
+    enum: ['cebado', 'aceite', 'repuestos', 'correctivos', 'disponibilidad'],
   })
   @ApiQuery({ name: 'equipo_id', required: false, type: String })
   @ApiQuery({ name: 'desde', required: false, type: String })

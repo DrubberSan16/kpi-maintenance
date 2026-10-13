@@ -27328,6 +27328,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ),
           fecha_referencia: row.referenceDate.toISOString(),
           fecha_referencia_label: this.formatOilUsageDateLabel(row.referenceDate),
+          fecha_programada: row.workOrder.scheduled_start ?? null,
+          central: equipment?.equipment_location_label ?? null,
+          equipment_brand_name: equipment?.marca_nombre ?? null,
+          horometro_inicial: this.extractWorkOrderHorometerSnapshot(
+            row.workOrder.valor_json as Record<string, unknown> | null,
+          ).horometro_anterior,
+          horometro_final: this.extractWorkOrderHorometerSnapshot(
+            row.workOrder.valor_json as Record<string, unknown> | null,
+          ).horometro_actual,
           producto_id: row.producto_id,
           producto_codigo: producto?.codigo ?? null,
           producto_nombre: producto?.nombre ?? null,

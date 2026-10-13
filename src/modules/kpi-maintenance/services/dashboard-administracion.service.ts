@@ -621,6 +621,45 @@ export class DashboardAdministracionService {
     const equipoId = this.equipoParam(query.equipo_id);
     const bloque = String(query.bloque ?? '').trim().toLowerCase();
 
+    if (bloque === 'aceite') {
+      const filas = await this.dataSource.query(
+        `
+        SELECT wo.id AS work_order_id, wo.code AS orden, wo.equipment_id,
+          wo.scheduled_start AS fecha_programada,
+          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
+          wo.maintenance_kind AS tipo,
+          COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
+          e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central,
+          ROUND(SUM(cr.cantidad)::numeric, 2) AS galones,
+          ROUND(SUM(cr.cantidad * COALESCE(issued.costo_unitario, cr.costo_unitario, 0))::numeric, 2) AS costo
+        FROM kpi_process.tb_work_order wo
+        INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
+          ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
+        INNER JOIN kpi_inventory.tb_producto p
+          ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
+        LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id
+          AND COALESCE(l.is_deleted, false) = false
+        LEFT JOIN LATERAL (
+          SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS costo_unitario
+          FROM kpi_inventory.tb_entrega_material em
+          INNER JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = em.id
+          WHERE em.work_order_id = wo.id AND COALESCE(em.is_deleted, false) = false
+            AND d.producto_id = cr.producto_id AND d.bodega_id = cr.bodega_id
+        ) issued ON true
+        WHERE COALESCE(wo.is_deleted, false) = false
+          AND UPPER(COALESCE(wo.valor_json ->> 'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
+          AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
+          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+          AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        GROUP BY wo.id, e.id, l.id
+        ORDER BY fecha, wo.code
+        `,
+        [desde, hasta, equipoId],
+      );
+      return this.wrap({ bloque, filas }, 'Detalle de consumo de aceite');
+    }
+
     if (bloque === 'cebado') {
       // Una fila por orden, no por linea de consumo: el semaforo mide lo que
       // gasto la OT completa, y una orden puede tener varias lineas de aceite.
