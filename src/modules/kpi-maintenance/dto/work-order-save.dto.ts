@@ -77,6 +77,10 @@ export class SaveWorkOrderHeaderDto {
   @IsOptional()
   @IsBoolean()
   is_emergency?: boolean | null;
+  @ApiPropertyOptional({ description: 'Clase de la OT Proyecto: OVERHAUL o Normal. Se fija al crear' })
+  @IsOptional()
+  @IsBoolean()
+  is_overhaul?: boolean | null;
   @ApiPropertyOptional({ description: 'Motivo por el que la OT es emergente' })
   @IsOptional()
   @IsString()

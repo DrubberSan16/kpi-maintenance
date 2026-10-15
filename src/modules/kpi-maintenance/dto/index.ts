@@ -1296,6 +1296,10 @@ export class CreateWorkOrderDto {
   @IsOptional()
   @IsBoolean()
   is_emergency?: boolean;
+  @ApiPropertyOptional({ description: 'Clase de la OT Proyecto: OVERHAUL o Normal. Se fija al crear' })
+  @IsOptional()
+  @IsBoolean()
+  is_overhaul?: boolean;
   @ApiPropertyOptional({ description: 'Motivo por el que la OT es emergente' })
   @IsOptional()
   @IsString()
@@ -1403,6 +1407,10 @@ export class UpdateWorkOrderDto {
   @IsOptional()
   @IsBoolean()
   is_emergency?: boolean;
+  @ApiPropertyOptional({ description: 'Clase OVERHAUL de la OT Proyecto, conservada al editar' })
+  @IsOptional()
+  @IsBoolean()
+  is_overhaul?: boolean;
   @ApiPropertyOptional({ description: 'Motivo por el que la OT es emergente' })
   @IsOptional()
   @IsString()

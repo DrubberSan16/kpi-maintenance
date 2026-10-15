@@ -2105,6 +2105,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private async ensureWorkOrderEmergencySchema() {
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_process.tb_work_order
+      ADD COLUMN IF NOT EXISTS is_overhaul boolean NOT NULL DEFAULT false
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_process.tb_work_order
       ADD COLUMN IF NOT EXISTS is_emergency boolean NOT NULL DEFAULT false
     `);
     await this.dataSource.query(`
@@ -3010,10 +3014,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Los sitios existen y son de una sola sucursal: la pantalla elige la
+   * sucursal y de ella salen las bodegas y el proyecto (cuya ubicación viaja
+   * como ubicación de la OT).
+   */
   private async assertProyectoSitesExist(
     ubicacionIds: string[],
     bodegaIds: string[],
   ) {
+    const sucursales = new Set<string>();
     if (ubicacionIds.length) {
       const found = await this.locationRepo.find({
         where: { id: In(ubicacionIds), is_deleted: false },
@@ -3023,6 +3033,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           'Alguna de las ubicaciones indicadas para el proyecto no existe.',
         );
       }
+      found.forEach((row) => row.sucursal_id && sucursales.add(row.sucursal_id));
     }
     if (bodegaIds.length) {
       const found = await this.bodegaRepo.find({
@@ -3033,6 +3044,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           'Alguna de las bodegas indicadas para el proyecto no existe.',
         );
       }
+      found.forEach((row) => row.sucursal_id && sucursales.add(row.sucursal_id));
+    }
+    if (sucursales.size > 1) {
+      throw new BadRequestException(
+        'Las bodegas y el proyecto de una OT Proyecto deben ser de una sola sucursal.',
+      );
     }
   }
 
@@ -6173,11 +6190,40 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertWorkOrderAllowsMaterialIssue(workOrder: WorkOrderEntity) {
-    if (this.isWorkOrderAnnulled(workOrder) || !['PLANNED', 'REVIEW'].includes(this.normalizeWorkflowStatus(workOrder.status_workflow))) {
+    const allowedStatuses = this.issuesDailyWorkOrderMovement(workOrder)
+      ? ['PLANNED', 'IN_PROGRESS', 'REVIEW']
+      : ['PLANNED', 'REVIEW'];
+    if (this.isWorkOrderAnnulled(workOrder) || !allowedStatuses.includes(this.normalizeWorkflowStatus(workOrder.status_workflow))) {
       throw new ForbiddenException(
-        'La salida de materiales se registra durante la planificación o la revisión, antes de imprimir el egreso.',
+        this.issuesDailyWorkOrderMovement(workOrder)
+          ? 'La salida de materiales de una OT Proyecto solo se registra durante la planificación, la ejecución o la revisión.'
+          : 'La salida de materiales se registra durante la planificación o la revisión, antes de imprimir el egreso.',
       );
     }
+  }
+
+  /**
+   * Toda OT Proyecto, Normal u OVERHAUL, saca material mientras dura: un egreso
+   * de bodega por día local y salidas también en ejecución. OVERHAUL solo
+   * clasifica la orden.
+   */
+  private issuesDailyWorkOrderMovement(workOrder: WorkOrderEntity) {
+    return this.isProyectoMaintenanceKind(workOrder.maintenance_kind);
+  }
+
+  /** Igual que la clase emergente, la clase de proyecto se fija al crear la OT. */
+  private resolveWorkOrderOverhaulState(
+    maintenanceKind: unknown,
+    requested: unknown,
+    existing?: WorkOrderEntity | null,
+  ) {
+    const isOverhaul = existing
+      ? existing.is_overhaul === true
+      : this.coerceBoolean(requested, false);
+    if (isOverhaul && !this.isProyectoMaintenanceKind(maintenanceKind)) {
+      throw new BadRequestException('OVERHAUL solo está disponible para OT Proyecto.');
+    }
+    return isOverhaul;
   }
 
   private resolveManualWorkOrderStatus(current: unknown, requested: unknown, isNew = false) {
@@ -30752,6 +30798,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       nextWorkflowStatus,
       nextBlockedByWorkOrderId,
     );
+    const isOverhaul = this.resolveWorkOrderOverhaulState(
+      resolvedMaintenanceKind, header.is_overhaul, workOrder,
+    );
     const emergencyState = isNew
       ? this.resolveWorkOrderEmergencyState(
           header.is_emergency ?? workOrder?.is_emergency ?? false,
@@ -30876,6 +30925,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             'INTERNO',
           ) || 'INTERNO',
         maintenance_kind: resolvedMaintenanceKind,
+        is_overhaul: isOverhaul,
         is_emergency: emergencyState.is_emergency,
         emergency_reason: emergencyState.emergency_reason,
         hora_inicio: emergencyHours.hora_inicio,
@@ -31554,6 +31604,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       proyectoBodegaIds,
     );
     await this.assertProyectoSitesExist(proyectoUbicacionIds, proyectoBodegaIds);
+    const isOverhaul = this.resolveWorkOrderOverhaulState(
+      resolvedMaintenanceKind, dto.is_overhaul,
+    );
     const emergencyState = this.resolveWorkOrderEmergencyState(
       dto.is_emergency ?? false,
       dto.emergency_reason,
@@ -31612,6 +31665,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         priority: dto.priority ?? 5,
         provider_type: dto.provider_type ?? 'INTERNO',
         maintenance_kind: resolvedMaintenanceKind,
+        is_overhaul: isOverhaul,
         is_emergency: emergencyState.is_emergency,
         emergency_reason: emergencyState.emergency_reason,
         hora_inicio: emergencyHours.hora_inicio,
@@ -31920,6 +31974,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.maintenance_kind,
       'CORRECTIVO',
     );
+    const isOverhaul = this.resolveWorkOrderOverhaulState(
+      nextMaintenanceKind, dto.is_overhaul, wo,
+    );
     this.assertCebadoWorkOrderHasRequiredLinks(
       nextMaintenanceKind,
       wo.equipment_id,
@@ -31972,6 +32029,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       equipo_componente_nombre_oficial:
         componentContext.legacyComponentOfficialName,
       is_emergency: emergencyState.is_emergency,
+      is_overhaul: isOverhaul,
       emergency_reason: emergencyState.emergency_reason,
       hora_inicio: emergencyHours.hora_inicio,
       hora_fin: emergencyHours.hora_fin,
@@ -36285,10 +36343,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * El egreso de bodega de una OT es uno solo.
+   * OT normal: un egreso. OT Proyecto (Normal u OVERHAUL): un egreso por día local.
    *
    * La orden puede sacar material en varias tandas, pero bodega firma un unico
-   * documento: si la orden ya tiene un EB abierto se reutiliza y solo se le
+   * documento: si la orden ya tiene un EB del periodo se reutiliza y solo se le
    * agregan las lineas nuevas. El numero de documento y la fecha de apertura no
    * se vuelven a tocar; lo que cambia queda en `updated_by`.
    */
@@ -36311,10 +36369,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return ids.length === 1 ? ids[0] : null;
     })();
 
-    const [existing] = await this.findWorkOrderIssueMovements(
+    const movements = await this.findWorkOrderIssueMovements(
       manager,
       workOrder.id,
     );
+    const issueDate = this.getGuayaquilDateTimeParts(issuedAt).dateKey;
+    const existing = this.issuesDailyWorkOrderMovement(workOrder)
+      ? movements.find((movement) => {
+          const openedAt = new Date(movement.fecha_movimiento);
+          return !Number.isNaN(openedAt.getTime()) &&
+            this.getGuayaquilDateTimeParts(openedAt).dateKey === issueDate;
+        })
+      : movements[0];
 
     if (existing) {
       existing.observacion = this.appendWorkOrderIssueNote(

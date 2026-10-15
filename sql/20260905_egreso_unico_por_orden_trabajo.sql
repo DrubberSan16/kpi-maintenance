@@ -56,6 +56,13 @@ WITH activos AS (
   WHERE tipo_documento = 'EGRESO_BODEGA'
     AND work_order_id IS NOT NULL
     AND COALESCE(is_deleted, false) = false
+    -- La OT Proyecto (Normal u OVERHAUL) conserva un EB por día: no
+    -- consolidar sus documentos diarios.
+    AND NOT EXISTS (
+      SELECT 1 FROM kpi_process.tb_work_order wo
+      WHERE wo.id = mov.work_order_id
+        AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'PROYECTO'
+    )
     AND NOT EXISTS (
       SELECT 1
       FROM kpi_inventory.tb_transferencia_bodega AS tra
