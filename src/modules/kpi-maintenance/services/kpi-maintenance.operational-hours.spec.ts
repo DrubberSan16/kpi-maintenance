@@ -69,6 +69,24 @@ describe('Horas operativas independientes de las OT', () => {
     expect(order.status_workflow).toBe('IN_PROGRESS');
     expect(equipmentRepo.save).toHaveBeenCalledWith(expect.objectContaining({ estado_funcionamiento: 'FUNCIONAMIENTO' }));
   });
+  it('avisa a las pantallas abiertas cuando cambia el funcionamiento o se edita el equipo', async () => {
+    const running = fixture('FUNCIONAMIENTO');
+    running.service.broadcastDataChanged = jest.fn().mockResolvedValue(undefined);
+    await running.service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'PARADO' });
+    expect(running.service.broadcastDataChanged).toHaveBeenCalledWith({ recurso: 'equipo', accion: 'funcionamiento', id });
+
+    const unchanged = fixture();
+    unchanged.service.broadcastDataChanged = jest.fn().mockResolvedValue(undefined);
+    await unchanged.service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'PARADO' });
+    expect(unchanged.service.broadcastDataChanged).not.toHaveBeenCalled();
+
+    const edited = fixture();
+    edited.service.broadcastDataChanged = jest.fn().mockResolvedValue(undefined);
+    edited.service.findEquipoOrFail = jest.fn().mockResolvedValue(edited.equipment);
+    edited.service.resolveEquipmentServiceSchedule = jest.fn().mockReturnValue({});
+    await edited.service.updateEquipo(id, { nombre: 'UG21' });
+    expect(edited.service.broadcastDataChanged).toHaveBeenCalledWith({ recurso: 'equipo', accion: 'updated', id });
+  });
   it('editar datos del equipo conserva las fracciones acumuladas del horómetro', async () => {
     const { service, equipment } = fixture();
     equipment.horometro_actual = 1000.25;

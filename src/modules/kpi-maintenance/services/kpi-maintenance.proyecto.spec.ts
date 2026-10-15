@@ -655,6 +655,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
         syncProgramacionExecutionFromLinkedWorkOrder: jest.fn().mockResolvedValue(undefined),
         syncAlertsForWorkOrder: jest.fn().mockResolvedValue(undefined),
         listWorkOrderIssueDocuments: jest.fn().mockResolvedValue([]),
+        broadcastDataChanged: jest.fn().mockResolvedValue(undefined),
       });
       return { service, machine, workOrder, manager, saved };
     }
@@ -707,6 +708,8 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
         fecha_ultima_lectura: now, estado_funcionamiento_actualizado_en: now, updated_by: 'Usuario Bodega',
       });
       expect(statusNote(manager)).toBe('Ejecución iniciada al imprimir el egreso EB-000001. Equipo en estado Parado.');
+      // Los tableros abiertos dejan de contar las horas de ese equipo.
+      expect(service.broadcastDataChanged).toHaveBeenCalledWith({ recurso: 'equipo', accion: 'funcionamiento', id: machine.id });
 
       jest.advanceTimersByTime(3600000);
       expect(service.operationalHorometer(machine)).toBe(15288);
@@ -735,6 +738,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
       expect(savedEntities(manager)).not.toContain(EquipoFuncionamientoHistorialEntity);
       expect(machine).toEqual(originalEquipment);
       expect(statusNote(manager)).toBe('Ejecución iniciada al imprimir el egreso EB-000001.');
+      expect(service.broadcastDataChanged).not.toHaveBeenCalled();
 
       jest.advanceTimersByTime(3600000);
       expect(service.operationalHorometer(machine)).toBe(15289);

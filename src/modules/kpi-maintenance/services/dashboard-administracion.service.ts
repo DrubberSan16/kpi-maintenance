@@ -399,6 +399,8 @@ export class DashboardAdministracionService {
         e.nombre_real AS equipo_descripcion,
         m.nombre AS marca,
         e.horometro_actual::numeric AS horometro_actual,
+        e.estado_funcionamiento,
+        e.horometro_operativo_desde,
         e.intervalo_mantenimiento_valor::numeric AS frecuencia,
         e.intervalo_mantenimiento_unidad AS frecuencia_unidad,
         e.margen_anticipacion_pct::numeric AS margen_anticipacion_pct,
@@ -417,10 +419,14 @@ export class DashboardAdministracionService {
       [equipoId],
     );
 
+    const ahora = new Date();
     return filas
       .map((row: any) => {
         const frecuencia = Number(row.frecuencia ?? 0);
-        const horometroActual = Number(row.horometro_actual ?? 0);
+        // La columna guarda la lectura del último cambio; mientras el equipo
+        // funciona el contador sigue corriendo, igual que en el Control operativo.
+        const horometroBase = Number(row.horometro_actual ?? 0);
+        const horometroActual = this.horometroOperativo(row, ahora);
         // Sin frecuencia configurada no hay proyeccion posible.
         if (!Number.isFinite(frecuencia) || frecuencia <= 0) {
           return {
@@ -456,8 +462,10 @@ export class DashboardAdministracionService {
         const objetivo = Number((base + frecuencia).toFixed(2));
         const restantes = Math.round(objetivo - horometroActual);
 
-        const anticipacion = (frecuencia * Number(row.margen_anticipacion_pct ?? 10)) / 100;
-        const tolerancia = (frecuencia * Number(row.margen_tolerancia_pct ?? 0)) / 100;
+        // Se clasifica con los mismos umbrales que viajan a la pantalla, que
+        // recalcula el semáforo en vivo: 1500 h al 4,6 % es 69 h, no 68,999...
+        const anticipacion = Number(((frecuencia * Number(row.margen_anticipacion_pct ?? 10)) / 100).toFixed(2));
+        const tolerancia = Number(((frecuencia * Number(row.margen_tolerancia_pct ?? 0)) / 100).toFixed(2));
 
         let semaforo: { nivel: string; etiqueta: string };
         if (restantes < -tolerancia) {
@@ -470,16 +478,20 @@ export class DashboardAdministracionService {
 
         return {
           ...row,
+          horometro_operativo_base: horometroBase,
           horometro_actual: Math.round(horometroActual),
           aplica: true,
           referencia_estimada: !referenciaFiable,
           motivo_referencia_estimada: motivoEstimacion,
           horometro_ultimo_mantenimiento: Math.round(base),
           horometro_proximo_mantenimiento: Math.round(objetivo),
+          // Sin redondear: la pantalla recalcula las restantes con el contador
+          // en vivo y debe partir del mismo objetivo que el semáforo de aquí.
+          horometro_objetivo: objetivo,
           horas_restantes: restantes,
           horas_excedidas: restantes < 0 ? Math.abs(restantes) : 0,
-          umbral_amarillo: Number(anticipacion.toFixed(2)),
-          umbral_rojo: Number(tolerancia.toFixed(2)),
+          umbral_amarillo: anticipacion,
+          umbral_rojo: tolerancia,
           semaforo,
         };
       })
@@ -490,6 +502,23 @@ export class DashboardAdministracionService {
         if (va !== vb) return va - vb;
         return Number(a.horas_restantes ?? 0) - Number(b.horas_restantes ?? 0);
       });
+  }
+
+  /**
+   * Lectura guardada más el tiempo en FUNCIONAMIENTO desde
+   * `horometro_operativo_desde`: la misma cuenta que `operationalHorometer` en
+   * KpiMaintenanceService y que el Control operativo del Dashboard.
+   */
+  private horometroOperativo(
+    row: { horometro_actual?: unknown; estado_funcionamiento?: unknown; horometro_operativo_desde?: unknown },
+    ahora: Date,
+  ) {
+    const base = Number(row.horometro_actual ?? 0);
+    const lectura = Number.isFinite(base) ? base : 0;
+    if (row.estado_funcionamiento !== 'FUNCIONAMIENTO' || !row.horometro_operativo_desde) return lectura;
+    const desde = new Date(row.horometro_operativo_desde as string | Date).getTime();
+    if (Number.isNaN(desde)) return lectura;
+    return Number((lectura + Math.max(0, ahora.getTime() - desde) / 3600000).toFixed(6));
   }
 
   /**
@@ -864,6 +893,29 @@ export class DashboardAdministracionService {
     );
   }
 
+  /**
+   * Solo la proyección (una consulta), para que el tablero abierto resincronice
+   * el horómetro en vivo cada pocos segundos sin recalcular los demás bloques.
+   */
+  async getProyeccionVigente(query: { equipo_id?: string }) {
+    const proyeccion = await this.getProyeccion(this.equipoParam(query.equipo_id));
+    return this.wrap(
+      { proyeccion, ...this.contarMantenimientos(proyeccion) },
+      'Proyección por horómetro generada',
+    );
+  }
+
+  private contarMantenimientos(proyeccion: any[]) {
+    return {
+      mantenimientos_vencidos: proyeccion.filter(
+        (row) => row.semaforo?.nivel === 'ROJO',
+      ).length,
+      mantenimientos_proximos: proyeccion.filter(
+        (row) => row.semaforo?.nivel === 'AMARILLO',
+      ).length,
+    };
+  }
+
   /** Cabecera de indicadores agregados para la parte superior de la pantalla. */
   private buildResumen(input: {
     disponibilidad: any[];
@@ -923,12 +975,7 @@ export class DashboardAdministracionService {
           .reduce((sum, row) => sum + Number(row.costo ?? 0), 0)
           .toFixed(2),
       ),
-      mantenimientos_vencidos: input.proyeccion.filter(
-        (row) => row.semaforo?.nivel === 'ROJO',
-      ).length,
-      mantenimientos_proximos: input.proyeccion.filter(
-        (row) => row.semaforo?.nivel === 'AMARILLO',
-      ).length,
+      ...this.contarMantenimientos(input.proyeccion),
       mttr_medio: promedio(input.confiabilidad, 'mttr_horas'),
       mtbf_medio: promedio(input.confiabilidad, 'mtbf_horas'),
     };

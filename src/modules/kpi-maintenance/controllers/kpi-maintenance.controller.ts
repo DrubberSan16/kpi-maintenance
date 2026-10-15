@@ -1016,6 +1016,23 @@ export class KpiMaintenanceController {
 
   @ApiTags('Dashboard Administracion')
   @ApiOperation({
+    summary:
+      'Solo la proyeccion por horometro, para resincronizar el contador en vivo sin recalcular los demas bloques',
+  })
+  @ApiQuery({ name: 'equipo_id', required: false, type: String })
+  @Get('dashboard-administracion/proyeccion')
+  async getDashboardProyeccion(
+    @Req() req: any,
+    @Query('equipo_id') equipoId?: string,
+  ) {
+    const respuesta = await this.dashboardAdministracion.getProyeccionVigente({
+      equipo_id: equipoId,
+    });
+    return this.service.omitirCostos(respuesta, getRequestActor(req).roleName);
+  }
+
+  @ApiTags('Dashboard Administracion')
+  @ApiOperation({
     summary: 'Resumen liviano del control de cebado y consumo de aceite',
   })
   @ApiQuery({ name: 'desde', required: false, type: String, description: 'YYYY-MM-DD' })

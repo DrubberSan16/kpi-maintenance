@@ -19145,6 +19145,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.triggerAlertRecalculation('horometro-manual');
     }
     await this.syncClosedWorkOrders(closedOrders);
+    void this.broadcastDataChanged({ recurso: 'equipo', accion: 'updated', id: saved.id });
     return this.wrap(saved, 'Equipo actualizado');
   }
   /**
@@ -19271,6 +19272,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ).trim() || null;
 
     const closedOrders: WorkOrderEntity[] = [];
+    let changed = false;
     const saved = await this.dataSource.transaction(async (manager) => {
       const equipoRepo = manager.getRepository(EquipoEntity);
       const historialRepo = manager.getRepository(
@@ -19322,9 +19324,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           changed_by: changedByLabel,
         }),
       );
+      changed = true;
       return (await equipoRepo.findOne({ where: { id, is_deleted: false } })) || savedEquipo;
     });
     await this.syncClosedWorkOrders(closedOrders);
+    // El contador de los tableros abiertos depende de este estado.
+    if (changed) void this.broadcastDataChanged({ recurso: 'equipo', accion: 'funcionamiento', id });
     return this.wrap(saved, 'Estado de funcionamiento actualizado');
   }
 
@@ -35072,7 +35077,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         work_order_id: workOrder.id, from_status: previous, to_status: 'IN_PROGRESS', changed_at: now, changed_by: actorId,
         note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}.${stopped ? ' Equipo en estado Parado.' : ''}`,
       }));
-      return { workOrder, started: true };
+      return { workOrder, started: true, stoppedEquipmentId: stopped && equipment ? equipment.id : null };
     });
     if (result.started) {
       try {
@@ -35081,6 +35086,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       } catch (error) {
         this.logger.warn(`Egreso confirmado para ${result.workOrder.code}; no se pudo actualizar una notificación: ${error instanceof Error ? error.message : 'Error'}`);
       }
+    }
+    if (result.stoppedEquipmentId) {
+      void this.broadcastDataChanged({ recurso: 'equipo', accion: 'funcionamiento', id: result.stoppedEquipmentId });
     }
     return this.listWorkOrderIssueDocuments(workOrderId, sucursalId, actor);
   }
