@@ -260,6 +260,10 @@ type LubricantMetricDefinition = {
   numericAlertMin?: number;
   textAlert?: string[];
   textWarning?: string[];
+  /** Resultado cualitativo: solo admite NEGATIVO o POSITIVO. */
+  qualitative?: boolean;
+  /** Resultado de texto (grado de viscosidad, código ISO 4406): no es un número. */
+  textResult?: boolean;
 };
 
 type LubricantThresholdRule = {
@@ -269,6 +273,11 @@ type LubricantThresholdRule = {
   text?: string | null;
   expression?: string | null;
   offset?: number | null;
+  /** Banda de `OUTSIDE_RANGE`: cumple la regla el resultado que queda fuera. */
+  min?: number | null;
+  max?: number | null;
+  /** El grado SAE J300 deja fuera su límite superior ("≥ 12,5 y < 16,3"). */
+  max_exclusive?: boolean;
 };
 
 type LubricantMetricThreshold = {
@@ -278,6 +287,46 @@ type LubricantMetricThreshold = {
   linea_base_label?: string | null;
   inherited?: boolean;
   inherited_from?: string | null;
+  /**
+   * El criterio viene del informe del laboratorio y manda sobre las reglas por
+   * defecto del parámetro: lo que no cae en su precaución ni en su anormal es
+   * normal, aunque el umbral fijo del sistema diga otra cosa (hollín ≥ 0,75).
+   */
+  authoritative?: boolean;
+};
+
+type LubricantImportEquipmentContext = {
+  equipo: EquipoEntity | null;
+  marcaNombre: string | null;
+  equipoCodigo: string;
+  equipoNombre: string;
+};
+
+type LubricantLabReportSampleField =
+  | 'numero_muestra'
+  | 'fecha_muestra'
+  | 'fecha_ingreso'
+  | 'fecha_ensayo'
+  | 'fecha_informe'
+  | 'horas_equipo'
+  | 'horas_lubricante'
+  | 'relleno_galones'
+  | 'aceite_cambiado'
+  | 'condicion';
+
+/** Dónde está cada dato en una hoja del informe de laboratorio por etiquetas. */
+type LubricantLabReportLayout = {
+  /** Columna "Parámetro", con la etiqueta de cada fila. */
+  labelColumn: number;
+  /** Fila "Parámetro | Muestra 1 | Muestra 2...". */
+  headerRow: number;
+  sampleColumns: number[];
+  sampleRows: Partial<Record<LubricantLabReportSampleField, number>>;
+  parameterRows: Array<{ row: number; key: string }>;
+  /** Fila del título "OBSERVACIONES / RECOMENDACIONES DEL ANALISTA". */
+  observationRow: number | null;
+  /** Columnas "Precaución" y "Anormal" de los criterios de evaluación. */
+  criteria: { warningColumn: number; alertColumn: number } | null;
 };
 
 type AlertCandidate = {
@@ -600,6 +649,76 @@ const LUBRICANT_IMPORT_PARAMETER_ROWS = [
   { row: 66, label: 'P (Fosforo)' },
 ] as const;
 
+/*
+ * Informe de laboratorio por etiquetas (Lubrisa VEN-FOR-006A versión 3). Cada
+ * fila se reconoce por el nombre de su etiqueta: sin tildes ni espacios y sin
+ * lo que sigue a la primera coma o paréntesis, que es la unidad o el método
+ * ("Viscosidad a 100 °C, cSt (ASTM D445) *" queda en VISCOSIDADA100C).
+ */
+const LUBRICANT_LAB_REPORT_SAMPLE_LABELS: Record<
+  string,
+  LubricantLabReportSampleField
+> = {
+  CODIGODEMUESTRA: 'numero_muestra',
+  NUMERACIONDEMUESTRA: 'numero_muestra',
+  FECHADEMUESTREO: 'fecha_muestra',
+  FECHADEINGRESOALLABORATORIO: 'fecha_ingreso',
+  FECHADEINGRESO: 'fecha_ingreso',
+  FECHADEEJECUCIONDELENSAYO: 'fecha_ensayo',
+  FECHADEINFORME: 'fecha_informe',
+  HORASKMDELEQUIPO: 'horas_equipo',
+  EQUIPOHRSKM: 'horas_equipo',
+  HORASKMDELACEITE: 'horas_lubricante',
+  ACEITEHRSKM: 'horas_lubricante',
+  RELLENODEACEITE: 'relleno_galones',
+  ACEITECAMBIADO: 'aceite_cambiado',
+  CONDICIONDELAMUESTRA: 'condicion',
+  CONDICION: 'condicion',
+};
+
+/** Etiqueta del informe por etiquetas -> clave de `LUBRICANT_METRIC_DEFINITIONS`. */
+const LUBRICANT_LAB_REPORT_PARAMETER_LABELS: Record<string, string> = {
+  GRADODEVISCOSIDAD: 'GRADO_VISCOSIDAD',
+  VISCOSIDADA100C: 'VISCOSIDAD_100C',
+  VISCOSIDADA40C: 'VISCOSIDAD_40C',
+  INDICEDEVISCOSIDAD: 'INDICE_VISCOSIDAD',
+  TBN: 'TBN',
+  TAN: 'TAN',
+  INSOLUBLESENPENTANO: 'INSOLUBLES',
+  PUNTODEINFLAMACION: 'PUNTO_INFLAMACION',
+  CONTEODEPARTICULAS: 'CONTEO_PARTICULAS',
+  AGUAPORCREPITACION: 'HUMEDAD',
+  HUMEDAD: 'HUMEDAD',
+  CONTENIDODEAGUA: 'AGUA',
+  DILUCIONPORCOMBUSTIBLE: 'DILUCION_COMBUSTIBLE',
+  COMBUSTIBLE: 'COMBUSTIBLE',
+  OXIDACION: 'OXIDACION',
+  NITRACION: 'NITRACION',
+  SULFATACION: 'SULFATACION',
+  HOLLIN: 'HOLLIN',
+  SI: 'SI',
+  NA: 'NA',
+  V: 'V',
+  VANADIO: 'V',
+  NI: 'NI',
+  FE: 'FE',
+  CR: 'CR',
+  AL: 'AL',
+  CU: 'CU',
+  PB: 'PB',
+  SN: 'SN',
+  ESTANO: 'SN',
+  MO: 'MO',
+  B: 'B',
+  BA: 'BA',
+  TI: 'TI',
+  AG: 'AG',
+  CA: 'CA',
+  MG: 'MG',
+  ZN: 'ZN',
+  P: 'P',
+};
+
 const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
   {
     key: 'VISCOSIDAD_100C',
@@ -653,6 +772,7 @@ const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
     order: 5,
     chartGroup: 'estado',
     textAlert: ['positivo', 'presente'],
+    qualitative: true,
   },
   {
     key: 'GLYCOL',
@@ -671,6 +791,81 @@ const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
     order: 7,
     chartGroup: 'estado',
     textAlert: ['positivo', 'presente'],
+    qualitative: true,
+  },
+  // Ensayos que trae el informe del laboratorio por etiquetas (VEN-FOR-006A v3).
+  {
+    key: 'GRADO_VISCOSIDAD',
+    label: 'Grado de viscosidad',
+    group: 'ESTADO_LUBRICANTE',
+    order: 8,
+    chartGroup: 'estado',
+    textResult: true,
+    textAlert: ['fuera de grado'],
+    textWarning: ['fuera de referencia'],
+  },
+  {
+    key: 'TAN',
+    label: 'T.A.N. mgKOH/gr',
+    group: 'ESTADO_LUBRICANTE',
+    order: 9,
+    unit: 'mgKOH/gr',
+    chartGroup: 'estado',
+    aliases: ['tan', 't.a.n. mgkoh/gr', 'tan mgkoh/gr'],
+  },
+  {
+    key: 'INSOLUBLES',
+    label: 'Insolubles en pentano, % p/p',
+    group: 'ESTADO_LUBRICANTE',
+    order: 10,
+    unit: '% p/p',
+    chartGroup: 'estado',
+    aliases: ['insolubles en pentano'],
+  },
+  {
+    key: 'PUNTO_INFLAMACION',
+    label: 'Punto de inflamación, °C',
+    group: 'ESTADO_LUBRICANTE',
+    order: 11,
+    unit: '°C',
+    chartGroup: 'estado',
+    aliases: ['punto de inflamacion', 'punto de inflamación'],
+  },
+  {
+    key: 'CONTEO_PARTICULAS',
+    label: 'Conteo de partículas (ISO 4406)',
+    group: 'ESTADO_LUBRICANTE',
+    order: 12,
+    chartGroup: 'estado',
+    textResult: true,
+    aliases: ['conteo de particulas', 'conteo de partículas'],
+  },
+  {
+    key: 'AGUA',
+    label: 'Contenido de agua, %',
+    group: 'ESTADO_LUBRICANTE',
+    order: 13,
+    unit: '%',
+    chartGroup: 'estado',
+    aliases: ['contenido de agua'],
+  },
+  {
+    key: 'GLICOL_CUALITATIVO',
+    label: 'Glicol (cualitativo)',
+    group: 'ESTADO_LUBRICANTE',
+    order: 14,
+    chartGroup: 'estado',
+    textAlert: ['positivo', 'presente'],
+    qualitative: true,
+  },
+  {
+    key: 'DILUCION_COMBUSTIBLE',
+    label: 'Dilución por combustible, % peso',
+    group: 'ESTADO_LUBRICANTE',
+    order: 15,
+    unit: '% peso',
+    chartGroup: 'estado',
+    aliases: ['dilucion por combustible', 'dilución por combustible'],
   },
   {
     key: 'OXIDACION',
@@ -10391,10 +10586,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  private isQualitativeLubricantMetric(
+    definition?: LubricantMetricDefinition | null,
+  ) {
+    return Boolean(definition?.qualitative);
+  }
+
   private lubricantMetricUsesTextResult(
     definition?: LubricantMetricDefinition | null,
   ) {
-    return ['HUMEDAD', 'COMBUSTIBLE'].includes(String(definition?.key || ''));
+    return Boolean(definition?.qualitative || definition?.textResult);
   }
 
   private isBlankLubricantThresholdToken(value: unknown) {
@@ -10566,7 +10767,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    return {
+    const rule: LubricantThresholdRule = {
       raw:
         raw ||
         [operator, parsedValue ?? text ?? expression].filter(Boolean).join(' '),
@@ -10576,6 +10777,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       expression,
       offset,
     };
+    if (expression === 'OUTSIDE_RANGE') {
+      const bound = (item: unknown) =>
+        item == null || item === '' || !Number.isFinite(Number(item))
+          ? null
+          : Number(item);
+      rule.min = bound(source.min);
+      rule.max = bound(source.max);
+      rule.max_exclusive = this.coerceBoolean(source.max_exclusive, false);
+    }
+    return rule;
   }
 
   private normalizeLubricantMetricThreshold(
@@ -10615,7 +10826,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    const threshold = {
+    const threshold: LubricantMetricThreshold = {
       baseline:
         baseline != null && Number.isFinite(baseline) ? baseline : null,
       warning,
@@ -10624,6 +10835,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       inherited,
       inherited_from: inheritedFrom,
     };
+    if (this.coerceBoolean(source.authoritative, false)) {
+      threshold.authoritative = true;
+    }
     threshold.linea_base_label =
       threshold.linea_base_label ??
       this.resolveLubricantThresholdLineBaseLabel(threshold);
@@ -10668,6 +10882,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           this.resolveLubricantThresholdLineBaseLabel(threshold),
         inherited: threshold.inherited ?? false,
         inherited_from: threshold.inherited_from ?? null,
+        ...(threshold.authoritative ? { authoritative: true } : {}),
       };
     }
     return output;
@@ -10683,6 +10898,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   private applyLubricantThresholdFallbacks(
     map: Map<string, LubricantMetricThreshold>,
   ) {
+    // El informe por etiquetas trae el criterio de cada parámetro en su fila:
+    // heredar el del vecino aplicaría, por ejemplo, la banda del grado de
+    // viscosidad al glicol.
+    if ([...map.values()].some((threshold) => threshold.authoritative)) {
+      return map;
+    }
+
     const fallbackByGroup = new Map<
       string,
       { key: string; threshold: LubricantMetricThreshold }
@@ -10757,6 +10979,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return this.normalizePositiveNegativeValue(textValue) === rule.text;
     }
     if (currentValue == null || !Number.isFinite(currentValue)) return false;
+
+    if (rule.expression === 'OUTSIDE_RANGE') {
+      const min =
+        rule.min != null && Number.isFinite(rule.min) ? rule.min : null;
+      const max =
+        rule.max != null && Number.isFinite(rule.max) ? rule.max : null;
+      if (min != null && currentValue < min) return true;
+      if (max == null) return false;
+      return rule.max_exclusive ? currentValue >= max : currentValue > max;
+    }
 
     if (rule.expression === 'BASELINE_PERCENT_MINUS_OFFSET') {
       if (baselineValue == null || !Number.isFinite(baselineValue)) return false;
@@ -11040,13 +11272,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (this.lubricantMetricUsesTextResult(definition)) {
       if (!textValue) return explicitLevel ?? 'N/D';
-      if (String(definition?.key || '') === 'HUMEDAD') {
-        const normalized = this.normalizePositiveNegativeValue(textValue);
-        if (normalized === 'POSITIVO') return 'ANORMAL';
-        if (normalized === 'NEGATIVO') return 'NORMAL';
-        return explicitLevel ?? 'N/D';
-      }
-      if (String(definition?.key || '') === 'COMBUSTIBLE') {
+      if (this.isQualitativeLubricantMetric(definition)) {
         const normalized = this.normalizePositiveNegativeValue(textValue);
         if (normalized === 'POSITIVO') return 'ANORMAL';
         if (normalized === 'NEGATIVO') return 'NORMAL';
@@ -11071,6 +11297,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ) {
         return 'PRECAUCION';
       }
+    }
+
+    // El informe del laboratorio trae su propio criterio para el parámetro (o
+    // lo declara informativo): si no cayó en su precaución ni en su anormal, es
+    // normal. Los umbrales fijos y la comparación contra la muestra anterior
+    // marcarían, por ejemplo, un hollín de 0,82 que el laboratorio da por bueno.
+    if (threshold?.authoritative) {
+      return this.hasLubricantDetailValue(detalle)
+        ? 'NORMAL'
+        : (explicitLevel ?? 'N/D');
     }
 
     if (currentValue == null || !Number.isFinite(currentValue)) {
@@ -11244,7 +11480,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const rawText = String(detalle.resultado_texto ?? '').trim();
       let normalizedText = rawText || null;
 
-      if (['HUMEDAD', 'COMBUSTIBLE'].includes(String(definition?.key || ''))) {
+      if (this.isQualitativeLubricantMetric(definition)) {
         const positiveNegativeValue = this.normalizePositiveNegativeValue(rawText);
         if (rawText && !positiveNegativeValue) {
           throw new BadRequestException(
@@ -11975,6 +12211,703 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return [...new Set(starts)];
   }
 
+  /*
+   * Informe de laboratorio por etiquetas (Lubrisa VEN-FOR-006A versión 3,
+   * "plantilla maestra V8"). La columna "Parámetro" nombra cada fila y cada
+   * columna "Muestra N" trae una muestra. Las filas no tienen posición fija: la
+   * hoja de hidráulicos pone la viscosidad a 40 °C antes que la de 100 °C, y el
+   * laboratorio duplica hojas para un segundo compartimento ("EJE-DIFERENCIAL
+   * 2"). Por eso la hoja se reconoce por su contenido y no por su nombre.
+   */
+
+  /** Celda del informe; un error de fórmula (#N/A, #REF!) cuenta como vacía. */
+  private getLubricantLabReportCellValue(
+    sheet: XLSX.WorkSheet,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    const cell =
+      sheet[XLSX.utils.encode_cell({ r: rowNumber - 1, c: columnNumber - 1 })];
+    if (!cell || cell.t === 'e') return null;
+    return this.getWorkbookCellValue(sheet, rowNumber, columnNumber);
+  }
+
+  private getLubricantLabReportCellText(
+    sheet: XLSX.WorkSheet,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    if (
+      this.getLubricantLabReportCellValue(sheet, rowNumber, columnNumber) ==
+      null
+    ) {
+      return '';
+    }
+    return this.getWorkbookCellDisplayText(sheet, rowNumber, columnNumber);
+  }
+
+  private getLubricantLabReportCellNumber(
+    sheet: XLSX.WorkSheet,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    const value = this.getLubricantLabReportCellValue(
+      sheet,
+      rowNumber,
+      columnNumber,
+    );
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!/^[-+]?\d+(?:[.,]\d+)?$/.test(raw)) return null;
+    const parsed = Number(raw.replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private getLubricantLabReportCellDate(
+    sheet: XLSX.WorkSheet,
+    rowNumber: number,
+    columnNumber: number,
+  ) {
+    const value = this.getLubricantLabReportCellValue(
+      sheet,
+      rowNumber,
+      columnNumber,
+    );
+    // SheetJS arma la fecha a medianoche local: se leen sus partes locales y no
+    // `toISOString`, que en un huso al este de UTC devolvería el día anterior.
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) return null;
+      return [
+        String(value.getFullYear()).padStart(4, '0'),
+        String(value.getMonth() + 1).padStart(2, '0'),
+        String(value.getDate()).padStart(2, '0'),
+      ].join('-');
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const decoded = XLSX.SSF.parse_date_code(value);
+      if (!decoded) return null;
+      return [
+        String(decoded.y).padStart(4, '0'),
+        String(decoded.m).padStart(2, '0'),
+        String(decoded.d).padStart(2, '0'),
+      ].join('-');
+    }
+    const raw = String(value ?? '').trim();
+    const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+    const local = raw.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+    if (local) {
+      return `${local[3]}-${local[2].padStart(2, '0')}-${local[1].padStart(2, '0')}`;
+    }
+    return null;
+  }
+
+  /** Nombre de la etiqueta sin tildes, unidad ni método: "T.B.N., mg KOH/g (ASTM D2896)" -> "TBN". */
+  private lubricantLabReportLabelKey(label: unknown) {
+    const [name = ''] = this.normalizeWorkbookToken(label).split(/[,(]/);
+    return name.replace(/[^A-Z0-9]/g, '');
+  }
+
+  private resolveLubricantLabReportMetricKey(labelKey: string, label: string) {
+    if (labelKey === 'GLICOL' || labelKey === 'GLYCOL') {
+      // El glicol por FTIR se informa en Abs/cm; el de este informe es cualitativo.
+      return this.normalizeWorkbookToken(label).includes('ABS')
+        ? 'GLYCOL'
+        : 'GLICOL_CUALITATIVO';
+    }
+    return LUBRICANT_LAB_REPORT_PARAMETER_LABELS[labelKey] ?? null;
+  }
+
+  private detectLubricantLabReportLayout(
+    sheet: XLSX.WorkSheet | undefined,
+  ): LubricantLabReportLayout | null {
+    if (!sheet) return null;
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const lastRow = range.e.r + 1;
+    const lastColumn = range.e.c + 1;
+    const isSampleHeader = (row: number, column: number) =>
+      /^MUESTRA \d+$/.test(
+        this.normalizeWorkbookToken(
+          this.getLubricantLabReportCellText(sheet, row, column),
+        ),
+      );
+
+    let labelColumn = 0;
+    let headerRow = 0;
+    for (let row = 1; row <= Math.min(lastRow, 60) && !headerRow; row += 1) {
+      for (let column = 1; column < Math.min(lastColumn, 10); column += 1) {
+        const label = this.getLubricantLabReportCellText(sheet, row, column);
+        if (
+          this.slugifyWorkbookToken(label) === 'PARAMETRO' &&
+          isSampleHeader(row, column + 1)
+        ) {
+          labelColumn = column;
+          headerRow = row;
+          break;
+        }
+      }
+    }
+    if (!headerRow) return null;
+
+    const sampleColumns: number[] = [];
+    for (
+      let column = labelColumn + 1;
+      column <= lastColumn && isSampleHeader(headerRow, column);
+      column += 1
+    ) {
+      sampleColumns.push(column);
+    }
+
+    const sampleRows: LubricantLabReportLayout['sampleRows'] = {};
+    const parameterRows: LubricantLabReportLayout['parameterRows'] = [];
+    let observationRow: number | null = null;
+    for (
+      let row = headerRow + 1;
+      row <= Math.min(lastRow, headerRow + 150);
+      row += 1
+    ) {
+      const label = this.getLubricantLabReportCellText(sheet, row, labelColumn);
+      if (!label) continue;
+      const labelKey = this.lubricantLabReportLabelKey(label);
+      // Debajo vienen las firmas, las notas y la zona de cálculo oculta, cuyas
+      // etiquetas ("gráfico ← Si (Silicio)") repiten las de los parámetros.
+      if (labelKey.startsWith('OBSERVACIONES')) {
+        observationRow = row;
+        break;
+      }
+      if (
+        ['ELABORADOPOR', 'NOTAS', 'ZONADECALCULO'].some((marker) =>
+          labelKey.startsWith(marker),
+        )
+      ) {
+        break;
+      }
+
+      const sampleField = LUBRICANT_LAB_REPORT_SAMPLE_LABELS[labelKey];
+      if (sampleField) {
+        if (sampleRows[sampleField] == null) sampleRows[sampleField] = row;
+        continue;
+      }
+      const metricKey = this.resolveLubricantLabReportMetricKey(
+        labelKey,
+        label,
+      );
+      if (metricKey && !parameterRows.some((item) => item.key === metricKey)) {
+        parameterRows.push({ row, key: metricKey });
+      }
+    }
+
+    if (
+      !sampleColumns.length ||
+      (sampleRows.numero_muestra == null && sampleRows.fecha_muestra == null) ||
+      parameterRows.length < 3
+    ) {
+      return null;
+    }
+
+    return {
+      labelColumn,
+      headerRow,
+      sampleColumns,
+      sampleRows,
+      parameterRows,
+      observationRow,
+      criteria: this.findLubricantLabReportCriteriaColumns(
+        sheet,
+        sampleColumns[sampleColumns.length - 1],
+        Math.min(...parameterRows.map((item) => item.row)),
+      ),
+    };
+  }
+
+  /**
+   * Columnas "Precaución" y "Anormal" de los criterios de evaluación, a la
+   * derecha de la última muestra. Cada criterio ocupa dos celdas (operador y
+   * límite) en la misma fila del parámetro que evalúa.
+   */
+  private findLubricantLabReportCriteriaColumns(
+    sheet: XLSX.WorkSheet,
+    lastSampleColumn: number,
+    firstParameterRow: number,
+  ) {
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const lastColumn = range.e.c + 1;
+    for (let row = 1; row < firstParameterRow; row += 1) {
+      for (
+        let column = lastSampleColumn + 1;
+        column <= lastColumn;
+        column += 1
+      ) {
+        const token = this.slugifyWorkbookToken(
+          this.getLubricantLabReportCellText(sheet, row, column),
+        );
+        if (token !== 'PRECAUCION') continue;
+        for (
+          let next = column + 1;
+          next <= Math.min(lastColumn, column + 4);
+          next += 1
+        ) {
+          const nextToken = this.slugifyWorkbookToken(
+            this.getLubricantLabReportCellText(sheet, row, next),
+          );
+          if (nextToken === 'ANORMAL') {
+            return { warningColumn: column, alertColumn: next };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Cabecera del informe ("Compartimento:", "Equipo:", "Lubricante:"...): cada
+   * etiqueta termina en dos puntos y su valor es la primera celda con dato a su
+   * derecha, antes de la etiqueta siguiente. La clave es la de
+   * `lubricantLabReportLabelKey` ("Marca del lubricante:" -> MARCADELLUBRICANTE).
+   */
+  private readLubricantLabReportHeader(
+    sheet: XLSX.WorkSheet,
+    headerRow: number,
+  ) {
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1:A1');
+    const lastColumn = range.e.c + 1;
+    const header: Record<string, string> = {};
+    for (let row = 1; row < headerRow; row += 1) {
+      for (let column = 1; column <= lastColumn; column += 1) {
+        const label = this.getLubricantLabReportCellText(sheet, row, column);
+        if (!label.endsWith(':')) continue;
+        const labelKey = this.lubricantLabReportLabelKey(label);
+        if (!labelKey || labelKey in header) continue;
+        for (
+          let next = column + 1;
+          next <= Math.min(lastColumn, column + 8);
+          next += 1
+        ) {
+          const value = this.getLubricantLabReportCellText(sheet, row, next);
+          if (!value) continue;
+          if (!value.endsWith(':')) header[labelKey] = value;
+          break;
+        }
+      }
+    }
+    return header;
+  }
+
+  private resolveLubricantLabReportCompartment(
+    headerValue: string | undefined,
+    sheetName: string,
+  ) {
+    if (String(headerValue ?? '').trim()) {
+      return this.normalizeImportedCompartment(headerValue);
+    }
+    // La hoja lleva la aplicación ("MOTOR OFF ROAD", "HIDRÁULICO-INDUSTRIAL"):
+    // se lleva al compartimento del catálogo cuando la equivalencia es clara.
+    const token = this.normalizeWorkbookToken(sheetName);
+    if (token.startsWith('MOTOR')) return 'MOTOR';
+    if (token.startsWith('HIDRAULICO')) return 'HIDRAULICO';
+    if (token.startsWith('TRANSMISION')) return 'TRANSMISION';
+    return this.normalizeImportedCompartment(sheetName);
+  }
+
+  /** Texto de las observaciones del analista, en el bloque bajo su título. */
+  private readLubricantLabReportObservations(
+    sheet: XLSX.WorkSheet,
+    layout: LubricantLabReportLayout,
+  ) {
+    if (layout.observationRow == null) return null;
+    for (
+      let row = layout.observationRow + 1;
+      row <= layout.observationRow + 5;
+      row += 1
+    ) {
+      const text = this.getLubricantLabReportCellText(
+        sheet,
+        row,
+        layout.labelColumn,
+      );
+      if (!text) continue;
+      const labelKey = this.lubricantLabReportLabelKey(text);
+      if (labelKey.startsWith('ELABORADOPOR') || labelKey.startsWith('NOTAS')) {
+        return null;
+      }
+      return text.replace(/\s+/g, ' ').trim();
+    }
+    return null;
+  }
+
+  /**
+   * Banda del grado o de la ficha técnica: "fuera de grado: ≥ 12,5 y < 16,3",
+   * "fuera de 11,1 – 14,5" o "referencia OEM: 5,50 – 7,50 (precaución)".
+   */
+  private parseLubricantBandRule(text: string): LubricantThresholdRule | null {
+    const raw = text.replace(/\s+/g, ' ').trim();
+    const token = this.normalizeWorkbookToken(raw);
+    if (!token.startsWith('FUERA') && !token.startsWith('REFERENCIA')) {
+      return null;
+    }
+    const bounds = (raw.match(/\d+(?:[.,]\d+)?/g) ?? [])
+      .map((item) => Number(item.replace(',', '.')))
+      .filter((item) => Number.isFinite(item));
+    if (!bounds.length) return null;
+    const [min, max = null] = bounds;
+    return {
+      raw,
+      expression: 'OUTSIDE_RANGE',
+      min,
+      max,
+      max_exclusive: max != null && /<\s*\d/.test(raw),
+    };
+  }
+
+  /**
+   * Criterio de una columna (precaución o anormal): operador y límite
+   * ("≥" y 18), un resultado cualitativo ("POSITIVO") o una banda. Lo que el
+   * sistema no sabe evaluar ("≤ ficha téc.", "+1 código") no se convierte en
+   * regla.
+   */
+  private parseLubricantLabReportCriteriaRule(
+    operatorText: string,
+    thresholdValue: unknown,
+    thresholdText: string,
+  ): LubricantThresholdRule | null {
+    if (
+      this.isBlankLubricantThresholdToken(operatorText) &&
+      this.isBlankLubricantThresholdToken(thresholdText)
+    ) {
+      return null;
+    }
+
+    const qualitative =
+      this.normalizePositiveNegativeValue(operatorText) ??
+      this.normalizePositiveNegativeValue(thresholdText);
+    if (qualitative) return { raw: qualitative, text: qualitative };
+
+    const operator = /^(?:≥|≤|>=|<=|=>|=<|>|<|=)$/.test(
+      operatorText.replace(/\s+/g, ''),
+    )
+      ? this.normalizeLubricantThresholdOperator(operatorText)
+      : null;
+    const value =
+      typeof thresholdValue === 'number'
+        ? thresholdValue
+        : /^[-+]?\d+(?:[.,]\d+)?$/.test(thresholdText)
+          ? Number(thresholdText.replace(',', '.'))
+          : null;
+    if (operator && value != null && Number.isFinite(value)) {
+      return { raw: `${operatorText} ${thresholdText}`, operator, value };
+    }
+
+    return this.parseLubricantBandRule(operatorText);
+  }
+
+  private extractLubricantLabReportThresholds(
+    sheet: XLSX.WorkSheet,
+    layout: LubricantLabReportLayout,
+  ) {
+    const thresholds = new Map<string, LubricantMetricThreshold>();
+    if (!layout.criteria) return thresholds;
+    const { warningColumn, alertColumn } = layout.criteria;
+
+    for (const parameter of layout.parameterRows) {
+      const read = (column: number) => ({
+        operatorText: this.getLubricantLabReportCellText(
+          sheet,
+          parameter.row,
+          column,
+        ),
+        thresholdValue: this.getLubricantLabReportCellValue(
+          sheet,
+          parameter.row,
+          column + 1,
+        ),
+        thresholdText: this.getLubricantLabReportCellText(
+          sheet,
+          parameter.row,
+          column + 1,
+        ),
+      });
+      const warningCells = read(warningColumn);
+      const alertCells = read(alertColumn);
+      let warning = this.parseLubricantLabReportCriteriaRule(
+        warningCells.operatorText,
+        warningCells.thresholdValue,
+        warningCells.thresholdText,
+      );
+      let alert = this.parseLubricantLabReportCriteriaRule(
+        alertCells.operatorText,
+        alertCells.thresholdValue,
+        alertCells.thresholdText,
+      );
+      // Fuera de la referencia OEM de un ATF el laboratorio declara precaución,
+      // aunque el texto ocupe la columna de anormal.
+      if (
+        alert?.expression === 'OUTSIDE_RANGE' &&
+        this.normalizeWorkbookToken(alert.raw).includes('PRECAUCION')
+      ) {
+        warning = warning ?? alert;
+        alert = null;
+      }
+
+      // Aunque no tenga regla, el parámetro queda registrado: así no hereda la
+      // de su vecino de grupo (la viscosidad a 40 °C tomaría la banda de la de
+      // 100 °C) y el laboratorio sigue mandando.
+      const describe = (cells: typeof warningCells) =>
+        [cells.operatorText, cells.thresholdText]
+          .filter(
+            (item) =>
+              !this.isBlankLubricantThresholdToken(item) && !item.endsWith(':'),
+          )
+          .join(' ');
+      thresholds.set(parameter.key, {
+        warning,
+        alert,
+        baseline: null,
+        linea_base_label:
+          warning || alert
+            ? null
+            : describe(warningCells) || describe(alertCells) || 'informativo',
+        authoritative: true,
+      });
+    }
+
+    return thresholds;
+  }
+
+  private readLubricantLabReportSample(
+    sheet: XLSX.WorkSheet,
+    layout: LubricantLabReportLayout,
+    column: number,
+  ) {
+    const text = (field: LubricantLabReportSampleField) => {
+      const row = layout.sampleRows[field];
+      return row == null
+        ? ''
+        : this.getLubricantLabReportCellText(sheet, row, column);
+    };
+    const date = (field: LubricantLabReportSampleField) => {
+      const row = layout.sampleRows[field];
+      return row == null
+        ? null
+        : this.getLubricantLabReportCellDate(sheet, row, column);
+    };
+    const numeric = (field: LubricantLabReportSampleField) => {
+      const row = layout.sampleRows[field];
+      return row == null
+        ? null
+        : this.getLubricantLabReportCellNumber(sheet, row, column);
+    };
+
+    const numeroMuestraRaw = text('numero_muestra');
+    const numeroMuestra = this.isMeaningfulWorkbookSampleId(numeroMuestraRaw)
+      ? numeroMuestraRaw
+      : '';
+    const aceiteCambiadoRaw = text('aceite_cambiado');
+    const aceiteCambiadoToken = this.normalizeWorkbookToken(aceiteCambiadoRaw);
+    const sample = {
+      column,
+      numeroMuestra,
+      fechaMuestra: date('fecha_muestra'),
+      fechaIngreso: date('fecha_ingreso'),
+      fechaEnsayo: date('fecha_ensayo'),
+      fechaInforme: date('fecha_informe'),
+      horasEquipo: numeric('horas_equipo'),
+      horasLubricante: numeric('horas_lubricante'),
+      rellenoGalones: numeric('relleno_galones'),
+      aceiteCambiado: ['SI', 'NO'].includes(aceiteCambiadoToken)
+        ? aceiteCambiadoToken
+        : aceiteCambiadoRaw || null,
+      condicion: this.normalizeLubricantCondition(text('condicion') || 'N/D'),
+    };
+    // Una muestra trae su código (llega con la línea de la macro) o alguna
+    // fecha. Un resultado suelto no basta: la plantilla deja "NEGATIVO" en el
+    // agua por crepitación de la primera columna de cada hoja vacía.
+    return {
+      ...sample,
+      hasData: Boolean(
+        sample.numeroMuestra ||
+        sample.fechaMuestra ||
+        sample.fechaIngreso ||
+        sample.fechaInforme,
+      ),
+    };
+  }
+
+  private async parseLubricantLabReportSheet(
+    sheet: XLSX.WorkSheet,
+    sheetName: string,
+    layout: LubricantLabReportLayout,
+    context: {
+      fileName: string;
+      warnings: string[];
+      workbookEquipment: LubricantImportEquipmentContext;
+      selectedEquipment?: LubricantImportEquipmentContext;
+    },
+  ): Promise<CreateAnalisisLubricanteDto[]> {
+    const samples = layout.sampleColumns
+      .map((column) => this.readLubricantLabReportSample(sheet, layout, column))
+      .filter((sample) => sample.hasData);
+    // El libro trae una hoja por aplicación y casi todas llegan vacías.
+    if (!samples.length) return [];
+
+    const header = this.readLubricantLabReportHeader(sheet, layout.headerRow);
+    const compartimento = this.resolveLubricantLabReportCompartment(
+      header.COMPARTIMENTO,
+      sheetName,
+    );
+    const equipmentContext =
+      context.selectedEquipment ??
+      (header.EQUIPO
+        ? await this.resolveLubricantImportEquipment(header.EQUIPO)
+        : context.workbookEquipment);
+    const cliente =
+      header.NOMBREDELCLIENTE || header.CUENTAPRINCIPAL || 'JUSTICE COMPANY';
+    const lubricante = header.LUBRICANTE || null;
+    const marcaLubricante = header.MARCADELLUBRICANTE || null;
+    const serie = header.SERIE || null;
+    const modelo = equipmentContext.equipo?.modelo || header.MODELO || null;
+    const marcaEquipo = equipmentContext.marcaNombre || header.MARCA || null;
+    const thresholds = this.extractLubricantLabReportThresholds(sheet, layout);
+    const serializedThresholds =
+      this.serializeLubricantThresholdMap(thresholds);
+    // Las observaciones del analista y el diagnóstico son de la última muestra.
+    const observaciones = this.readLubricantLabReportObservations(
+      sheet,
+      layout,
+    );
+    const latestColumn = samples[samples.length - 1].column;
+    const informe = {
+      hoja_origen: sheetName,
+      asesor: header.ASESOR || null,
+      cuenta_principal: header.CUENTAPRINCIPAL || null,
+      numero_solicitud: header.NUMERODESOLICITUD || null,
+      aplicacion: header.APLICACION || null,
+      grado_declarado: header.GRADODEVISCOSIDADDECLARADO || null,
+      norma_grado: header.NORMADEGRADORECONOCIDA || null,
+      tipo_aceite: header.TIPODEACEITE || null,
+    };
+
+    const analyses: CreateAnalisisLubricanteDto[] = [];
+    for (const sample of samples) {
+      const sampleLabel =
+        sample.numeroMuestra ||
+        `de la columna ${XLSX.utils.encode_col(sample.column - 1)}`;
+      if (
+        !sample.fechaMuestra &&
+        !sample.fechaIngreso &&
+        !sample.fechaInforme
+      ) {
+        context.warnings.push(
+          `La muestra ${sampleLabel} de la hoja ${sheetName} no tiene fecha de muestreo, de ingreso ni de informe; no se importó.`,
+        );
+        continue;
+      }
+
+      const detalles: NonNullable<CreateAnalisisLubricanteDto['detalles']> = [];
+      for (const parameter of layout.parameterRows) {
+        const definition = this.getLubricantMetricDefinition(parameter.key);
+        if (!definition) continue;
+        const text = this.getLubricantLabReportCellText(
+          sheet,
+          parameter.row,
+          sample.column,
+        );
+        if (this.isBlankLubricantThresholdToken(text)) continue;
+
+        let resultadoNumerico: number | null = null;
+        let resultadoTexto: string | null = null;
+        if (this.isQualitativeLubricantMetric(definition)) {
+          resultadoTexto = this.normalizePositiveNegativeValue(text);
+          if (!resultadoTexto) {
+            context.warnings.push(
+              `La muestra ${sampleLabel} de la hoja ${sheetName} informa "${text}" en ${definition.label}, que solo admite NEGATIVO o POSITIVO; ese resultado no se importó.`,
+            );
+            continue;
+          }
+        } else if (definition.textResult) {
+          resultadoTexto = text.toUpperCase();
+        } else {
+          resultadoNumerico = this.getLubricantLabReportCellNumber(
+            sheet,
+            parameter.row,
+            sample.column,
+          );
+          // "<1" o "TRAZAS": el laboratorio no dio un número y se guarda el texto.
+          if (resultadoNumerico == null) resultadoTexto = text.toUpperCase();
+        }
+
+        detalles.push({
+          compartimento,
+          numero_muestra: sample.numeroMuestra || undefined,
+          parametro: definition.label,
+          resultado_numerico: resultadoNumerico ?? undefined,
+          resultado_texto: resultadoTexto ?? undefined,
+          unidad: definition.unit ?? undefined,
+          nivel_alerta: this.evaluateLubricantDetailLevel(
+            {
+              parametro: definition.label,
+              resultado_numerico: resultadoNumerico,
+              resultado_texto: resultadoTexto,
+            },
+            null,
+            thresholds.get(definition.key) ?? null,
+          ),
+          orden: definition.order,
+        });
+      }
+
+      if (!detalles.length) {
+        context.warnings.push(
+          `La muestra ${sampleLabel} de la hoja ${sheetName} no tiene resultados; no se importó.`,
+        );
+        continue;
+      }
+
+      const isLatest = sample.column === latestColumn;
+      analyses.push({
+        cliente,
+        equipo_id: equipmentContext.equipo?.id ?? undefined,
+        equipo_codigo: equipmentContext.equipoCodigo || undefined,
+        equipo_nombre: equipmentContext.equipoNombre || undefined,
+        lubricante: lubricante || undefined,
+        marca_lubricante: marcaLubricante || undefined,
+        compartimento_principal: compartimento || undefined,
+        fecha_muestra: sample.fechaMuestra || undefined,
+        fecha_reporte: sample.fechaInforme || undefined,
+        estado_diagnostico: sample.condicion,
+        diagnostico: isLatest && observaciones ? observaciones : undefined,
+        documento_origen: context.fileName,
+        payload_json: {
+          sample_info: {
+            numero_muestra: sample.numeroMuestra || undefined,
+            fecha_ingreso: sample.fechaIngreso,
+            fecha_informe: sample.fechaInforme,
+            horas_equipo: sample.horasEquipo,
+            horas_lubricante: sample.horasLubricante,
+            condicion: sample.condicion,
+            equipo_marca: marcaEquipo,
+            equipo_serie: serie,
+            equipo_modelo: modelo,
+            lubricante,
+            marca_lubricante: marcaLubricante,
+            compartimento,
+            hoja_origen: sheetName,
+          },
+          rangos_generales: serializedThresholds,
+          // Fuera de sample_info para que editar el análisis no lo borre.
+          informe_laboratorio: {
+            ...informe,
+            fecha_ensayo: sample.fechaEnsayo,
+            relleno_galones: sample.rellenoGalones,
+            aceite_cambiado: sample.aceiteCambiado,
+            observaciones_analista: isLatest ? observaciones : null,
+          },
+        },
+        detalles,
+      });
+    }
+
+    return analyses;
+  }
   private parseLubricantWorkbookLegacy(
     buffer: Buffer,
     fileName: string,
@@ -12186,12 +13119,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         cellDates: true,
       });
       const warnings: string[] = [];
-      const validSheets = workbook.SheetNames.filter((sheetName) =>
-        LUBRICANT_IMPORT_SHEETS.some(
-          (item) =>
-            this.normalizeWorkbookToken(item) ===
-            this.normalizeWorkbookToken(sheetName),
-        ),
+      // El informe por etiquetas se reconoce por su contenido; el formato de
+      // carga anterior, por el nombre de la hoja.
+      const labReportLayouts = new Map<string, LubricantLabReportLayout>();
+      for (const sheetName of workbook.SheetNames) {
+        const layout = this.detectLubricantLabReportLayout(
+          workbook.Sheets[sheetName],
+        );
+        if (layout) labReportLayouts.set(sheetName, layout);
+      }
+      const validSheets = workbook.SheetNames.filter(
+        (sheetName) =>
+          labReportLayouts.has(sheetName) ||
+          LUBRICANT_IMPORT_SHEETS.some(
+            (item) =>
+              this.normalizeWorkbookToken(item) ===
+              this.normalizeWorkbookToken(sheetName),
+          ),
       );
 
       if (!validSheets.length) {
@@ -12212,6 +13156,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       for (const sheetName of validSheets) {
         const sheet = workbook.Sheets[sheetName];
         if (!sheet) continue;
+
+        const labReportLayout = labReportLayouts.get(sheetName);
+        if (labReportLayout) {
+          analyses.push(
+            ...(await this.parseLubricantLabReportSheet(
+              sheet,
+              sheetName,
+              labReportLayout,
+              { fileName, warnings, workbookEquipment, selectedEquipment },
+            )),
+          );
+          continue;
+        }
 
         const detectedHeaderRows = this.getLubricantSheetHeaderRows(sheet);
         const headerRows = detectedHeaderRows.length ? detectedHeaderRows : [2];
