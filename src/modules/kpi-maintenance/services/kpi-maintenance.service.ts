@@ -727,7 +727,8 @@ const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
     order: 1,
     unit: 'cSt',
     chartGroup: 'estado',
-    aliases: ['viscosidad a 100c', 'viscosidad a 100 c', 'viscosidad a 100°c', 'viscosidad a 100ºc'],
+    // 'viscosidad a 100c cst' es la etiqueta del formulario ("Viscosidad a 100C, cSt").
+    aliases: ['viscosidad a 100c', 'viscosidad a 100 c', 'viscosidad a 100°c', 'viscosidad a 100ºc', 'viscosidad a 100c cst'],
     lowerWarnMultiplier: 0.9,
     upperWarnMultiplier: 1.1,
     lowerAlertMultiplier: 0.85,
@@ -740,7 +741,8 @@ const LUBRICANT_METRIC_DEFINITIONS: LubricantMetricDefinition[] = [
     order: 2,
     unit: 'cSt',
     chartGroup: 'estado',
-    aliases: ['viscosidad a 40c', 'viscosidad a 40 c', 'viscosidad a 40°c', 'viscosidad a 40ºc'],
+    // 'viscosidad a 40c cst' es la etiqueta del formulario ("Viscosidad a 40C, cSt").
+    aliases: ['viscosidad a 40c', 'viscosidad a 40 c', 'viscosidad a 40°c', 'viscosidad a 40ºc', 'viscosidad a 40c cst'],
     lowerWarnMultiplier: 0.9,
     upperWarnMultiplier: 1.1,
     lowerAlertMultiplier: 0.85,

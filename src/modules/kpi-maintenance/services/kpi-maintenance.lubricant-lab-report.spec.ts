@@ -490,3 +490,46 @@ describe('Carga masiva de análisis de lubricante: informe por etiquetas', () =>
     );
   });
 });
+
+/*
+ * El formulario (front-justice, `lubricantParameterTemplates`) envía como
+ * `parametro` "Viscosidad a 100C, cSt", sin el "º" de la etiqueta del backend.
+ */
+describe('Análisis de lubricante: etiquetas del formulario', () => {
+  it('reconoce las viscosidades con la etiqueta que envía el formulario', () => {
+    const service = createService();
+
+    expect(
+      service.getLubricantMetricDefinition('Viscosidad a 100C, cSt')?.key,
+    ).toBe('VISCOSIDAD_100C');
+    expect(
+      service.getLubricantMetricDefinition('Viscosidad a 40C, cSt')?.key,
+    ).toBe('VISCOSIDAD_40C');
+  });
+
+  it('guarda la viscosidad del formulario con su etiqueta, su unidad y sus reglas', async () => {
+    const service = createService();
+    const [detalle] = await service.prepareAnalisisDetallesForSave({
+      lubricante: '15W40',
+      compartimento: 'MOTOR',
+      detalles: [
+        {
+          compartimento: 'MOTOR',
+          parametro: 'Viscosidad a 100C, cSt',
+          orden: 1,
+          resultado_numerico: 12,
+          resultado_texto: null,
+          linea_base: 14,
+        },
+      ],
+    });
+
+    // 12 es un 14 % menos que la línea base: precaución por el multiplicador
+    // de viscosidad (0,9). Sin definición la caída no se marcaba.
+    expect(detalle).toMatchObject({
+      parametro: 'Viscosidad a 100ºC, cSt',
+      unidad: 'cSt',
+      nivel_alerta: 'PRECAUCION',
+    });
+  });
+});
