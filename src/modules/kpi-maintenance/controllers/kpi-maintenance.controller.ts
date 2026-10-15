@@ -2449,7 +2449,7 @@ export class KpiMaintenanceController {
   }
 
   @ApiTags('Work Orders')
-  @ApiOperation({ summary: 'Confirmar egreso consolidado e iniciar la OT capturando el horómetro sin cambiar el funcionamiento del equipo. Solo Bodega.' })
+  @ApiOperation({ summary: 'Confirmar egreso consolidado e iniciar la OT capturando el horómetro. Detiene el equipo salvo en OT de Cebado o Proyecto. Solo Bodega.' })
   @Post('work-orders/:id/issue-documents/confirm')
   confirmIssueDocuments(@Param('id') id: string, @Req() req: any) {
     return this.service.confirmWorkOrderIssue(id, getRequestActor(req), getSucursalScopeId(req));

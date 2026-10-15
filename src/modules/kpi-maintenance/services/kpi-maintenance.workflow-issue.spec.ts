@@ -37,7 +37,7 @@ describe('Flujo automático de OT y egreso', () => {
     await expect(service.confirmWorkOrderIssue('wo', { ...actor, roleName })).rejects.toThrow(ForbiddenException);
     expect(service.dataSource.transaction).not.toHaveBeenCalled();
   });
-  it('imprimir inicia la OT, captura el contador y conserva el funcionamiento independiente del equipo', async () => {
+  it('imprimir el egreso de un cebado inicia la OT, captura el contador y no detiene el equipo', async () => {
     const { service, wo, equipment, saves } = fixture();
     const now = new Date();
     Object.assign(equipment, { horometro_actual: 1000.25, horometro_operativo_desde: new Date(now.getTime() - 3600000) });

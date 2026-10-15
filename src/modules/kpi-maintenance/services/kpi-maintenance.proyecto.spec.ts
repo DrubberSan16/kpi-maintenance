@@ -5,6 +5,7 @@ import {
   WorkOrderProyectoPersonalEntity,
   WorkOrderProyectoUbicacionEntity,
   WorkOrderEntity,
+  WorkOrderStatusHistoryEntity,
   EquipoEntity,
   EquipoFuncionamientoHistorialEntity,
 } from '../entities/kpi-maintenance.entity';
@@ -631,11 +632,17 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
         valor_json: { horometro_actual: null, horometro_anterior: 15200 },
         started_at: null, is_deleted: false, ...overrides,
       };
+      // Copia de cada guardado: lo que llegó a la base, no el objeto que luego
+      // sigue cambiando en memoria.
+      const saved: Array<{ entity: unknown; value: any }> = [];
       const manager = {
         findOne: jest.fn(async () => workOrder),
         find: jest.fn(async () => [{ id: 'entrega-1' }]),
         count: jest.fn(async () => 1),
-        save: jest.fn(async (_entity: unknown, value: unknown) => value),
+        save: jest.fn(async (entity: unknown, value: unknown) => {
+          saved.push({ entity, value: structuredClone(value) });
+          return value;
+        }),
         create: jest.fn((_entity: unknown, value: unknown) => value),
       };
       const service = createService({
@@ -649,7 +656,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
         syncAlertsForWorkOrder: jest.fn().mockResolvedValue(undefined),
         listWorkOrderIssueDocuments: jest.fn().mockResolvedValue([]),
       });
-      return { service, machine, workOrder, manager };
+      return { service, machine, workOrder, manager, saved };
     }
 
     it('crear y editar una OT planificada conserva el horómetro sin captura hasta iniciar', async () => {
@@ -674,24 +681,107 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
       expect(service.operationalHorometer(machine)).toBe(15289);
     });
 
-    it('EN PROCESO captura una vez y el reloj automático del equipo continúa', async () => {
-      const { service, machine, workOrder, manager } = executionFixture();
-      const originalEquipment = { ...machine };
+    const savedEntities = (manager: { save: jest.Mock }) =>
+      manager.save.mock.calls.map(([entity]) => entity);
+    const statusNote = (manager: { save: jest.Mock }) =>
+      manager.save.mock.calls.find(([entity]) => entity === WorkOrderStatusHistoryEntity)?.[1].note;
+
+    it('EN PROCESO captura una vez, detiene el equipo y congela su contador', async () => {
+      const { service, machine, workOrder, manager, saved } = executionFixture();
       await service.confirmWorkOrderIssue(workOrder.id, actor);
       expect(workOrder.status_workflow).toBe('IN_PROGRESS');
       expect(workOrder.valor_json.horometro_actual).toBe(15288);
       expect(workOrder.valor_json.horometro_inicio_ejecucion).toBe(15288);
-      expect(manager.save).toHaveBeenCalledWith(WorkOrderEntity, expect.objectContaining({ status_workflow: 'IN_PROGRESS' }));
-      expect(manager.save.mock.calls.some(([entity]) => entity === EquipoEntity || entity === EquipoFuncionamientoHistorialEntity)).toBe(false);
-      expect(machine).toEqual(originalEquipment);
+      expect(manager.save).toHaveBeenCalledWith(EquipoFuncionamientoHistorialEntity, expect.objectContaining({
+        equipo_id: machine.id, estado_anterior: 'FUNCIONAMIENTO', estado_nuevo: 'PARADO',
+        estado_anterior_desde: new Date('2026-10-10T12:00:00.000Z'), duracion_estado_anterior_segundos: 7200,
+        changed_at: now, changed_by_id: null, changed_by: 'Usuario Bodega',
+      }));
+      // El equipo se guarda ya detenido y antes que la OT, para que la foto del
+      // disparador lea el contador congelado.
+      const order = saved.map((row) => row.entity);
+      expect(order.indexOf(EquipoEntity)).toBeGreaterThan(-1);
+      expect(order.indexOf(EquipoEntity)).toBeLessThan(order.indexOf(WorkOrderEntity));
+      expect(saved.find((row) => row.entity === EquipoEntity)?.value).toMatchObject({
+        estado_funcionamiento: 'PARADO', horometro_actual: 15288, horometro_operativo_desde: null,
+        fecha_ultima_lectura: now, estado_funcionamiento_actualizado_en: now, updated_by: 'Usuario Bodega',
+      });
+      expect(statusNote(manager)).toBe('Ejecución iniciada al imprimir el egreso EB-000001. Equipo en estado Parado.');
 
       jest.advanceTimersByTime(3600000);
-      expect(service.operationalHorometer(machine)).toBe(15289);
-      expect(workOrder.valor_json.horometro_actual).toBe(15288);
+      expect(service.operationalHorometer(machine)).toBe(15288);
       const callsBeforeReprint = manager.save.mock.calls.length;
       await service.confirmWorkOrderIssue(workOrder.id, actor);
       expect(manager.save.mock.calls).toHaveLength(callsBeforeReprint);
       expect(workOrder.valor_json.horometro_actual).toBe(15288);
+    });
+
+    it.each(['CORRECTIVO', 'PREVENTIVO', 'MPG', 'PREDICTIVO', 'INSPECCION', 'SSA'])(
+      'una OT %s detiene el equipo al iniciar',
+      async (maintenanceKind) => {
+        const { service, machine, workOrder } = executionFixture({ maintenance_kind: maintenanceKind });
+        await service.confirmWorkOrderIssue(workOrder.id, actor);
+        expect(machine.estado_funcionamiento).toBe('PARADO');
+      },
+    );
+
+    it('una OT de cebado inicia con el equipo en marcha y su contador sigue corriendo', async () => {
+      const { service, machine, workOrder, manager } = executionFixture({ maintenance_kind: 'CEBADO' });
+      const originalEquipment = { ...machine };
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(workOrder.valor_json.horometro_actual).toBe(15288);
+      expect(savedEntities(manager)).not.toContain(EquipoEntity);
+      expect(savedEntities(manager)).not.toContain(EquipoFuncionamientoHistorialEntity);
+      expect(machine).toEqual(originalEquipment);
+      expect(statusNote(manager)).toBe('Ejecución iniciada al imprimir el egreso EB-000001.');
+
+      jest.advanceTimersByTime(3600000);
+      expect(service.operationalHorometer(machine)).toBe(15289);
+    });
+
+    it('un equipo que ya estaba parado no repite la parada en su historial', async () => {
+      const { service, machine, workOrder, manager } = executionFixture();
+      Object.assign(machine, { estado_funcionamiento: 'PARADO', horometro_operativo_desde: null });
+      const originalEquipment = { ...machine };
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(workOrder.valor_json.horometro_actual).toBe(15286);
+      expect(savedEntities(manager)).not.toContain(EquipoEntity);
+      expect(savedEntities(manager)).not.toContain(EquipoFuncionamientoHistorialEntity);
+      expect(machine).toEqual(originalEquipment);
+      expect(statusNote(manager)).toBe('Ejecución iniciada al imprimir el egreso EB-000001.');
+    });
+
+    it('sin fecha del último cambio de estado, el historial no inventa el tramo anterior', async () => {
+      const { service, machine, workOrder, manager } = executionFixture();
+      machine.estado_funcionamiento_actualizado_en = null as any;
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(machine.estado_funcionamiento).toBe('PARADO');
+      expect(manager.save).toHaveBeenCalledWith(EquipoFuncionamientoHistorialEntity, expect.objectContaining({
+        estado_anterior_desde: null, duracion_estado_anterior_segundos: null,
+      }));
+    });
+
+    it('una OT sin equipo inicia sin detener nada', async () => {
+      const { service, workOrder, manager } = executionFixture({ equipment_id: null });
+      service.lockWorkOrderEquipmentForIssue.mockResolvedValue(null);
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(savedEntities(manager)).not.toContain(EquipoEntity);
+      expect(savedEntities(manager)).not.toContain(EquipoFuncionamientoHistorialEntity);
+      expect(statusNote(manager)).toBe('Ejecución iniciada al imprimir el egreso EB-000001.');
+    });
+
+    it('registra quién detuvo el equipo solo con un id de usuario válido', async () => {
+      const userId = '22222222-2222-4222-8222-222222222222';
+      const withUuid = executionFixture();
+      await withUuid.service.confirmWorkOrderIssue(withUuid.workOrder.id, { ...actor, userId });
+      expect(withUuid.manager.save).toHaveBeenCalledWith(EquipoFuncionamientoHistorialEntity, expect.objectContaining({ changed_by_id: userId }));
+
+      const withoutUuid = executionFixture();
+      await withoutUuid.service.confirmWorkOrderIssue(withoutUuid.workOrder.id, { ...actor, userId: 'bodega' });
+      expect(withoutUuid.manager.save).toHaveBeenCalledWith(EquipoFuncionamientoHistorialEntity, expect.objectContaining({ changed_by_id: null }));
     });
 
     it('editar una OT iniciada ignora lecturas del cliente y conserva su captura y fecha', async () => {
@@ -709,7 +799,7 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
       expect(woRepo.findOne).not.toHaveBeenCalled();
     });
 
-    it('reanudar desde revisión conserva el inicio original sin recapturar ni detener equipo', async () => {
+    it('reanudar desde revisión conserva el inicio original sin recapturar y vuelve a detener el equipo', async () => {
       const start = new Date('2026-10-10T13:00:00.000Z');
       const { service, machine, workOrder, manager } = executionFixture({
         status_workflow: 'REVIEW', started_at: start,
@@ -720,17 +810,34 @@ describe('KpiMaintenanceService OT de Proyecto', () => {
       expect(workOrder.started_at).toEqual(start);
       expect(workOrder.valor_json.horometro_actual).toBe(15287);
       expect(workOrder.valor_json.horometro_capturado_en).toBe(start.toISOString());
-      expect(machine.estado_funcionamiento).toBe('FUNCIONAMIENTO');
-      expect(manager.save.mock.calls.some(([entity]) => entity === EquipoEntity)).toBe(false);
+      // Lo encendieron durante la revisión: al reanudar se detiene otra vez.
+      expect(machine).toMatchObject({ estado_funcionamiento: 'PARADO', horometro_actual: 15288 });
+      expect(savedEntities(manager)).toContain(EquipoFuncionamientoHistorialEntity);
+      expect(statusNote(manager)).toBe('Ejecución reanudada al imprimir el egreso EB-000001. Equipo en estado Parado.');
     });
 
-    it('una OT de proyecto puede iniciar sin capturar ni activar un horómetro', async () => {
-      const { service, workOrder } = executionFixture({ maintenance_kind: 'PROYECTO',
+    it('reanudar un cebado desde revisión no detiene el equipo', async () => {
+      const start = new Date('2026-10-10T13:00:00.000Z');
+      const { service, machine, workOrder, manager } = executionFixture({
+        maintenance_kind: 'CEBADO', status_workflow: 'REVIEW', started_at: start,
+        valor_json: { horometro_actual: 15287, horometro_inicio_ejecucion: 15287, horometro_capturado_en: start.toISOString() },
+      });
+      await service.confirmWorkOrderIssue(workOrder.id, actor);
+      expect(workOrder.status_workflow).toBe('IN_PROGRESS');
+      expect(machine.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+      expect(savedEntities(manager)).not.toContain(EquipoEntity);
+    });
+
+    it('una OT de proyecto puede iniciar sin capturar, activar ni detener un horómetro', async () => {
+      const { service, machine, workOrder, manager } = executionFixture({ maintenance_kind: 'PROYECTO',
         valor_json: { horometro_actual: null, horometro_anterior: null } });
       await service.confirmWorkOrderIssue(workOrder.id, actor);
       expect(workOrder.status_workflow).toBe('IN_PROGRESS');
       expect(workOrder.valor_json.horometro_actual).toBeNull();
       expect(workOrder.valor_json.horometro_inicio_ejecucion ?? null).toBeNull();
+      expect(machine.estado_funcionamiento).toBe('FUNCIONAMIENTO');
+      expect(savedEntities(manager)).not.toContain(EquipoEntity);
+      expect(savedEntities(manager)).not.toContain(EquipoFuncionamientoHistorialEntity);
     });
 
     it('reprogramar una OT iniciada conserva la captura original', async () => {

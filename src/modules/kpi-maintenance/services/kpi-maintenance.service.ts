@@ -34974,6 +34974,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return equipment;
   }
 
+  /**
+   * El cebado se hace con el equipo en marcha y una OT de Proyecto no se
+   * ejecuta sobre una máquina: solo los demás tipos detienen el equipo al
+   * iniciar o reanudar la ejecución.
+   */
+  private workOrderStopsEquipment(maintenanceKind: unknown) {
+    return !['CEBADO', 'PROYECTO'].includes(this.normalizeMaintenanceKind(maintenanceKind));
+  }
+
+  /** Deja el equipo bloqueado en PARADO con su contador congelado; `false` si ya lo estaba. */
+  private async stopEquipmentForWorkOrder(manager: EntityManager, equipment: EquipoEntity, now: Date, actorId: string | null, actorName: string) {
+    if (equipment.estado_funcionamiento === 'PARADO') return false;
+    const since = equipment.estado_funcionamiento_actualizado_en ? new Date(equipment.estado_funcionamiento_actualizado_en) : null;
+    await manager.save(EquipoFuncionamientoHistorialEntity, manager.create(EquipoFuncionamientoHistorialEntity, {
+      id: randomUUID(),
+      equipo_id: equipment.id, estado_anterior: equipment.estado_funcionamiento, estado_nuevo: 'PARADO',
+      estado_anterior_desde: since, duracion_estado_anterior_segundos: since ? Math.max(0, Math.floor((now.getTime() - since.getTime()) / 1000)) : null,
+      changed_at: now, changed_by_id: this.isUuidLike(actorId) ? actorId : null, changed_by: actorName,
+    }));
+    // Como la parada desde el Dashboard, congelar el contador cuenta como lectura.
+    if (equipment.horometro_operativo_desde) {
+      equipment.horometro_actual = this.operationalHorometer(equipment, now);
+      equipment.fecha_ultima_lectura = now;
+    }
+    equipment.horometro_operativo_desde = null;
+    equipment.estado_funcionamiento = 'PARADO';
+    equipment.estado_funcionamiento_actualizado_en = now;
+    equipment.updated_by = actorName;
+    await manager.save(EquipoEntity, equipment);
+    return true;
+  }
+
   async confirmWorkOrderIssue(workOrderId: string, actor?: RequestActorContext | null, sucursalId?: string | null) {
     this.assertCanRegisterMaterialIssue(actor);
     const result = await this.dataSource.transaction(async manager => {
@@ -35030,11 +35062,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         issue_document_ids: movements.map(row => row.id), issue_document_numbers: movements.map(row => row.numero_documento),
       } };
       workOrder.updated_by = actor?.username || actorName;
+      // El equipo se guarda antes que la OT: el disparador que fotografía el
+      // horómetro al iniciar lee así el contador ya congelado.
+      const stopped = equipment && this.workOrderStopsEquipment(workOrder.maintenance_kind)
+        ? await this.stopEquipmentForWorkOrder(manager, equipment, now, actorId, actorName) : false;
       await manager.save(WorkOrderEntity, workOrder);
       await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
         id: randomUUID(),
         work_order_id: workOrder.id, from_status: previous, to_status: 'IN_PROGRESS', changed_at: now, changed_by: actorId,
-        note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}.`,
+        note: `Ejecución ${previous === 'REVIEW' ? 'reanudada' : 'iniciada'} al imprimir el egreso ${movements.map(row => row.numero_documento).join(', ')}.${stopped ? ' Equipo en estado Parado.' : ''}`,
       }));
       return { workOrder, started: true };
     });
