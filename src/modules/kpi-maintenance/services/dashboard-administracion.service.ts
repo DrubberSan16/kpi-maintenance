@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import {
+  SERVICIOS_MPG_SQL,
+  fechaProximoMantenimiento,
+  resolverReferenciaMantenimiento,
+} from './horometro-proyeccion';
 
 /**
  * Dashboard Administración: KPI de mantenimiento.
@@ -33,6 +38,14 @@ function normalizeHorometro(value: unknown): number | null {
   const num = Number(value);
   return Number.isFinite(num) ? Math.round(num) : null;
 }
+
+/** Cómo se lee la unidad guardada de una frecuencia por calendario. */
+const UNIDADES_CALENDARIO: Record<string, string> = {
+  DIAS: 'días',
+  SEMANAS: 'semanas',
+  MESES: 'meses',
+  ANIOS: 'años',
+};
 
 @Injectable()
 export class DashboardAdministracionService {
@@ -367,30 +380,65 @@ export class DashboardAdministracionService {
   /**
    * 5, 6 y 7. Frecuencia por horómetro, semáforo anticipado y proyección.
    *
-   * El horómetro del último mantenimiento se toma de la última OT preventiva o
-   * de cebado cerrada del equipo. Si esa referencia no sirve — no hay OT, quedó
-   * en cero o es mayor al horómetro actual — se cae al horómetro actual menos
-   * la frecuencia y la fila viaja con `referencia_estimada`, para no dejar el
-   * equipo fuera de la proyección sin que nadie lo note.
+   * El último mantenimiento es el último servicio MPG por horas del equipo
+   * (`resolverReferenciaMantenimiento`, la misma regla de las alertas). El
+   * objetivo es ese horómetro más la frecuencia: con cuánto horómetro debe
+   * hacerse, o debió hacerse, el siguiente. Las restantes son objetivo menos
+   * actual y quedan negativas cuando el equipo ya lo pasó.
+   *
+   * Cuando la base es un supuesto, la fila viaja con `referencia_estimada` y el
+   * motivo, para no dejar el equipo fuera de la proyección sin que nadie lo note.
+   *
+   * La fecha del próximo mantenimiento convierte las restantes en días al ritmo
+   * de operación del equipo: horas en FUNCIONAMIENTO de los últimos 30 días según
+   * su historial (la misma línea de tiempo que Disponibilidad), llevadas a horas
+   * por día.
    *
    * Los umbrales salen de los márgenes configurables de cada unidad, de modo
-   * que MTU 500 h, Cummins 350 h y Caterpillar 250 h se resuelven solas.
+   * que MTU 500 h, Cummins 350 h y Caterpillar 250 h se resuelven solas. Una
+   * frecuencia por calendario (días, semanas, años) no se proyecta por horómetro.
    */
   private async getProyeccion(equipoId: string | null) {
+    const ahora = new Date();
+    // Se pasan como Date, igual que se guardan los timestamp del historial, para
+    // que la ventana y los tramos se lean en la misma zona horaria.
+    const ventanaDesde = new Date(ahora.getTime() - 30 * 24 * 3600 * 1000);
     const filas = await this.dataSource.query(
       `
-      WITH ultimo_mant AS (
-        SELECT DISTINCT ON (wo.equipment_id)
-          wo.equipment_id,
-          wo.id AS work_order_id,
-          wo.code AS work_order_code,
-          COALESCE(wo.hora_fin, wo.closed_at)::date AS fecha,
-          NULLIF((wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro
-        FROM kpi_process.tb_work_order wo
-        WHERE COALESCE(wo.is_deleted, false) = false
-          AND UPPER(COALESCE(wo.status_workflow, '')) IN ('CLOSED', 'CERRADA', 'CERRADO')
-          AND UPPER(COALESCE(wo.maintenance_kind, '')) IN ('PREVENTIVO', 'CEBADO')
-        ORDER BY wo.equipment_id, COALESCE(wo.hora_fin, wo.closed_at) DESC
+      WITH tramos AS (
+        SELECT
+          h.equipo_id,
+          h.estado_anterior AS estado,
+          GREATEST(COALESCE(h.estado_anterior_desde, $2::timestamp), $2::timestamp) AS inicio,
+          LEAST(h.changed_at, $3::timestamp) AS fin
+        FROM kpi_maintenance.tb_equipo_funcionamiento_historial h
+        WHERE h.estado_anterior IS NOT NULL
+          AND h.changed_at > $2::timestamp
+          AND COALESCE(h.estado_anterior_desde, h.changed_at) < $3::timestamp
+      ),
+      ultimo_cambio AS (
+        SELECT DISTINCT ON (equipo_id) equipo_id, estado_nuevo, changed_at
+        FROM kpi_maintenance.tb_equipo_funcionamiento_historial
+        WHERE changed_at <= $3::timestamp
+        ORDER BY equipo_id, changed_at DESC
+      ),
+      tramo_abierto AS (
+        SELECT
+          u.equipo_id,
+          u.estado_nuevo AS estado,
+          GREATEST(u.changed_at, $2::timestamp) AS inicio,
+          $3::timestamp AS fin
+        FROM ultimo_cambio u
+        WHERE u.changed_at < $3::timestamp
+      ),
+      ritmo AS (
+        SELECT
+          equipo_id,
+          SUM(CASE WHEN estado = 'FUNCIONAMIENTO' THEN EXTRACT(EPOCH FROM (fin - inicio)) ELSE 0 END) AS seg_funcionando,
+          SUM(EXTRACT(EPOCH FROM (fin - inicio))) AS seg_cubiertos
+        FROM (SELECT * FROM tramos UNION ALL SELECT * FROM tramo_abierto) t
+        WHERE fin > inicio
+        GROUP BY equipo_id
       )
       SELECT
         e.id AS equipo_id,
@@ -405,24 +453,24 @@ export class DashboardAdministracionService {
         e.intervalo_mantenimiento_unidad AS frecuencia_unidad,
         e.margen_anticipacion_pct::numeric AS margen_anticipacion_pct,
         e.margen_tolerancia_pct::numeric AS margen_tolerancia_pct,
-        u.horometro AS horometro_ultimo_mantenimiento,
-        u.fecha AS fecha_ultimo_mantenimiento,
-        u.work_order_code AS ultima_ot
+        ROUND((r.seg_funcionando * 24.0 / NULLIF(r.seg_cubiertos, 0))::numeric, 2) AS ritmo_horas_dia,
+        ${SERVICIOS_MPG_SQL} AS servicios_mpg
       FROM kpi_maintenance.tb_equipo e
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
-      LEFT JOIN ultimo_mant u ON u.equipment_id = e.id
+      LEFT JOIN ritmo r ON r.equipo_id = e.id
       WHERE COALESCE(e.is_deleted, false) = false
         AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
         AND ($1::uuid IS NULL OR e.id = $1::uuid)
       ORDER BY e.codigo
       `,
-      [equipoId],
+      [equipoId, ventanaDesde, ahora],
     );
 
-    const ahora = new Date();
     return filas
       .map((row: any) => {
+        const { servicios_mpg: servicios, ...datos } = row;
         const frecuencia = Number(row.frecuencia ?? 0);
+        const unidad = String(row.frecuencia_unidad ?? '').trim().toUpperCase();
         // La columna guarda la lectura del último cambio; mientras el equipo
         // funciona el contador sigue corriendo, igual que en el Control operativo.
         const horometroBase = Number(row.horometro_actual ?? 0);
@@ -430,37 +478,27 @@ export class DashboardAdministracionService {
         // Sin frecuencia configurada no hay proyeccion posible.
         if (!Number.isFinite(frecuencia) || frecuencia <= 0) {
           return {
-            ...row,
+            ...datos,
             aplica: false,
             motivo_sin_proyeccion: 'Sin frecuencia configurada',
             semaforo: null,
           };
         }
-        // Hay equipos cuya ultima OT quedo registrada con horometro 0 (o con
-        // uno mayor al actual): proyectar sobre eso da cifras absurdas. Pero
-        // dejarlos fuera de la tabla es peor -- fue lo que hizo desaparecer a
-        // UG24 y UG25 sin que nadie lo notara -- asi que se proyecta desde el
-        // horometro actual menos la frecuencia y la fila viaja marcada como
-        // estimada, para que quien la lea sepa que la base es un supuesto y no
-        // un dato.
-        const referencia = Number(row.horometro_ultimo_mantenimiento ?? 0);
-        const referenciaFiable =
-          row.horometro_ultimo_mantenimiento != null &&
-          referencia > 0 &&
-          referencia <= horometroActual;
+        // La frecuencia en días la vigila el aviso de servicios por calendario.
+        if (unidad && !unidad.startsWith('HORA')) {
+          return {
+            ...datos,
+            aplica: false,
+            motivo_sin_proyeccion: `Frecuencia por calendario (${frecuencia} ${UNIDADES_CALENDARIO[unidad] ?? unidad.toLowerCase()})`,
+            semaforo: null,
+          };
+        }
 
-        const base = referenciaFiable
-          ? referencia
-          : Math.max(horometroActual - frecuencia, 0);
-        const motivoEstimacion = referenciaFiable
-          ? null
-          : row.horometro_ultimo_mantenimiento == null
-            ? 'Sin mantenimiento cerrado registrado'
-            : referencia <= 0
-              ? `La última OT (${row.ultima_ot ?? 'sin código'}) quedó con horómetro en cero`
-              : `La última OT (${row.ultima_ot ?? 'sin código'}) tiene un horómetro mayor al actual`;
+        const referencia = resolverReferenciaMantenimiento(servicios, horometroActual, frecuencia);
+        const base = referencia.base;
         const objetivo = Number((base + frecuencia).toFixed(2));
         const restantes = Math.round(objetivo - horometroActual);
+        const ritmo = row.ritmo_horas_dia == null ? null : Number(row.ritmo_horas_dia);
 
         // Se clasifica con los mismos umbrales que viajan a la pantalla, que
         // recalcula el semáforo en vivo: 1500 h al 4,6 % es 69 h, no 68,999...
@@ -477,19 +515,26 @@ export class DashboardAdministracionService {
         }
 
         return {
-          ...row,
+          ...datos,
           horometro_operativo_base: horometroBase,
           horometro_actual: Math.round(horometroActual),
           aplica: true,
-          referencia_estimada: !referenciaFiable,
-          motivo_referencia_estimada: motivoEstimacion,
+          referencia_estimada: !referencia.fiable,
+          motivo_referencia_estimada: referencia.motivo,
           horometro_ultimo_mantenimiento: Math.round(base),
+          fecha_ultimo_mantenimiento: referencia.servicio?.cerrada_en
+            ? String(referencia.servicio.cerrada_en).slice(0, 10)
+            : null,
+          ultima_ot: referencia.servicio?.work_order_code ?? null,
+          ultimo_plan: referencia.servicio?.plan_nombre ?? null,
           horometro_proximo_mantenimiento: Math.round(objetivo),
           // Sin redondear: la pantalla recalcula las restantes con el contador
           // en vivo y debe partir del mismo objetivo que el semáforo de aquí.
           horometro_objetivo: objetivo,
           horas_restantes: restantes,
           horas_excedidas: restantes < 0 ? Math.abs(restantes) : 0,
+          ritmo_horas_dia: ritmo,
+          fecha_proximo_mantenimiento: fechaProximoMantenimiento(restantes, ritmo, ahora),
           umbral_amarillo: anticipacion,
           umbral_rojo: tolerancia,
           semaforo,

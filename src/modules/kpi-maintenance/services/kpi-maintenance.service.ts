@@ -195,6 +195,10 @@ import {
   type TaskResponsible,
   type UserLabelResolver,
 } from './work-order-responsables.util';
+import {
+  SERVICIOS_MPG_SQL,
+  resolverReferenciaMantenimiento,
+} from './horometro-proyeccion';
 
 type AlertLevel = 'INFO' | 'WARNING' | 'CRITICAL';
 type AlertCategory =
@@ -16222,24 +16226,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    * mantenimiento el objetivo avanza, la alerta anterior queda obsoleta y se
    * cierra sola en la siguiente pasada del recalculo.
    *
-   * Es la misma regla que presenta el Dashboard Administracion; si una cambia,
-   * la otra tiene que cambiar con ella.
+   * Es la misma regla que presenta el Dashboard Administracion
+   * (`resolverReferenciaMantenimiento`: solo los servicios MPG por horas); si
+   * una cambia, la otra tiene que cambiar con ella.
    */
   private async buildHorometroAlertCandidates(): Promise<AlertCandidate[]> {
     const filas = await this.dataSource.query(
       `
-      WITH ultimo_mant AS (
-        SELECT DISTINCT ON (wo.equipment_id)
-          wo.equipment_id,
-          wo.code AS work_order_code,
-          COALESCE(wo.hora_fin, wo.closed_at)::date AS fecha,
-          NULLIF((wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro
-        FROM kpi_process.tb_work_order wo
-        WHERE COALESCE(wo.is_deleted, false) = false
-          AND UPPER(COALESCE(wo.status_workflow, '')) IN ('CLOSED', 'CERRADA', 'CERRADO')
-          AND UPPER(COALESCE(wo.maintenance_kind, '')) IN ('PREVENTIVO', 'CEBADO')
-        ORDER BY wo.equipment_id, COALESCE(wo.hora_fin, wo.closed_at) DESC
-      )
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
@@ -16247,17 +16240,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         e.nombre_real AS equipo_descripcion,
         m.nombre AS marca,
         e.horometro_actual::numeric AS horometro_actual,
+        e.estado_funcionamiento,
+        e.horometro_operativo_desde,
         e.intervalo_mantenimiento_valor::numeric AS frecuencia,
         e.intervalo_mantenimiento_unidad AS frecuencia_unidad,
         e.margen_anticipacion_pct::numeric AS margen_anticipacion_pct,
         e.margen_tolerancia_pct::numeric AS margen_tolerancia_pct,
-        u.horometro AS horometro_ultimo_mantenimiento,
-        u.fecha AS fecha_ultimo_mantenimiento,
-        u.work_order_code AS ultima_ot,
+        ${SERVICIOS_MPG_SQL} AS servicios_mpg,
         e.updated_by
       FROM kpi_maintenance.tb_equipo e
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
-      LEFT JOIN ultimo_mant u ON u.equipment_id = e.id
       WHERE COALESCE(e.is_deleted, false) = false
         AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
         AND COALESCE(e.intervalo_mantenimiento_valor, 0) > 0
@@ -16267,25 +16259,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     return filas.flatMap((row: any): AlertCandidate[] => {
       const frecuencia = this.toNumeric(row.frecuencia, 0);
-      const horometroActual = this.toNumeric(row.horometro_actual, 0);
+      // El contador en vivo, como el Dashboard; en horas enteras para que el
+      // detalle de una alerta abierta no se reescriba en cada pasada.
+      const horometroActual = Math.round(this.operationalHorometer(row));
       // La frecuencia en dias la cubre buildEquipmentServiceAlertCandidates.
       const unidad = String(row.frecuencia_unidad ?? '').trim().toUpperCase();
       if (unidad && !unidad.startsWith('HORA')) return [];
       if (frecuencia <= 0 || horometroActual <= 0) return [];
 
-      // Sin una referencia fiable del ultimo mantenimiento no se puede proyectar.
-      // Hay equipos cuya ultima OT quedo con horometro 0: tomarlo al pie de la
+      // Sin una referencia fiable del ultimo mantenimiento no se avisa. Hay
+      // equipos cuyo ultimo servicio quedo con horometro 0: tomarlo al pie de la
       // letra produciria avisos del tipo "superó por 22.741 h", que son falsos y
-      // arruinan la confianza en el resto de alertas. Se prefiere no avisar y
-      // que el dato se corrija.
-      const referencia = this.toNumeric(row.horometro_ultimo_mantenimiento, 0);
-      const referenciaFiable =
-        row.horometro_ultimo_mantenimiento != null &&
-        referencia > 0 &&
-        referencia <= horometroActual;
-      if (!referenciaFiable) return [];
+      // arruinan la confianza en el resto de alertas. El Dashboard si proyecta
+      // esos equipos, marcados como estimados, para que el dato se corrija.
+      const referencia = resolverReferenciaMantenimiento(
+        row.servicios_mpg,
+        horometroActual,
+        frecuencia,
+      );
+      if (!referencia.fiable) return [];
 
-      const base = referencia;
+      const base = referencia.base;
       const objetivo = Number((base + frecuencia).toFixed(2));
       const restantes = Number((objetivo - horometroActual).toFixed(2));
 
@@ -16334,8 +16328,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             horometro_actual: horometroActual,
             frecuencia_horas: frecuencia,
             horometro_ultimo_mantenimiento: Number(base.toFixed(2)),
-            fecha_ultimo_mantenimiento: row.fecha_ultimo_mantenimiento ?? null,
-            ultima_ot: row.ultima_ot ?? null,
+            fecha_ultimo_mantenimiento: referencia.servicio?.cerrada_en
+              ? String(referencia.servicio.cerrada_en).slice(0, 10)
+              : null,
+            ultima_ot: referencia.servicio?.work_order_code ?? null,
             horometro_proximo_mantenimiento: objetivo,
             horas_restantes: restantes,
             horas_excedidas: restantes < 0 ? Math.abs(restantes) : 0,
