@@ -13,6 +13,7 @@ export class EquipoEntity {
   @Column({ default: 'MEDIA' }) criticidad: string;
   @Column({ default: 'OPERATIVO' }) estado_operativo: string;
   @Column({ default: 'PARADO' }) estado_funcionamiento: string;
+  @Column({ type: 'boolean', default: false }) es_reserva: boolean;
   @Column({ type: 'timestamp without time zone', nullable: true })
   estado_funcionamiento_actualizado_en?: Date | null;
   @Column('numeric', { precision: 22, scale: 6, default: 0 })

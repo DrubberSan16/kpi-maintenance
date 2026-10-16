@@ -27,6 +27,7 @@ import { KpiMaintenanceService } from '../services/kpi-maintenance.service';
 import { DashboardAdministracionService } from '../services/dashboard-administracion.service';
 import {
   AnalisisAceiteKpiQueryDto,
+  ControlCebadoAceiteQueryDto,
   AlertaQueryDto,
   AnalisisLubricanteCatalogQueryDto,
   AnalisisLubricanteDashboardQueryDto,
@@ -1051,6 +1052,15 @@ export class KpiMaintenanceController {
       equipo_id: equipoId,
     });
     return this.service.omitirCostos(response, getRequestActor(req).roleName);
+  }
+
+  @ApiTags('Dashboard Administracion')
+  @ApiOperation({ summary: 'Control unificado de cebado y aceite, una fila por OT' })
+  @Get('dashboard-administracion/control-cebado-aceite')
+  async getControlCebadoAceite(@Req() req: Request, @Query() query: ControlCebadoAceiteQueryDto) {
+    return this.service.omitirCostos(
+      await this.dashboardAdministracion.getControlCebadoAceite(query), getRequestActor(req).roleName,
+    );
   }
 
   @ApiTags('Dashboard Administracion')

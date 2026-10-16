@@ -12,6 +12,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
+import { workOrderWorkedHours } from './work-order-hours';
 import { URLSearchParams } from 'url';
 import {
   appendFile,
@@ -2204,6 +2205,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async ensureEquipoEstadoFuncionamientoSchema() {
+    await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
+      ADD COLUMN IF NOT EXISTS es_reserva boolean NOT NULL DEFAULT false
+    `);
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_maintenance.tb_equipo
       ADD COLUMN IF NOT EXISTS estado_funcionamiento text NULL
@@ -18346,6 +18351,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
     users?: SecurityUserDirectoryItem[],
+    executionHistory?: WorkOrderStatusHistoryEntity[],
   ) {
     const workOrderPayload =
       ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
@@ -18505,6 +18511,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ...proyectoDetalle,
       equipment_location_label: reportEquipment?.equipment_location_label ?? null,
       equipment_modelo: equipo?.modelo ?? null,
+      es_reserva: equipo?.es_reserva === true,
+      horas_trabajadas: this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO'
+        ? workOrderWorkedHours(workOrder, executionHistory ?? await this.woHistoryRepo.find({ where: { work_order_id: workOrder.id }, order: { changed_at: 'ASC' } })) : null,
       equipment_brand_name: reportEquipment?.marca_nombre ?? null,
       equipment_nombre: equipo?.nombre ?? null,
       equipment_nombre_real: equipo?.nombre_real ?? null,
@@ -19149,6 +19158,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horometro_actual: requestedHorometer,
       fecha_ultima_lectura: horometerChanged ? new Date() : e.fecha_ultima_lectura,
     });
+      if (e.estado_funcionamiento === 'FUNCIONAMIENTO') e.es_reserva = false;
       const savedEquipo = await equipoRepo.save(e);
       if (horometerChanged) {
         await historyRepo.save(
@@ -19328,8 +19338,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         throw new NotFoundException('Registro no encontrado');
       }
       const estadoAnterior = e.estado_funcionamiento;
-      if (estadoAnterior === estado_funcionamiento) {
+      const esReserva = estado_funcionamiento === 'PARADO' && dto.es_reserva === true;
+      if (estadoAnterior === estado_funcionamiento && Boolean(e.es_reserva) === esReserva) {
         return e;
+      }
+      // Cambiar el motivo de una parada no reinicia su duración ni el contador.
+      if (estadoAnterior === estado_funcionamiento) {
+        e.es_reserva = esReserva;
+        e.updated_by = changedByLabel || e.updated_by;
+        e.updated_at = new Date();
+        changed = true;
+        return equipoRepo.save(e);
       }
       const now = new Date();
       if (estadoAnterior === 'PARADO' && estado_funcionamiento === 'FUNCIONAMIENTO') {
@@ -19349,6 +19368,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           )
         : null;
       e.estado_funcionamiento = estado_funcionamiento;
+      e.es_reserva = esReserva;
       e.estado_funcionamiento_actualizado_en = now;
       e.updated_by = changedByLabel || e.updated_by;
       e.updated_at = now;
@@ -26624,6 +26644,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       warehouseMovementMap.set(key, current);
     }
 
+    const primingIds = datedWorkOrders.filter(row => this.normalizeMaintenanceKind(row.maintenance_kind) === 'CEBADO').map(row => row.id);
+    const primingHistory = primingIds.length ? await this.woHistoryRepo.find({ where: { work_order_id: In(primingIds) }, order: { changed_at: 'ASC' } }) : [];
+    const primingHistoryByOrder = new Map<string, WorkOrderStatusHistoryEntity[]>();
+    for (const event of primingHistory) {
+      const events = primingHistoryByOrder.get(event.work_order_id) ?? [];
+      events.push(event); primingHistoryByOrder.set(event.work_order_id, events);
+    }
     const workOrderContextMap = new Map<string, any>();
     for (const workOrder of datedWorkOrders) {
       const referenceDate = this.resolveWorkOrderReferenceDate(workOrder);
@@ -26703,6 +26730,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         started_at: flowStart?.toISOString() ?? null,
         closed_at: flowEnd?.toISOString() ?? null,
         flow_duration_hours: durationHours(flowStart, flowEnd),
+        horas_trabajadas: this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO'
+          ? workOrderWorkedHours(workOrder, primingHistoryByOrder.get(workOrder.id)) : null,
+        es_reserva: equipment?.es_reserva === true,
         flow_in_progress: Boolean(flowStart && !flowEnd),
         effective_started_at: effectiveStart?.toISOString() ?? null,
         effective_closed_at: effectiveEnd?.toISOString() ?? null,
@@ -27084,6 +27114,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           effective_started_at: row.effective_started_at,
           effective_closed_at: row.effective_closed_at,
           flow_duration_hours: row.flow_duration_hours,
+          horas_trabajadas: row.horas_trabajadas,
+          es_reserva: row.es_reserva,
           effective_duration_hours: row.effective_duration_hours,
           responsables_meta: row.responsables_meta,
           responsables: row.responsables,
@@ -29842,8 +29874,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ? scopedRows
       : scopedRows.filter((row) => !this.isWorkOrderAnnulled(row));
     const users = rows.length ? await this.fetchSecurityUsers() : [];
+    const primingIds = rows.filter(row => this.normalizeMaintenanceKind(row.maintenance_kind) === 'CEBADO').map(row => row.id);
+    const history = primingIds.length ? await this.woHistoryRepo.find({ where: { work_order_id: In(primingIds) }, order: { changed_at: 'ASC' } }) : [];
+    const histories = new Map<string, WorkOrderStatusHistoryEntity[]>();
+    for (const event of history) {
+      const events = histories.get(event.work_order_id) ?? [];
+      events.push(event); histories.set(event.work_order_id, events);
+    }
     return this.wrap(
-      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor, users))),
+      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor, users, histories.get(row.id) ?? []))),
       'Work orders listadas',
     );
   }
@@ -35044,7 +35083,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   /** Deja el equipo bloqueado en PARADO con su contador congelado; `false` si ya lo estaba. */
   private async stopEquipmentForWorkOrder(manager: EntityManager, equipment: EquipoEntity, now: Date, actorId: string | null, actorName: string) {
-    if (equipment.estado_funcionamiento === 'PARADO') return false;
+    if (equipment.estado_funcionamiento === 'PARADO') {
+      if (!equipment.es_reserva) return false;
+      equipment.es_reserva = false;
+      equipment.updated_by = actorName;
+      await manager.save(EquipoEntity, equipment);
+      return true;
+    }
     const since = equipment.estado_funcionamiento_actualizado_en ? new Date(equipment.estado_funcionamiento_actualizado_en) : null;
     await manager.save(EquipoFuncionamientoHistorialEntity, manager.create(EquipoFuncionamientoHistorialEntity, {
       id: randomUUID(),
@@ -35059,6 +35104,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
     equipment.horometro_operativo_desde = null;
     equipment.estado_funcionamiento = 'PARADO';
+    equipment.es_reserva = false;
     equipment.estado_funcionamiento_actualizado_en = now;
     equipment.updated_by = actorName;
     await manager.save(EquipoEntity, equipment);

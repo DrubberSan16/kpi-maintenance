@@ -26,6 +26,29 @@ function fixture(state = 'PARADO') {
 }
 
 describe('Horas operativas independientes de las OT', () => {
+  it('guarda una parada por reserva y limpia la reserva al encender', async () => {
+    const { service, equipment, orderRepo } = fixture('FUNCIONAMIENTO');
+    orderRepo.find.mockResolvedValue([]);
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'PARADO', es_reserva: true });
+    expect(equipment).toMatchObject({ estado_funcionamiento: 'PARADO', es_reserva: true });
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'FUNCIONAMIENTO', es_reserva: true });
+    expect(equipment).toMatchObject({ estado_funcionamiento: 'FUNCIONAMIENTO', es_reserva: false });
+  });
+  it('cambia el motivo de una parada sin reiniciar el contador ni crear otra parada', async () => {
+    const { service, equipment, historyRepo } = fixture('PARADO');
+    await service.updateEquipoEstadoFuncionamiento(id, { estado_funcionamiento: 'PARADO', es_reserva: true });
+    expect(equipment).toMatchObject({ horometro_actual: 1000, es_reserva: true });
+    expect(historyRepo.save).not.toHaveBeenCalled();
+  });
+  it('el inicio de mantenimiento retira la reserva sin reiniciar una parada existente', async () => {
+    const { service, equipment } = fixture('PARADO');
+    Object.assign(equipment, { es_reserva: true, estado_funcionamiento_actualizado_en: new Date('2026-10-01T12:00:00Z') });
+    const manager = { save: jest.fn().mockImplementation(async (_entity, row) => row), create: jest.fn() };
+    await service.stopEquipmentForWorkOrder(manager, equipment, new Date('2026-10-01T15:00:00Z'), null, 'Operador');
+    expect(equipment).toMatchObject({ es_reserva: false, estado_funcionamiento: 'PARADO', horometro_actual: 1000, estado_funcionamiento_actualizado_en: new Date('2026-10-01T12:00:00Z') });
+    expect(manager.save).toHaveBeenCalledTimes(1);
+    expect(manager.create).not.toHaveBeenCalled();
+  });
   it('acumula solo mientras funciona y conserva lecturas sin referencia temporal', () => {
     const service = Object.create(KpiMaintenanceService.prototype) as any;
     const now = new Date('2026-10-01T15:00:00Z');

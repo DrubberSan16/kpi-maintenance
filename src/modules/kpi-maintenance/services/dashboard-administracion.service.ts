@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { workOrderWorkedHours } from './work-order-hours';
 import {
   SERVICIOS_MPG_SQL,
   fechaProximoMantenimiento,
@@ -54,6 +55,83 @@ export class DashboardAdministracionService {
   /** Umbrales de galones para el semáforo de cebado (punto 3). */
   private readonly CEBADO_VERDE_MAX = 5;
   private readonly CEBADO_AMARILLO_MAX = 10;
+
+  /** Una fila por OT, también cuando no consumió aceite. Misma fuente para gráficos y exportes. */
+  async getControlCebadoAceite(query: { desde?: string; hasta?: string; equipo_id?: string; solo_cebado?: boolean }) {
+    const period = this.resolvePeriod();
+    // Son días de Guayaquil sobre columnas timestamp sin zona: no convertirlos a UTC.
+    const desde = query.desde ? `${query.desde.slice(0, 10)} 00:00:00` : period.desde;
+    const hasta = query.hasta ? `${query.hasta.slice(0, 10)} 23:59:59.999999` : period.hasta;
+    const filas = await this.dataSource.query(`
+      SELECT wo.id AS work_order_id, wo.code AS work_order_code, wo.title AS work_order_title,
+        wo.maintenance_kind, wo.status_workflow AS work_order_status,
+        wo.started_at, wo.closed_at, wo.valor_json,
+        wo.scheduled_start AS fecha_programada,
+        COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
+        wo.equipment_id, e.codigo AS equipment_code, COALESCE(e.nombre, e.nombre_real) AS equipment_name,
+        m.nombre AS equipment_brand_name, e.es_reserva,
+        e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central,
+        NULLIF(wo.valor_json->>'horometro_anterior', '')::numeric AS horometro_inicial,
+        NULLIF(wo.valor_json->>'horometro_actual', '')::numeric AS horometro_final,
+        COALESCE(oil.cantidad, 0)::numeric AS cantidad, COALESCE(oil.subtotal, 0)::numeric AS subtotal,
+        COALESCE(oil.producto, 'Sin consumo de aceite') AS producto,
+        COALESCE(hist.events, '[]'::jsonb) AS history
+      FROM kpi_process.tb_work_order wo
+      LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
+      LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
+      LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
+      LEFT JOIN LATERAL (
+        SELECT SUM(cr.cantidad) AS cantidad,
+          SUM(cr.cantidad * COALESCE(issued.unit_cost, cr.costo_unitario, 0)) AS subtotal,
+          string_agg(DISTINCT CONCAT_WS(' - ', p.codigo, p.nombre), ', ') AS producto
+        FROM kpi_maintenance.tb_consumo_repuesto cr
+        JOIN kpi_inventory.tb_producto p ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false)
+        LEFT JOIN LATERAL (
+          SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS unit_cost
+          FROM kpi_inventory.tb_entrega_material em
+          JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = em.id
+          WHERE em.work_order_id = wo.id AND NOT COALESCE(em.is_deleted, false)
+            AND d.producto_id = cr.producto_id AND d.bodega_id = cr.bodega_id
+        ) issued ON true
+        WHERE cr.work_order_id = wo.id AND NOT COALESCE(cr.is_deleted, false)
+      ) oil ON true
+      LEFT JOIN LATERAL (
+        SELECT jsonb_agg(jsonb_build_object('changed_at', h.changed_at, 'from_status', h.from_status,
+          'to_status', h.to_status) ORDER BY h.changed_at, h.id) AS events
+        FROM kpi_process.tb_work_order_status_history h WHERE h.work_order_id = wo.id
+      ) hist ON true
+      WHERE NOT COALESCE(wo.is_deleted, false)
+        AND UPPER(COALESCE(wo.status, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
+        AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
+        AND UPPER(COALESCE(wo.valor_json->>'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
+        AND COALESCE(wo.valor_json->'annulment', 'null'::jsonb) = 'null'::jsonb
+        AND COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
+        AND (NOT $4::boolean OR UPPER(wo.maintenance_kind) = 'CEBADO')
+      ORDER BY fecha_referencia, wo.code
+    `, [desde, hasta, this.equipoParam(query.equipo_id), query.solo_cebado === true]);
+    const equipos = await this.dataSource.query(`
+      SELECT e.id, e.codigo, COALESCE(e.nombre, e.nombre_real) AS nombre, e.es_reserva,
+        e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central
+      FROM kpi_maintenance.tb_equipo e
+      LEFT JOIN kpi_maintenance.tb_equipo_tipo t ON t.id = e.equipo_tipo_id
+      LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
+      WHERE NOT COALESCE(e.is_deleted, false) AND (
+        UPPER(COALESCE(t.nombre, '') || ' ' || COALESCE(t.codigo, '')) SIMILAR TO '%(GENERACI|GENERADOR)%'
+        OR EXISTS (SELECT 1 FROM kpi_process.tb_work_order wo WHERE wo.equipment_id = e.id
+          AND NOT COALESCE(wo.is_deleted, false)
+          AND (wo.started_at IS NOT NULL OR wo.status_workflow IN ('IN_PROGRESS', 'REVIEW', 'CLOSED'))
+          AND UPPER(COALESCE(wo.status, '')) NOT LIKE '%ANUL%'
+          AND UPPER(COALESCE(wo.valor_json->>'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
+          AND COALESCE(wo.valor_json->'annulment', 'null'::jsonb) = 'null'::jsonb)
+      ) ORDER BY e.codigo, e.nombre, e.id
+    `);
+    return this.wrap({ filas: filas.map(({ history, valor_json, ...row }) => ({
+      ...row, cantidad: Number(row.cantidad), subtotal: Number(row.subtotal),
+      horas_trabajadas: workOrderWorkedHours({ ...row, valor_json, status_workflow: row.work_order_status }, history),
+      semaforo: this.resolveCebadoSemaforo(Number(row.cantidad)),
+    })), equipos }, 'Control de cebado y aceite generado');
+  }
 
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
@@ -150,6 +228,7 @@ export class DashboardAdministracionService {
         COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
         e.nombre_real AS equipo_descripcion,
         e.estado_funcionamiento,
+        e.es_reserva,
         ROUND((COALESCE(a.seg_funcionando, 0) / 3600.0)::numeric, 2) AS horas_disponibles,
         ROUND((COALESCE(a.seg_parado, 0) / 3600.0)::numeric, 2) AS horas_fuera_servicio,
         CASE
@@ -448,6 +527,7 @@ export class DashboardAdministracionService {
         m.nombre AS marca,
         e.horometro_actual::numeric AS horometro_actual,
         e.estado_funcionamiento,
+        e.es_reserva,
         e.horometro_operativo_desde,
         e.intervalo_mantenimiento_valor::numeric AS frecuencia,
         e.intervalo_mantenimiento_unidad AS frecuencia_unidad,
@@ -744,6 +824,10 @@ export class DashboardAdministracionService {
           wo.code AS orden,
           wo.title AS titulo,
           wo.equipment_id,
+          wo.started_at, wo.closed_at,
+          (SELECT jsonb_agg(jsonb_build_object('changed_at', h.changed_at, 'from_status', h.from_status,
+            'to_status', h.to_status) ORDER BY h.changed_at, h.id)
+            FROM kpi_process.tb_work_order_status_history h WHERE h.work_order_id = wo.id) AS execution_history,
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
           COALESCE(wo.hora_inicio, wo.created_at) AS momento,
           -- El horometro con el que llego la maquina y el que se anoto en el
@@ -790,6 +874,8 @@ export class DashboardAdministracionService {
             ? Number(grupo[indice + 1].galones ?? 0)
             : null;
           fila.galones_orden_anterior = anterior;
+          fila.horas_trabajadas = workOrderWorkedHours(fila, fila.execution_history || []);
+          delete fila.execution_history;
           fila.horometro_anterior = normalizeHorometro(fila.horometro_anterior);
           fila.horometro_actual = normalizeHorometro(fila.horometro_actual);
           fila.tendencia = this.resolveTendenciaOrden(actual, anterior);

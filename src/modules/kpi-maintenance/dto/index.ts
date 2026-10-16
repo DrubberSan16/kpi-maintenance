@@ -310,6 +310,11 @@ export class UpdateEquipoDto extends CreateEquipoDto {
 }
 
 export class UpdateEquipoEstadoFuncionamientoDto {
+  @ApiPropertyOptional({ description: 'La parada deja el equipo en reserva' })
+  @IsOptional()
+  @IsBoolean()
+  es_reserva?: boolean;
+
   @ApiProperty({
     description: 'Nuevo estado de funcionamiento del equipo',
     enum: EquipoEstadoFuncionamientoEnum,
@@ -317,6 +322,22 @@ export class UpdateEquipoEstadoFuncionamientoDto {
   @IsEnum(EquipoEstadoFuncionamientoEnum)
   @IsNotEmpty()
   estado_funcionamiento: EquipoEstadoFuncionamientoEnum;
+}
+
+export class ControlCebadoAceiteQueryDto {
+  @IsOptional()
+  @IsDateString()
+  desde?: string;
+  @IsOptional()
+  @IsDateString()
+  hasta?: string;
+  @IsOptional()
+  @IsUUID()
+  equipo_id?: string;
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' ? true : value === 'false' ? false : value)
+  @IsBoolean()
+  solo_cebado?: boolean;
 }
 
 export class UpdateEquipoHorometroDto {
