@@ -249,6 +249,23 @@ type WorkOrderEnrichmentContext = {
   bodegas: Map<string, BodegaEntity>;
 };
 
+// Igual para `recalculateProgramacionFields` cuando recorre listados.
+type ProgramacionRecalcContext = {
+  equipos: Map<string, EquipoEntity>;
+  planes: Map<string, PlanMantenimientoEntity>;
+  workOrders: Map<string, WorkOrderEntity>;
+  procedimientos: Map<string, ProcedimientoPlantillaEntity>;
+};
+
+// Construir un Intl.DateTimeFormat cuesta unos 0,2 ms; la fecha de hoy se pide
+// dos veces por programacion en cada listado.
+const GUAYAQUIL_DATE_PARTS = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'America/Guayaquil',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
 type SystemReportGroupBy =
   | 'OT'
   | 'BODEGA'
@@ -14054,11 +14071,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.programacionRepo.find({
       where: { is_deleted: false, activo: true },
     });
-    const programaciones = await Promise.all(
-      rows.map((row) =>
-        this.recalculateProgramacionFields(row, { persist: false }),
-      ),
-    );
+    const programaciones = await this.recalculateProgramacionesForRead(rows);
 
     // La alerta ya no se dispara al vencer la programación: solo cuando la OT
     // asignada acumula 24 h completas de atraso y sigue sin arrancar.
@@ -18158,23 +18171,111 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return rows.length;
   }
 
+  // Los listados recalculaban cada programacion con cuatro consultas propias
+  // (equipo, plan, OT, procedimiento): el resumen de inteligencia y el
+  // recalculo de alertas recorren todas. Se cargan en bloque con los mismos
+  // filtros y cada fila las toma del contexto.
+  private async buildProgramacionRecalcContext(
+    rows: ProgramacionPlanEntity[],
+  ): Promise<ProgramacionRecalcContext> {
+    const keyOf = (value: unknown) => String(value ?? '').trim().toLowerCase();
+    const idsOf = (values: unknown[]) => [
+      ...new Set(
+        values
+          .map(keyOf)
+          .filter((value) =>
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value),
+          ),
+      ),
+    ];
+    const byId = <T extends { id: string }>(items: T[]) =>
+      new Map(items.map((item) => [keyOf(item.id), item]));
+    const inChunks = async <T>(
+      ids: string[],
+      load: (chunk: string[]) => Promise<T[]>,
+    ) => {
+      const found: T[] = [];
+      for (let index = 0; index < ids.length; index += 1000) {
+        found.push(...(await load(ids.slice(index, index + 1000))));
+      }
+      return found;
+    };
+    const [equipos, planes, workOrders] = await Promise.all([
+      inChunks(idsOf(rows.map((row) => row.equipo_id)), (ids) =>
+        this.equipoRepo.find({ where: { id: In(ids), is_deleted: false } }),
+      ),
+      inChunks(idsOf(rows.map((row) => row.plan_id)), (ids) =>
+        this.planRepo.find({ where: { id: In(ids), is_deleted: false } }),
+      ),
+      inChunks(idsOf(rows.map((row) => row.work_order_id)), (ids) =>
+        this.woRepo.find({ where: { id: In(ids), is_deleted: false } }),
+      ),
+    ]);
+    const procedimientos = await inChunks(
+      idsOf(planes.map((plan) => this.extractProcedimientoIdFromPlan(plan))),
+      (ids) =>
+        this.procedimientoRepo.find({ where: { id: In(ids), is_deleted: false } }),
+    );
+    return {
+      equipos: byId(equipos),
+      planes: byId(planes),
+      workOrders: byId(workOrders),
+      procedimientos: byId(procedimientos),
+    };
+  }
+
+  private async recalculateProgramacionesForRead(rows: ProgramacionPlanEntity[]) {
+    if (!rows.length) return [];
+    const context = await this.buildProgramacionRecalcContext(rows);
+    return Promise.all(
+      rows.map((row) =>
+        this.recalculateProgramacionFields(row, { persist: false }, context),
+      ),
+    );
+  }
+
   private async recalculateProgramacionFields(
     programacion: ProgramacionPlanEntity,
     options?: { persist?: boolean },
+    context?: ProgramacionRecalcContext,
   ) {
-    const [equipo, plan, linkedWorkOrder] = await Promise.all([
-      this.findEquipoOrFail(programacion.equipo_id),
-      this.findOneOrFail(this.planRepo, {
-        id: programacion.plan_id,
-        is_deleted: false,
-      }),
-      programacion.work_order_id
-        ? this.woRepo.findOne({
-            where: { id: programacion.work_order_id, is_deleted: false },
-          })
-        : Promise.resolve(null),
-    ]);
-    const procedimiento = await this.resolveProcedimientoFromPlan(plan);
+    const fromContext = <T>(map: Map<string, T>, id: unknown) => {
+      const key = String(id ?? '').trim().toLowerCase();
+      return key ? map.get(key) ?? null : null;
+    };
+    // Sin equipo o plan vigente la consulta suelta lanza NotFoundException; el
+    // contexto conserva ese comportamiento.
+    const requireFromContext = <T>(map: Map<string, T>, id: unknown) => {
+      const item = fromContext(map, id);
+      if (!item) throw new NotFoundException('Registro no encontrado');
+      return item;
+    };
+    const [equipo, plan, linkedWorkOrder] = context
+      ? [
+          requireFromContext(context.equipos, programacion.equipo_id),
+          requireFromContext(context.planes, programacion.plan_id),
+          programacion.work_order_id
+            ? fromContext(context.workOrders, programacion.work_order_id)
+            : null,
+        ]
+      : await Promise.all([
+          this.findEquipoOrFail(programacion.equipo_id),
+          this.findOneOrFail(this.planRepo, {
+            id: programacion.plan_id,
+            is_deleted: false,
+          }),
+          programacion.work_order_id
+            ? this.woRepo.findOne({
+                where: { id: programacion.work_order_id, is_deleted: false },
+              })
+            : Promise.resolve(null),
+        ]);
+    const procedimiento = context
+      ? fromContext(
+          context.procedimientos,
+          this.extractProcedimientoIdFromPlan(plan),
+        )
+      : await this.resolveProcedimientoFromPlan(plan);
 
     const freqType = String(plan.frecuencia_tipo || 'HORAS').toUpperCase();
     const freqValue = this.toNumeric(plan.frecuencia_valor, 0);
@@ -19110,12 +19211,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private currentGuayaquilDateString(value = new Date()) {
-    const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'America/Guayaquil',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).formatToParts(value);
+    const parts = GUAYAQUIL_DATE_PARTS.formatToParts(value);
     const year = parts.find((item) => item.type === 'year')?.value ?? '';
     const month = parts.find((item) => item.type === 'month')?.value ?? '';
     const day = parts.find((item) => item.type === 'day')?.value ?? '';
@@ -20397,11 +20493,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       : rows.filter((row) =>
           scope.equipmentIds.has(String(row.equipo_id || '').trim()),
         );
-    const data = await Promise.all(
-      scopedRows.map((row) =>
-        this.recalculateProgramacionFields(row, { persist: false }),
-      ),
-    );
+    const data = await this.recalculateProgramacionesForRead(scopedRows);
     data.sort((a: any, b: any) => {
       const left = a.proxima_fecha || '';
       const right = b.proxima_fecha || '';
@@ -23679,11 +23771,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const programaciones = await this.programacionRepo.find({
       where: { id: In(programacionIds), is_deleted: false },
     });
-    const enrichedProgramaciones = await Promise.all(
-      programaciones.map((item) =>
-        this.recalculateProgramacionFields(item, { persist: false }),
-      ),
-    );
+    const enrichedProgramaciones =
+      await this.recalculateProgramacionesForRead(programaciones);
     const programacionById = new Map(
       enrichedProgramaciones.map((item: any) => [String(item.id), item]),
     );
@@ -25805,11 +25894,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       this.isProcedimientoVisibleForScope(row, scope),
     );
 
-    const programaciones = await Promise.all(
-      overdueProgramaciones.map((row) =>
-        this.recalculateProgramacionFields(row, { persist: false }),
-      ),
-    );
+    const programaciones =
+      await this.recalculateProgramacionesForRead(overdueProgramaciones);
 
     const scopedAnalyses = analisisRows.filter((row) =>
       this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
