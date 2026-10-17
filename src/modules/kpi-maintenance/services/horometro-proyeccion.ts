@@ -135,13 +135,15 @@ export function resolverReferenciaMantenimiento(
 }
 
 /** Fecha del calendario de Guayaquil (`YYYY-MM-DD`) de un instante. */
+const FECHA_GUAYAQUIL = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Guayaquil',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
 export function fechaGuayaquil(instante: Date): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Guayaquil',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(instante);
+  return FECHA_GUAYAQUIL.format(instante);
 }
 
 /**
