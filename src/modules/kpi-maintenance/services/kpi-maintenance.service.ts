@@ -233,6 +233,22 @@ type WorkOrderComponentSnapshot = {
   label: string | null;
 };
 
+// Lo que `enrichWorkOrder` consultaba fila por fila, resuelto en bloque para el
+// listado. Las claves de id van en minusculas, como las devuelve PostgreSQL.
+type WorkOrderEnrichmentContext = {
+  equipos: Map<string, EquipoEntity>;
+  reportEquipment: Map<string, { marca_nombre: string | null; equipment_location_label: string | null }>;
+  planes: Map<string, PlanMantenimientoEntity>;
+  componentes: Map<string, EquipoComponenteEntity>;
+  relatedWorkOrders: Map<string, WorkOrderEntity>;
+  linkedProgramaciones: Map<string, ProgramacionPlanEntity>;
+  linkedAlerts: Map<string, AlertaMantenimientoEntity>;
+  programacionesById: Map<string, ProgramacionPlanEntity>;
+  alertsById: Map<string, AlertaMantenimientoEntity>;
+  procedimientos: Map<string, ProcedimientoPlantillaEntity>;
+  bodegas: Map<string, BodegaEntity>;
+};
+
 type SystemReportGroupBy =
   | 'OT'
   | 'BODEGA'
@@ -18347,15 +18363,253 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  // El listado de OT llamaba a `enrichWorkOrder` por cada fila y cada una
+  // lanzaba de diez a veinte consultas sueltas (equipo, plan, programacion,
+  // alerta, procedimiento, bodega...): con 431 OT eran miles de consultas y la
+  // pantalla tardaba de cuatro a ocho segundos. Aqui se cargan en bloque, con
+  // las mismas condiciones que las consultas individuales.
+  private async buildWorkOrderEnrichmentContext(
+    workOrders: WorkOrderEntity[],
+  ): Promise<WorkOrderEnrichmentContext> {
+    const uuidPattern =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const keyOf = (value: unknown) => String(value ?? '').trim().toLowerCase();
+    const idsOf = (values: unknown[]) => [
+      ...new Set(values.map(keyOf).filter((value) => uuidPattern.test(value))),
+    ];
+    const byId = <T extends { id: string }>(rows: T[]) =>
+      new Map(rows.map((row) => [keyOf(row.id), row]));
+    // Un IN con decenas de miles de parametros pasa el limite del protocolo de
+    // PostgreSQL, asi que las listas se consultan en bloques.
+    const inChunks = async <T>(
+      ids: string[],
+      load: (chunk: string[]) => Promise<T[]>,
+    ) => {
+      const rows: T[] = [];
+      for (let index = 0; index < ids.length; index += 1000) {
+        rows.push(...(await load(ids.slice(index, index + 1000))));
+      }
+      return rows;
+    };
+    const payloadOf = (value: unknown) =>
+      (value ?? {}) as Record<string, unknown>;
+
+    const workOrderIds = idsOf(workOrders.map((row) => row.id));
+    const linkedAlerts = new Map<string, AlertaMantenimientoEntity>();
+    const [
+      equipos,
+      planes,
+      componentes,
+      relatedWorkOrders,
+      linkedProgramacionRows,
+    ] = await Promise.all([
+      inChunks(idsOf(workOrders.map((row) => row.equipment_id)), (ids) =>
+        this.equipoRepo.find({ where: { id: In(ids) } }),
+      ),
+      inChunks(idsOf(workOrders.map((row) => row.plan_id)), (ids) =>
+        this.planRepo.find({ where: { id: In(ids) } }),
+      ),
+      inChunks(
+        idsOf([
+          ...workOrders.map((row) => row.equipo_componente_id),
+          ...workOrders.flatMap((row) =>
+            this.readStoredComponentSnapshots(row.valor_json).map(
+              (snapshot) => snapshot.id,
+            ),
+          ),
+        ]),
+        (ids) => this.equipoComponenteRepo.find({ where: { id: In(ids) } }),
+      ),
+      inChunks(
+        idsOf(
+          workOrders.flatMap((row) => [
+            row.blocked_by_work_order_id,
+            row.parent_work_order_id,
+          ]),
+        ),
+        (ids) => this.woRepo.find({ where: { id: In(ids), is_deleted: false } }),
+      ),
+      inChunks(workOrderIds, (ids) =>
+        this.programacionRepo.find({
+          where: { work_order_id: In(ids), is_deleted: false, activo: true },
+          order: { proxima_fecha: 'ASC', id: 'ASC' },
+        }),
+      ),
+      // Misma regla que `findPrimaryLinkedAlertForWorkOrder`. Cada alerta se
+      // asigna dentro de su bloque: los candidatos de una OT siempre caen en el
+      // bloque de esa OT, asi el orden decide igual que en la consulta suelta.
+      inChunks(workOrderIds, async (ids) => {
+        const chunkIds = new Set(ids);
+        const references = new Map(ids.map((id) => [`WORK_ORDER:${id}`, id]));
+        const alerts = await this.alertaRepo
+          .createQueryBuilder('alerta')
+          .where('alerta.is_deleted = false')
+          .andWhere(
+            new Brackets((qb) => {
+              qb.where('alerta.work_order_id IN (:...workOrderIds)', {
+                workOrderIds: ids,
+              }).orWhere(
+                '(alerta.origen = :workOrderOrigin AND alerta.referencia IN (:...references))',
+                {
+                  workOrderOrigin: 'WORK_ORDER',
+                  references: [...references.keys()],
+                },
+              );
+            }),
+          )
+          .orderBy(
+            "CASE WHEN alerta.origen = 'WORK_ORDER' THEN 0 ELSE 1 END",
+            'ASC',
+          )
+          .addOrderBy('alerta.fecha_generada', 'DESC')
+          .addOrderBy('alerta.id', 'DESC')
+          .getMany();
+        for (const alert of alerts) {
+          const candidates = [
+            keyOf(alert.work_order_id),
+            alert.origen === 'WORK_ORDER'
+              ? references.get(String(alert.referencia ?? ''))
+              : undefined,
+          ];
+          for (const candidate of candidates) {
+            if (candidate && chunkIds.has(candidate) && !linkedAlerts.has(candidate)) {
+              linkedAlerts.set(candidate, alert);
+            }
+          }
+        }
+        return alerts;
+      }),
+    ]);
+
+    const linkedProgramaciones = new Map<string, ProgramacionPlanEntity>();
+    for (const row of linkedProgramacionRows) {
+      const key = keyOf(row.work_order_id);
+      if (key && !linkedProgramaciones.has(key)) linkedProgramaciones.set(key, row);
+    }
+
+    // Respaldo de `resolveProgramacionReferenceForWorkOrder` para las OT sin
+    // programacion ligada: la del payload o la que apunta su alerta.
+    const unlinked = workOrders.filter(
+      (row) => !linkedProgramaciones.has(keyOf(row.id)),
+    );
+    const alertsById = byId([...linkedAlerts.values()]);
+    const fallbackAlertIds = idsOf(
+      unlinked.map((row) =>
+        this.firstNonEmptyString(
+          linkedAlerts.get(keyOf(row.id))?.id,
+          payloadOf(row.valor_json).alerta_id,
+        ),
+      ),
+    );
+    const missingAlertIds = fallbackAlertIds.filter((id) => !alertsById.has(id));
+    for (const alert of await inChunks(missingAlertIds, (ids) =>
+      this.alertaRepo.find({ where: { id: In(ids), is_deleted: false } }),
+    )) {
+      alertsById.set(keyOf(alert.id), alert);
+    }
+    const programacionIds = idsOf([
+      ...unlinked.map((row) => {
+        const payload = payloadOf(row.valor_json);
+        return this.firstNonEmptyString(
+          payload.programacion_id,
+          payload.linked_programacion_id,
+        );
+      }),
+      ...fallbackAlertIds.map((id) => {
+        const payload = payloadOf(alertsById.get(id)?.payload_json);
+        return this.firstNonEmptyString(
+          payload.programacion_id,
+          payload.linked_programacion_id,
+        );
+      }),
+    ]);
+
+    const planesById = byId(planes);
+    const procedimientoIds = idsOf(
+      workOrders.flatMap((row) => [
+        payloadOf(row.valor_json).procedimiento_id,
+        this.extractProcedimientoIdFromPlan(
+          planesById.get(keyOf(row.plan_id)) ?? null,
+        ),
+      ]),
+    );
+    const [programaciones, procedimientos, reportEquipment] = await Promise.all([
+      inChunks(programacionIds, (ids) =>
+        this.programacionRepo.find({
+          where: { id: In(ids), is_deleted: false, activo: true },
+        }),
+      ),
+      inChunks(procedimientoIds, (ids) =>
+        this.procedimientoRepo.find({ where: { id: In(ids) } }),
+      ),
+      equipos.length ? this.attachEquipmentBrandNames(equipos) : Promise.resolve([]),
+    ]);
+    const bodegas = await inChunks(
+      idsOf(procedimientos.map((row) => row.bodega_id)),
+      (ids) => this.bodegaRepo.find({ where: { id: In(ids) } }),
+    );
+
+    return {
+      equipos: byId(equipos),
+      reportEquipment: byId(reportEquipment),
+      planes: planesById,
+      componentes: byId(componentes),
+      relatedWorkOrders: byId(relatedWorkOrders),
+      linkedProgramaciones,
+      linkedAlerts,
+      programacionesById: byId(programaciones),
+      alertsById,
+      procedimientos: byId(procedimientos),
+      bodegas: byId(bodegas),
+    };
+  }
+
+  private resolveProgramacionReferenceFromContext(
+    context: WorkOrderEnrichmentContext,
+    workOrderPayload: Record<string, unknown> | null,
+    linkedAlert: AlertaMantenimientoEntity | null,
+  ) {
+    const lookup = <T>(map: Map<string, T>, id: string | null) =>
+      id ? map.get(id.toLowerCase()) ?? null : null;
+    const explicitProgramacion = lookup(
+      context.programacionesById,
+      this.firstNonEmptyString(
+        workOrderPayload?.programacion_id,
+        workOrderPayload?.linked_programacion_id,
+      ),
+    );
+    if (explicitProgramacion) return explicitProgramacion;
+    // La consulta suelta vuelve a buscar la alerta principal despues, pero es
+    // la misma que ya se probo aqui: si no dio programacion, no hay otra.
+    const alert = lookup(
+      context.alertsById,
+      this.firstNonEmptyString(linkedAlert?.id, workOrderPayload?.alerta_id),
+    );
+    if (!alert) return null;
+    const alertPayload = (alert.payload_json ?? {}) as Record<string, unknown>;
+    return lookup(
+      context.programacionesById,
+      this.firstNonEmptyString(
+        alertPayload.programacion_id,
+        alertPayload.linked_programacion_id,
+      ),
+    );
+  }
+
   private async enrichWorkOrder(
     workOrder: WorkOrderEntity,
     actor?: RequestActorContext | null,
     users?: SecurityUserDirectoryItem[],
     executionHistory?: WorkOrderStatusHistoryEntity[],
+    context?: WorkOrderEnrichmentContext,
   ) {
     const workOrderPayload =
       ((workOrder.valor_json as Record<string, unknown> | null | undefined) ??
         null);
+    const fromContext = <T>(map: Map<string, T>, id: unknown) => {
+      const key = String(id ?? '').trim().toLowerCase();
+      return key ? map.get(key) ?? null : null;
+    };
     const [
       equipo,
       plan,
@@ -18364,7 +18618,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       parentWorkOrder,
       linkedProgramacion,
       linkedAlert,
-    ] = await Promise.all([
+    ] = context ? [
+      fromContext(context.equipos, workOrder.equipment_id),
+      fromContext(context.planes, workOrder.plan_id),
+      fromContext(context.componentes, workOrder.equipo_componente_id),
+      fromContext(context.relatedWorkOrders, workOrder.blocked_by_work_order_id),
+      fromContext(context.relatedWorkOrders, workOrder.parent_work_order_id),
+      fromContext(context.linkedProgramaciones, workOrder.id),
+      fromContext(context.linkedAlerts, workOrder.id),
+    ] : await Promise.all([
       workOrder.equipment_id
         ? this.equipoRepo.findOne({ where: { id: workOrder.equipment_id } })
         : Promise.resolve(null),
@@ -18406,25 +18668,50 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         };
     const effectiveLinkedProgramacion =
       linkedProgramacion ??
-      (await this.resolveProgramacionReferenceForWorkOrder({
-        workOrderId: workOrder.id,
-        alertaId: linkedAlert?.id ?? null,
-        fallbackValorJson: workOrderPayload,
-      }));
+      (context
+        ? this.resolveProgramacionReferenceFromContext(
+            context,
+            workOrderPayload,
+            linkedAlert,
+          )
+        : await this.resolveProgramacionReferenceForWorkOrder({
+            workOrderId: workOrder.id,
+            alertaId: linkedAlert?.id ?? null,
+            fallbackValorJson: workOrderPayload,
+          }));
     const procedimientoIdFromPayload = String(
       workOrderPayload?.procedimiento_id ?? '',
     ).trim();
-    const procedimiento =
-      (procedimientoIdFromPayload
-        ? await this.procedimientoRepo.findOne({
-            where: { id: procedimientoIdFromPayload },
-          })
-        : null) ?? (await this.resolveProcedimientoFromPlan(plan));
+    let procedimiento: ProcedimientoPlantillaEntity | null;
+    if (context) {
+      // Mismas reglas que las consultas de abajo: el procedimiento del payload
+      // se toma aunque este borrado; el que sale del plan, solo si sigue vivo.
+      const planProcedimiento = fromContext(
+        context.procedimientos,
+        this.extractProcedimientoIdFromPlan(plan),
+      );
+      procedimiento =
+        (procedimientoIdFromPayload
+          ? fromContext(context.procedimientos, procedimientoIdFromPayload)
+          : null) ??
+        (planProcedimiento && planProcedimiento.is_deleted === false
+          ? planProcedimiento
+          : null);
+    } else {
+      procedimiento =
+        (procedimientoIdFromPayload
+          ? await this.procedimientoRepo.findOne({
+              where: { id: procedimientoIdFromPayload },
+            })
+          : null) ?? (await this.resolveProcedimientoFromPlan(plan));
+    }
     const bodega =
       procedimiento?.bodega_id
-        ? await this.bodegaRepo.findOne({
-            where: { id: procedimiento.bodega_id },
-          })
+        ? context
+          ? fromContext(context.bodegas, procedimiento.bodega_id)
+          : await this.bodegaRepo.findOne({
+              where: { id: procedimiento.bodega_id },
+            })
         : null;
 
     const plannerHints = this.collectProgramacionPlannerHints(
@@ -18442,7 +18729,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       { maintenanceKind: workOrder.maintenance_kind },
     );
     this.restoreStoredPreviousHorometer(auditPayload, workOrderPayload);
-    const [reportEquipment] = equipo ? await this.attachEquipmentBrandNames([equipo]) : [null];
+    const [reportEquipment] = context
+      ? [fromContext(context.reportEquipment, equipo?.id)]
+      : equipo ? await this.attachEquipmentBrandNames([equipo]) : [null];
     const horometerSnapshot =
       this.extractWorkOrderHorometerSnapshot(auditPayload);
 
@@ -18453,9 +18742,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       (snapshot) => snapshot.id,
     );
     const liveComponentsForSnapshots = storedComponentIds.length
-      ? await this.equipoComponenteRepo.find({
-          where: { id: In(storedComponentIds) },
-        })
+      ? context
+        ? storedComponentIds
+            .map((id) => context.componentes.get(id))
+            .filter((component): component is EquipoComponenteEntity => !!component)
+        : await this.equipoComponenteRepo.find({
+            where: { id: In(storedComponentIds) },
+          })
       : [];
     const liveComponentsByIdForSnapshots = new Map(
       liveComponentsForSnapshots.map((component) => [component.id, component]),
@@ -18671,7 +18964,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async listEquipos(query: EquipoQueryDto, sucursalId?: string | null) {
     const page = query.page ?? 1;
-    const limit = Math.min(query.limit ?? 10, 100);
+    const limit = Math.min(query.limit ?? 10, 1000);
     const estadoOperativo = query.estado_operativo
       ? this.normalizeEquipoEstadoOperativo(query.estado_operativo)
       : undefined;
@@ -19498,7 +19791,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async listEquipoTipos(query: EquipoTipoQueryDto) {
     const page = query.page ?? 1;
-    const limit = Math.min(query.limit ?? 10, 100);
+    const limit = Math.min(query.limit ?? 10, 1000);
     const qb = this.equipoTipoRepo
       .createQueryBuilder('t')
       .where('t.is_deleted = false');
@@ -19600,7 +19893,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   async listLocations(query: LocationQueryDto, sucursalId?: string | null) {
     const page = query.page ?? 1;
-    const limit = Math.min(query.limit ?? 10, 100);
+    const limit = Math.min(query.limit ?? 10, 1000);
     const qb = this.locationRepo
       .createQueryBuilder('l')
       .where('l.is_deleted = false');
@@ -28652,7 +28945,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const page = Number.isFinite(Number(q.page)) && Number(q.page) > 0 ? Number(q.page) : 1;
     const limit = Math.min(
       Number.isFinite(Number(q.limit)) && Number(q.limit) > 0 ? Number(q.limit) : 100,
-      500,
+      1000,
     );
     const where: FindOptionsWhere<AlertaMantenimientoEntity> = {
       is_deleted: false,
@@ -29881,8 +30174,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const events = histories.get(event.work_order_id) ?? [];
       events.push(event); histories.set(event.work_order_id, events);
     }
+    const context = rows.length
+      ? await this.buildWorkOrderEnrichmentContext(rows)
+      : undefined;
     return this.wrap(
-      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor, users, histories.get(row.id) ?? []))),
+      await Promise.all(rows.map((row) => this.enrichWorkOrder(row, actor, users, histories.get(row.id) ?? [], context))),
       'Work orders listadas',
     );
   }

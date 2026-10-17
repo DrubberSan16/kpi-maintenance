@@ -48,7 +48,7 @@ export class EmpleadosService {
 
   async listar(query: EmpleadoQueryDto) {
     const page = Math.max(1, Number(query.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(query.limit) || 10));
+    const limit = Math.min(1000, Math.max(1, Number(query.limit) || 10));
     const busqueda = claveTexto(query.search).toLowerCase();
 
     const qb = this.repo.createQueryBuilder('e').where('e.is_deleted = false');

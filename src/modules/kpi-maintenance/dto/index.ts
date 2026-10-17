@@ -1110,14 +1110,14 @@ export class AlertaQueryDto {
   @ApiPropertyOptional({
     description: 'Cantidad de registros por página',
     minimum: 1,
-    maximum: 500,
+    maximum: 1000,
     type: Number,
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(1)
-  @Max(500)
+  @Max(1000)
   limit?: number;
 }
 
