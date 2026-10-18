@@ -32535,6 +32535,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     Object.assign(wo, {
       ...dtoColumnas,
+      // Con `target` ES2023 el DTO trae como `undefined` todo campo declarado
+      // que el cliente no envio. Esparcido aqui borraba `started_at` y
+      // `closed_at`, y `applyWorkflowDates` los volvia a poner con la hora de
+      // este guardado: guardar la cabecera de una OT cerrada la dejaba
+      // "iniciada y cerrada" en el mismo instante y el cebado en cero horas.
+      started_at: dto.started_at !== undefined ? dto.started_at : wo.started_at,
+      closed_at: dto.closed_at !== undefined ? dto.closed_at : wo.closed_at,
       requested_by: wo.requested_by,
       created_by: wo.created_by,
       plan_id: resolvedPlanId,
