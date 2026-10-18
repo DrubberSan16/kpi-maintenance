@@ -10591,19 +10591,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return parsed.toISOString().slice(0, 10);
   }
 
+  // Se consulta por cada detalle y cada rango de cada analisis, y normalizaba
+  // en cada llamada todos los terminos de todas las definiciones: era casi
+  // todo el tiempo del listado de lubricante. El indice se arma una vez y
+  // conserva la regla del `find` anterior: gana la primera definicion de la
+  // lista que tenga un termino igual.
+  private lubricantMetricIndex?: Map<string, LubricantMetricDefinition>;
+
   private getLubricantMetricDefinition(
     parametro: unknown,
   ): LubricantMetricDefinition | null {
     const normalized = this.normalizeSearchToken(parametro);
     if (!normalized) return null;
-    return (
-      LUBRICANT_METRIC_DEFINITIONS.find((item) => {
-        const terms = [item.label, item.key, ...(item.aliases ?? [])];
-        return terms.some(
-          (term) => this.normalizeSearchToken(term) === normalized,
-        );
-      }) ?? null
-    );
+    if (!this.lubricantMetricIndex) {
+      const index = new Map<string, LubricantMetricDefinition>();
+      for (const item of LUBRICANT_METRIC_DEFINITIONS) {
+        for (const term of [item.label, item.key, ...(item.aliases ?? [])]) {
+          const key = this.normalizeSearchToken(term);
+          if (!index.has(key)) index.set(key, item);
+        }
+      }
+      this.lubricantMetricIndex = index;
+    }
+    return this.lubricantMetricIndex.get(normalized) ?? null;
   }
 
   private normalizeLubricantDetailLevel(value: unknown) {
