@@ -1455,8 +1455,21 @@ export class KpiMaintenanceController {
   @ApiTags('Inteligencia Operativa')
   @ApiOperation({ summary: 'Listar análisis de lubricante' })
   @Get('inteligencia/analisis-lubricante')
-  listAnalisisLubricante(@Req() req: any) {
-    return this.service.listAnalisisLubricante(getSucursalScopeId(req));
+  @ApiQuery({
+    name: 'resumen',
+    required: false,
+    type: Boolean,
+    description: 'Omite detalles, rangos y payload de cada analisis (para listar)',
+  })
+  listAnalisisLubricante(
+    @Req() req: any,
+    @Query('resumen') resumen?: string,
+  ) {
+    return this.service.listAnalisisLubricante(getSucursalScopeId(req), {
+      resumen: ['true', '1', 'si', 'sí'].includes(
+        String(resumen ?? '').trim().toLowerCase(),
+      ),
+    });
   }
 
   @ApiTags('Inteligencia Operativa')

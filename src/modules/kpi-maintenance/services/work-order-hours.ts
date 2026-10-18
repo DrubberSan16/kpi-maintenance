@@ -29,5 +29,6 @@ export function workOrderWorkedHours(
     state = String(event.to_status || state).toUpperCase();
   }
   if (state !== 'REVIEW') elapsed += end - cursor;
-  return Number((Math.max(0, elapsed) / 3600000).toFixed(4));
+  // Seis decimales (0,0036 s): los cebados se muestran con segundos.
+  return Number((Math.max(0, elapsed) / 3600000).toFixed(6));
 }

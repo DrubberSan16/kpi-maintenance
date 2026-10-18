@@ -249,6 +249,13 @@ type WorkOrderEnrichmentContext = {
   bodegas: Map<string, BodegaEntity>;
 };
 
+// Igual para `buildAnalisisLubricantePayload` en los listados de analisis.
+type AnalisisLubricanteContext = {
+  equipos: Map<string, EquipoEntity>;
+  equipmentIdentity: Map<string, { marca_nombre: string | null; equipment_location_label: string | null }>;
+  productos: Map<string, ProductoEntity>;
+};
+
 // Igual para `recalculateProgramacionFields` cuando recorre listados.
 type ProgramacionRecalcContext = {
   equipos: Map<string, EquipoEntity>;
@@ -11644,18 +11651,78 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async buildAnalisisLubricantePayload(row: AnalisisLubricanteEntity) {
-    const equipment = row.equipo_id && this.equipoRepo ? await this.equipoRepo.findOne({ where: { id: row.equipo_id } }) : null;
-    const [equipmentIdentity] = equipment ? await this.attachEquipmentBrandNames([equipment]) : [null];
+  // Los listados de analisis armaban cada fila con cinco consultas (equipo,
+  // marca, ubicacion, detalles y producto). Equipo, marca, ubicacion y
+  // producto se cargan aqui en bloque; los detalles siguen por analisis porque
+  // muchos comparten `orden` y fecha, y su orden actual sale de esa consulta.
+  private async buildAnalisisLubricanteContext(
+    rows: AnalisisLubricanteEntity[],
+  ): Promise<AnalisisLubricanteContext> {
+    const keyOf = (value: unknown) => String(value ?? '').trim().toLowerCase();
+    const idsOf = (values: unknown[]) => [
+      ...new Set(
+        values
+          .map(keyOf)
+          .filter((value) =>
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value),
+          ),
+      ),
+    ];
+    const inChunks = async <T>(
+      ids: string[],
+      load: (chunk: string[]) => Promise<T[]>,
+    ) => {
+      const found: T[] = [];
+      for (let index = 0; index < ids.length; index += 1000) {
+        found.push(...(await load(ids.slice(index, index + 1000))));
+      }
+      return found;
+    };
+    const [equipos, productos] = await Promise.all([
+      this.equipoRepo
+        ? inChunks(idsOf(rows.map((row) => row.equipo_id)), (ids) =>
+            this.equipoRepo.find({ where: { id: In(ids) } }),
+          )
+        : Promise.resolve([] as EquipoEntity[]),
+      inChunks(idsOf(rows.map((row) => row.producto_id)), (ids) =>
+        this.productoRepo.find({ where: { id: In(ids), is_deleted: false } }),
+      ),
+    ]);
+    const identities = equipos.length
+      ? await this.attachEquipmentBrandNames(equipos)
+      : [];
+    return {
+      equipos: new Map(equipos.map((item) => [keyOf(item.id), item])),
+      equipmentIdentity: new Map(identities.map((item) => [keyOf(item.id), item])),
+      productos: new Map(productos.map((item) => [keyOf(item.id), item])),
+    };
+  }
+
+  private async buildAnalisisLubricantePayload(
+    row: AnalisisLubricanteEntity,
+    context?: AnalisisLubricanteContext,
+  ) {
+    const fromContext = <T>(map: Map<string, T>, id: unknown) => {
+      const key = String(id ?? '').trim().toLowerCase();
+      return key ? map.get(key) ?? null : null;
+    };
+    const equipment = context
+      ? (row.equipo_id ? fromContext(context.equipos, row.equipo_id) : null)
+      : row.equipo_id && this.equipoRepo ? await this.equipoRepo.findOne({ where: { id: row.equipo_id } }) : null;
+    const [equipmentIdentity] = context
+      ? [fromContext(context.equipmentIdentity, equipment?.id)]
+      : equipment ? await this.attachEquipmentBrandNames([equipment]) : [null];
     const [detalles, producto] = await Promise.all([
       this.analisisLubricanteDetRepo.find({
         where: { analisis_id: row.id, is_deleted: false },
         order: { orden: 'ASC', created_at: 'ASC' },
       }),
       row.producto_id
-        ? this.productoRepo.findOne({
-            where: { id: row.producto_id, is_deleted: false },
-          })
+        ? context
+          ? fromContext(context.productos, row.producto_id)
+          : this.productoRepo.findOne({
+              where: { id: row.producto_id, is_deleted: false },
+            })
         : Promise.resolve(null),
     ]);
     const payload = (row.payload_json ?? {}) as Record<string, unknown>;
@@ -21475,22 +21542,33 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Procedimiento plantilla eliminado');
   }
 
-  async listAnalisisLubricante(sucursalId?: string | null) {
+  async listAnalisisLubricante(
+    sucursalId?: string | null,
+    options?: { resumen?: boolean },
+  ) {
     const scope = await this.buildSucursalScopeContext(sucursalId);
     const rows = await this.analisisLubricanteRepo.find({
       where: { is_deleted: false },
       order: { fecha_reporte: 'DESC', created_at: 'DESC' },
     });
-    return this.wrap(
-      await Promise.all(
-        rows
-          .filter((row) =>
-            this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
-          )
-          .map((row) => this.buildAnalisisLubricantePayload(row)),
-      ),
-      'Análisis de lubricante listados',
+    const visibleRows = rows.filter((row) =>
+      this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
     );
+    const context = visibleRows.length
+      ? await this.buildAnalisisLubricanteContext(visibleRows)
+      : undefined;
+    const analyses = await Promise.all(
+      visibleRows.map((row) => this.buildAnalisisLubricantePayload(row, context)),
+    );
+    // La pantalla solo lista y cuenta: los detalles (dos veces, sueltos y por
+    // grupo), los rangos y el payload pesaban ~70 KB por analisis. Con
+    // `resumen` se omiten y la pantalla pide el analisis completo al editarlo.
+    const data = options?.resumen
+      ? analyses.map(
+          ({ detalles: _detalles, detalle_grupos: _grupos, rangos_generales: _rangos, payload_json: _payload, ...summary }) => summary,
+        )
+      : analyses;
+    return this.wrap(data, 'Análisis de lubricante listados');
   }
 
   async getAnalisisLubricante(id: string, sucursalId?: string | null) {
@@ -21730,8 +21808,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       return true;
     });
 
+    const lubricantContext = matchingRows.length
+      ? await this.buildAnalisisLubricanteContext(matchingRows)
+      : undefined;
     const analyses = await Promise.all(
-      matchingRows.map((row) => this.buildAnalisisLubricantePayload(row)),
+      matchingRows.map((row) =>
+        this.buildAnalisisLubricantePayload(row, lubricantContext),
+      ),
     );
     const sortedAnalyses = [...analyses].sort((a, b) => {
       const refA = this.resolveAnalisisFechaReferencia(a);
