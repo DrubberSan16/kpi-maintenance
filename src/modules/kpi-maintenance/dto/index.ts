@@ -13,6 +13,7 @@ import {
   IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
   ValidateIf,
   ValidateNested,
@@ -132,6 +133,12 @@ export class EquipoQueryDto {
 }
 
 export class CreateEquipoComponenteInlineDto {
+  @ApiPropertyOptional({ description: 'Serie del fabricante' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  serie?: string | null;
+
   @ApiPropertyOptional({ description: 'ID del compartimiento existente', format: 'uuid' })
   @IsOptional()
   @IsUUID()
@@ -177,6 +184,12 @@ export class CreateEquipoComponenteInlineDto {
 }
 
 export class CreateEquipoDto {
+  @ApiPropertyOptional({ description: 'Serie del fabricante' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  serie?: string | null;
+
   @ApiPropertyOptional({ description: 'Código único del equipo. Si no se envía, el sistema lo genera automáticamente.' })
   @IsOptional()
   @IsString()
@@ -915,6 +928,12 @@ export class ComponenteQueryDto {
 }
 
 export class CreateComponenteDto {
+  @ApiPropertyOptional({ description: 'Serie del fabricante' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  serie?: string | null;
+
   @ApiProperty({ description: 'ID del equipo', format: 'uuid' })
   @IsUUID()
   equipo_id: string;

@@ -7,6 +7,7 @@ export class EquipoEntity {
   @Column() nombre: string;
   @Column({ type: 'text', nullable: true }) nombre_real?: string | null;
   @Column({ type: 'text', nullable: true }) modelo?: string | null;
+  @Column({ name: 'numero_serie', type: 'text', nullable: true }) serie?: string | null;
   @Column({ type: 'text', nullable: true }) codigo_lubricante?: string | null;
   @Column() equipo_tipo_id: string;
   @Column({ type: 'uuid', nullable: true }) location_id?: string | null;
@@ -67,6 +68,7 @@ export class EquipoComponenteEntity {
   @Column({ type: 'text', nullable: true }) codigo?: string | null;
   @Column() nombre: string;
   @Column({ type: 'text', nullable: true }) nombre_oficial?: string | null;
+  @Column({ type: 'text', nullable: true }) serie?: string | null;
   @Column({ type: 'text', nullable: true }) categoria?: string | null;
   @Column({ type: 'integer', default: 1 }) orden: number;
   @Column({ type: 'text', nullable: true }) descripcion?: string | null;
@@ -773,6 +775,9 @@ export class EventoProcesoEntity {
 
 @Entity({ schema: 'kpi_process', name: 'tb_work_order' })
 export class WorkOrderEntity {
+  @Column({type: 'jsonb', nullable: true})
+  equipment_location_snapshot?: {location_id?: string|null;location_code?: string|null;location_name?: string|null;sucursal_id?: string|null;sucursal_code?: string|null;sucursal_name?: string|null;captured_at?: string;basis?: string} | null;
+
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column() code: string;
   @Column() type: string;

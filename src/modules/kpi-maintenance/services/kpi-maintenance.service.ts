@@ -1,3 +1,4 @@
+import { withWorkOrderLocation } from './work-order-location';
 import {
   BadRequestException,
   ConflictException,
@@ -1830,10 +1831,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     for (const row of rows) {
       const workOrderId = String(row.id || '').trim();
       if (!workOrderId) continue;
-      if (
-        row.equipment_id &&
-        scope.equipmentIds.has(String(row.equipment_id || '').trim())
-      ) {
+      if (row.equipment_location_snapshot
+        ? row.equipment_location_snapshot.sucursal_id === scope.sucursalId
+        : row.equipment_id && scope.equipmentIds.has(String(row.equipment_id || '').trim())) {
         visibleIds.add(workOrderId);
         continue;
       }
@@ -6011,6 +6011,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       work_order_code: row?.work_order_code ?? null,
       work_order_title: row?.work_order_title ?? null,
       work_order_status: row?.work_order_status ?? null,
+      equipment_location_snapshot: row?.equipment_location_snapshot ?? null,
+      equipment_location_label: row?.equipment_location_label ?? null,
       equipment_id: row?.equipment_id ?? null,
       equipment_name: row?.equipment_name ?? row?.equipment_label ?? null,
       maintenance_kind_label: row?.maintenance_kind_label ?? null,
@@ -18980,7 +18982,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       status_workflow: this.normalizeWorkflowStatus(workOrder.status_workflow),
       es_proyecto: esProyecto,
       ...proyectoDetalle,
-      equipment_location_label: reportEquipment?.equipment_location_label ?? null,
+      equipment_location_label: withWorkOrderLocation(reportEquipment,workOrder)?.equipment_location_label ?? null,
       equipment_modelo: equipo?.modelo ?? null,
       es_reserva: equipo?.es_reserva === true,
       horas_trabajadas: this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO'
@@ -19187,7 +19189,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .take(limit)
       .getManyAndCount();
     const equipmentWithBrands = await this.attachEquipmentBrandNames(data);
-    return this.wrap(equipmentWithBrands, 'Equipos listados', {
+    const equipmentWithHistory = await this.attachEquipmentLocationHistory(equipmentWithBrands);
+    return this.wrap(equipmentWithHistory, 'Equipos listados', {
       page,
       limit,
       total,
@@ -19284,7 +19287,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException('Equipo no encontrado');
     }
     const [equipmentWithBrand] = await this.attachEquipmentBrandNames([equipo]);
-    return this.wrap(equipmentWithBrand, 'Equipo obtenido');
+    const [withHistory] = await this.attachEquipmentLocationHistory([equipmentWithBrand]);
+    return this.wrap(withHistory, 'Equipo obtenido');
+  }
+
+  private async attachEquipmentLocationHistory<T extends {id:string}>(rows:T[]) {
+    if (!rows.length) return [] as Array<T & {historial_ubicaciones:any[]}>;
+    const history=await this.dataSource.query(`select * from (
+      select h.*,row_number() over(partition by equipo_id order by valid_from desc) as position
+      from kpi_maintenance.tb_equipo_ubicacion_historial h where equipo_id=any($1::uuid[])
+    ) ranked where position<=100 order by valid_from desc`,[rows.map(r=>r.id)]);
+    return rows.map(row=>({...row,historial_ubicaciones:history.filter((h:any)=>h.equipo_id===row.id)}));
   }
 
   private currentGuayaquilDateString(value = new Date()) {
@@ -19470,6 +19483,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             estado_operativo,
             estado_funcionamiento,
             nombre_real,
+            serie: String(dto.serie ?? '').trim() || null,
             modelo,
             codigo_lubricante,
             horometro_actual: horometroActual,
@@ -19604,6 +19618,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.codigo !== undefined
           ? String(dto.codigo ?? '').trim() || e.codigo
           : e.codigo,
+      serie: dto.serie !== undefined ? String(dto.serie ?? '').trim() || null : e.serie,
       modelo:
         dto.modelo !== undefined ? String(dto.modelo ?? '').trim() || null : e.modelo,
       codigo_lubricante:
@@ -20900,6 +20915,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         if (!hasMeaningfulData) return null;
         return {
           id: String(component?.id ?? '').trim() || null,
+          serie: component?.serie === undefined ? undefined : String(component.serie ?? '').trim() || null,
           codigo,
           nombre: nombre || nombreOficial || `Compartimiento ${index + 1}`,
           nombre_oficial: nombreOficial,
@@ -20914,6 +20930,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ? normalized
       : this.getDefaultEquipmentComponentTemplates().map((template) => ({
           id: null,
+          serie: undefined as string | null | undefined,
           codigo: template.codigo,
           nombre: template.nombre,
           nombre_oficial: template.nombre_oficial,
@@ -20978,6 +20995,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       entity.codigo = draft.codigo;
       entity.nombre = draft.nombre;
       entity.nombre_oficial = draft.nombre_oficial;
+      if (draft.serie !== undefined) entity.serie = draft.serie;
       entity.categoria = draft.categoria;
       entity.orden = draft.orden;
       entity.descripcion = draft.descripcion;
@@ -21041,6 +21059,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           codigo: resolution.resolvedCode,
           nombre: String(dto.nombre || '').trim(),
           nombre_oficial: String(dto.nombre_oficial || '').trim() || null,
+          serie: String(dto.serie ?? '').trim() || null,
           categoria: this.normalizeEquipmentComponentCategory(dto.categoria),
           orden: Number(dto.orden ?? 1) || 1,
           descripcion: String(dto.descripcion || '').trim() || null,
@@ -21092,6 +21111,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? String(dto.codigo ?? '').trim() || item.codigo
           : item.codigo,
       nombre: dto.nombre !== undefined ? String(dto.nombre || '').trim() : item.nombre,
+      serie: dto.serie !== undefined ? String(dto.serie ?? '').trim() || null : item.serie,
       nombre_oficial:
         dto.nombre_oficial !== undefined
           ? String(dto.nombre_oficial || '').trim() || null
@@ -26382,9 +26402,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const workOrder = row.work_order_id
         ? workOrderMap.get(String(row.work_order_id || '').trim())
         : null;
-      const equipment = workOrder?.equipment_id
+      const equipment = withWorkOrderLocation(workOrder?.equipment_id
         ? equipmentMap.get(String(workOrder.equipment_id || '').trim())
-        : null;
+        : null, workOrder);
       return {
         ...row,
         work_order_code: workOrder?.code ?? null,
@@ -26483,9 +26503,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       workOrder: WorkOrderEntity,
       dateField: 'created_at' | 'closed_at',
     ) => {
-      const equipment = workOrder.equipment_id
+      const equipment = withWorkOrderLocation(workOrder.equipment_id
         ? equipmentMap.get(String(workOrder.equipment_id || '').trim())
-        : null;
+        : null, workOrder);
       const bodegaIds = [...(workOrderWarehouseIds.get(workOrder.id) ?? [])]
         .filter((warehouseId) => visibleWarehouseIds.has(warehouseId));
       return {
@@ -27138,9 +27158,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           plan ? this.extractProcedimientoIdFromPlan(plan) : null,
         ) ?? null;
       const procedure = procedureId ? procedureMap.get(procedureId) : null;
-      const equipment = workOrder.equipment_id
+      const equipment = withWorkOrderLocation(workOrder.equipment_id
         ? equipmentMap.get(workOrder.equipment_id)
-        : null;
+        : null, workOrder);
       const horometerPayload = this.buildWorkOrderHorometerPayload(
         payload,
         equipment,
@@ -27217,6 +27237,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         equipment_code: equipment?.codigo ?? null,
         equipment_name: this.buildEquipmentManagerLabel(equipment),
         equipment_label: this.buildEquipmentManagerLabel(equipment),
+        equipment_location_snapshot: workOrder.equipment_location_snapshot ?? null,
+        equipment_location_label: equipment?.equipment_location_label ?? null,
         equipment_type_id: equipment?.equipo_tipo_id ?? null,
         equipment_type_label: resolveEquipmentTypeLabel(equipment),
         plan_id: plan?.id ?? workOrder.plan_id ?? null,
@@ -28813,9 +28835,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const baseRows = [...groupedByOrder.values()]
       .map((row) => {
         const producto = productMap.get(row.producto_id);
-        const equipment = row.equipment_id
+        const equipment = withWorkOrderLocation(row.equipment_id
           ? equipmentMap.get(row.equipment_id)
-          : null;
+          : null, row.workOrder);
         const bodegaLabels = [...row.bodega_ids]
           .map((id) => this.buildBodegaLabel(warehouseMap.get(id)) ?? id)
           .filter(Boolean);
@@ -31249,6 +31271,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const equipmentId =
       this.firstNonEmptyString(header.equipment_id, workOrder?.equipment_id) ??
       null;
+
+    if (workOrder?.equipment_location_snapshot && equipmentId !== workOrder.equipment_id) {
+      throw new BadRequestException('La OT ya inició su ejecución; su equipo y ubicación histórica se conservan.');
+    }
 
     // La OT de Proyecto se ejecuta sobre ubicaciones y bodegas, y se asocia a un
     // proyecto (no a una maquina); para el resto de tipos el equipo sigue siendo

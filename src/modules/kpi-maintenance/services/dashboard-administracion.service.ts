@@ -70,7 +70,8 @@ export class DashboardAdministracionService {
         COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
         wo.equipment_id, e.codigo AS equipment_code, COALESCE(e.nombre, e.nombre_real) AS equipment_name,
         m.nombre AS equipment_brand_name, e.es_reserva,
-        e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central,
+        CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN (wo.equipment_location_snapshot->>'location_id')::uuid ELSE e.location_id END AS location_id,
+        CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', wo.equipment_location_snapshot->>'location_code', wo.equipment_location_snapshot->>'location_name', wo.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', l.codigo, l.nombre) END AS central,
         NULLIF(wo.valor_json->>'horometro_anterior', '')::numeric AS horometro_inicial,
         NULLIF(wo.valor_json->>'horometro_actual', '')::numeric AS horometro_final,
         COALESCE(oil.cantidad, 0)::numeric AS cantidad, COALESCE(oil.subtotal, 0)::numeric AS subtotal,
@@ -326,6 +327,7 @@ export class DashboardAdministracionService {
         SELECT
           wo.id AS work_order_id,
           wo.equipment_id,
+          wo.equipment_location_snapshot - 'captured_at' - 'basis' AS equipment_location_snapshot,
           COALESCE(wo.hora_inicio, wo.created_at) AS momento,
           NULLIF(TRIM(wo.valor_json ->> 'horometro_anterior'), '')::numeric AS horometro_anterior,
           NULLIF(TRIM(wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro_actual,
@@ -356,8 +358,8 @@ export class DashboardAdministracionService {
         e.codigo AS equipo_codigo,
         COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
         e.nombre_real AS equipo_descripcion,
-        l.id AS location_id,
-        CONCAT_WS(' - ', l.codigo, l.nombre) AS central,
+        CASE WHEN o.equipment_location_snapshot IS NOT NULL THEN (o.equipment_location_snapshot->>'location_id')::uuid ELSE l.id END AS location_id,
+        CASE WHEN o.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', o.equipment_location_snapshot->>'location_code', o.equipment_location_snapshot->>'location_name', o.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', l.codigo, l.nombre) END AS central,
         ROUND(COALESCE(SUM(o.galones), 0)::numeric, 2) AS galones_periodo,
         ROUND(COALESCE(SUM(o.galones) FILTER (
           WHERE o.momento >= $2::timestamp - INTERVAL '7 days'
@@ -380,7 +382,7 @@ export class DashboardAdministracionService {
       FROM por_orden o
       INNER JOIN kpi_maintenance.tb_equipo e ON e.id = o.equipment_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND COALESCE(l.is_deleted, false) = false
-      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion, l.id
+      GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion, l.id, o.equipment_location_snapshot
       ORDER BY l.nombre NULLS LAST, NULLIF(substring(e.nombre from '(?i)UG[ -]*([0-9]+)'), '')::integer NULLS LAST, e.nombre
       `,
       [desde, hasta, equipoId],
@@ -783,7 +785,8 @@ export class DashboardAdministracionService {
           COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
           wo.maintenance_kind AS tipo,
           COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
-          e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central,
+          CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN (wo.equipment_location_snapshot->>'location_id')::uuid ELSE e.location_id END AS location_id,
+        CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', wo.equipment_location_snapshot->>'location_code', wo.equipment_location_snapshot->>'location_name', wo.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', l.codigo, l.nombre) END AS central,
           ROUND(SUM(cr.cantidad)::numeric, 2) AS galones,
           ROUND(SUM(cr.cantidad * COALESCE(issued.costo_unitario, cr.costo_unitario, 0))::numeric, 2) AS costo
         FROM kpi_process.tb_work_order wo
