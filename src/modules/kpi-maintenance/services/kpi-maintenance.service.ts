@@ -101,6 +101,7 @@ import {
 } from '../entities/kpi-maintenance.entity';
 import { MaterialPriceTimeline } from '../../../common/pricing/material-price-history.util';
 import { FifoCostEngine } from '../../../common/pricing/fifo-cost.engine';
+import { isSsaEquipment, operatorMaintenanceKindForEquipment } from './operator-work-order-kind';
 import { getPendingTransferStock } from '../../../common/utils/transfer-pending-stock.util';
 import {
   AnalisisAceiteKpiQueryDto,
@@ -3366,14 +3367,19 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return role === 'OPERADOR';
   }
 
-  private assertOperatorWorkOrderKind(
+  private async assertOperatorWorkOrderKind(
     actor: RequestActorContext | null | undefined,
     maintenanceKind: string,
+    equipment: EquipoEntity | null,
   ) {
     if (!this.isOperatorActor(actor)) return;
-    if (maintenanceKind === 'CEBADO') return;
+    const [context] = equipment
+      ? await this.attachEquipmentBrandNames([equipment])
+      : [null];
+    const requiredKind = operatorMaintenanceKindForEquipment(context);
+    if (maintenanceKind === requiredKind) return;
     throw new BadRequestException(
-      'El perfil operador solo puede crear ordenes de trabajo de tipo mantenimiento CEBADO.',
+      `Para el perfil operador, el equipo seleccionado requiere una orden de trabajo de tipo ${requiredKind}.`,
     );
   }
 
@@ -3491,7 +3497,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     throw new ForbiddenException(
-      'El perfil operador solo puede acceder a ordenes de trabajo donde este asignado como responsable o a sus propias ordenes de CEBADO.',
+      'El perfil operador solo puede acceder a órdenes de trabajo donde esté asignado como responsable o a sus propias órdenes de Cebado o SSA.',
     );
   }
 
@@ -18138,7 +18144,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
     if (this.isOperatorActor(actor)) {
       return (
-        this.normalizeMaintenanceKind(workOrder.maintenance_kind) === 'CEBADO' &&
+        ['CEBADO', 'SSA'].includes(this.normalizeMaintenanceKind(workOrder.maintenance_kind)) &&
         isDirectOwner
       );
     }
@@ -18164,13 +18170,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (this.isOperatorActor(actor)) {
-      if (this.normalizeMaintenanceKind(workOrder.maintenance_kind) !== 'CEBADO') {
+      if (!['CEBADO', 'SSA'].includes(this.normalizeMaintenanceKind(workOrder.maintenance_kind))) {
         throw new ForbiddenException(
-          `El perfil operador solo puede ${actionLabel} ordenes de trabajo de tipo mantenimiento CEBADO creadas por el mismo.`,
+          `El perfil operador solo puede ${actionLabel} órdenes de trabajo de tipo Cebado o SSA creadas por él mismo.`,
         );
       }
       throw new ForbiddenException(
-        `Solo el operador que creo esta orden de trabajo de tipo CEBADO puede ${actionLabel}.`,
+        `Solo el operador que creó esta orden de trabajo de tipo Cebado o SSA puede ${actionLabel}.`,
       );
     }
 
@@ -19121,14 +19127,38 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const locations = locationIds.length && this.locationRepo
       ? await this.locationRepo.find({ where: { id: In(locationIds), is_deleted: false } }) : [];
     const locationMap = new Map(locations.map(row => [row.id, row]));
+    const typeIds = [...new Set(rows.map(row => row.equipo_tipo_id).filter(Boolean))];
+    const types = typeIds.length && this.equipoTipoRepo
+      ? await this.equipoTipoRepo.find({ where: { id: In(typeIds), is_deleted: false } }) : [];
+    const typeMap = new Map(types.map(row => [row.id, row]));
+    const equipmentIds = rows.map(row => row.id).filter(Boolean);
+    const components = equipmentIds.length && this.equipoComponenteRepo
+      ? await this.equipoComponenteRepo.find({
+          where: { equipo_id: In(equipmentIds), is_deleted: false },
+          select: ['equipo_id', 'codigo', 'nombre', 'nombre_oficial', 'categoria', 'descripcion', 'serie'],
+        }) : [];
+    const componentsByEquipment = new Map<string, EquipoComponenteEntity[]>();
+    for (const component of components) {
+      const group = componentsByEquipment.get(component.equipo_id) ?? [];
+      group.push(component);
+      componentsByEquipment.set(component.equipo_id, group);
+    }
     return rows.map((row) => {
       const location = locationMap.get(String(row.location_id || ''));
-      return {
+      const type = typeMap.get(String(row.equipo_tipo_id || ''));
+      const context = {
         ...row,
         marca_nombre: brandNames.get(String(row.marca_id || '')) || null,
+        equipo_tipo_codigo: type?.codigo ?? null,
+        equipo_tipo_nombre: type?.nombre ?? null,
+        equipo_tipo_descripcion: type?.descripcion ?? null,
         equipment_location_label: location ? [location.codigo, location.nombre].filter(Boolean).join(' - ') : null,
         location_nombre: location?.nombre ?? null,
         location_codigo: location?.codigo ?? null,
+      };
+      return {
+        ...context,
+        is_ssa: isSsaEquipment({ ...context, compartimientos: componentsByEquipment.get(row.id) }),
         horometro_operativo_base: Number(row.horometro_actual || 0),
         horometro_actual: this.operationalHorometer(row),
       };
@@ -30299,7 +30329,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
           operatorQb.orWhere(
             new Brackets((ownerQb) => {
-              ownerQb.where(`UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'`);
+              ownerQb.where(`UPPER(COALESCE(wo.maintenance_kind, '')) IN ('CEBADO', 'SSA')`);
               ownerQb.andWhere(
                 new Brackets((identityQb) => {
                   if (operatorActorUserId) {
@@ -31358,7 +31388,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       header.hora_fin,
       workOrder,
     );
-    this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
+    await this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind, equipment);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
     }
@@ -32156,7 +32186,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       dto.hora_inicio,
       dto.hora_fin,
     );
-    this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind);
+    await this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind, equipment);
     if (normalizedStatus === 'IN_PROGRESS') {
       await this.assertWorkOrderCanMoveToInProgress({
         maintenanceKind: resolvedMaintenanceKind,
@@ -32608,7 +32638,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.created_by ??
       this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ??
       null;
-    this.assertOperatorWorkOrderKind(actor, wo.maintenance_kind);
+    await this.assertOperatorWorkOrderKind(actor, wo.maintenance_kind, equipment);
     if (nextWorkflowStatus === 'IN_PROGRESS' && previousStatus !== 'IN_PROGRESS') {
       await this.assertWorkOrderCanMoveToInProgress({
         maintenanceKind: wo.maintenance_kind,
