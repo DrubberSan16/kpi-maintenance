@@ -10837,6 +10837,88 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /**
+   * Regla tal como la necesita quien la muestra: sin campos vacios y, si
+   * depende de la linea base ("[50% TBN -1]"), con el limite ya calculado en
+   * `resolved_value` para que el grafico pueda trazarlo.
+   */
+  private compactLubricantRule(
+    rule: LubricantThresholdRule | null | undefined,
+    baseline?: number | null,
+  ) {
+    if (!rule) return null;
+    const compact: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rule)) {
+      if (value == null || value === '' || value === false) continue;
+      compact[key] = value;
+    }
+    if (
+      rule.expression === 'BASELINE_PERCENT_MINUS_OFFSET' &&
+      baseline != null &&
+      Number.isFinite(baseline)
+    ) {
+      const percentage =
+        rule.value != null && Number.isFinite(rule.value) ? rule.value : 0.5;
+      const offset =
+        rule.offset != null && Number.isFinite(rule.offset) ? rule.offset : 1;
+      compact.resolved_value = Number((baseline * percentage - offset).toFixed(4));
+    }
+    return Object.keys(compact).length ? compact : null;
+  }
+
+  /**
+   * Parametros fuera de rango de un analisis, primero los anormales. Es lo que
+   * explica su condicion: la lista resumida lo lleva para que la pantalla diga
+   * por que un equipo esta en precaucion sin bajar todos los detalles.
+   */
+  private buildLubricantFindings(
+    detalles: Array<{
+      parametro_key?: string | null;
+      parametro_label?: string | null;
+      parametro?: string | null;
+      grupo_label?: string | null;
+      unidad?: string | null;
+      resultado_numerico?: unknown;
+      resultado_texto?: string | null;
+      nivel_alerta?: string | null;
+      rango_precaucion?: Record<string, unknown> | null;
+      rango_anormal?: Record<string, unknown> | null;
+      orden?: number | null;
+    }>,
+  ) {
+    return detalles
+      .map((detalle) => ({
+        detalle,
+        nivel: this.normalizeLubricantDetailLevel(detalle.nivel_alerta),
+      }))
+      .filter(({ nivel }) => nivel === 'ANORMAL' || nivel === 'PRECAUCION')
+      .sort(
+        (a, b) =>
+          Number(b.nivel === 'ANORMAL') - Number(a.nivel === 'ANORMAL') ||
+          Number(a.detalle.orden ?? 999) - Number(b.detalle.orden ?? 999),
+      )
+      .map(({ detalle, nivel }) => {
+        const rule =
+          nivel === 'ANORMAL' ? detalle.rango_anormal : detalle.rango_precaucion;
+        const numeric =
+          detalle.resultado_numerico == null
+            ? null
+            : Number(detalle.resultado_numerico);
+        return {
+          parametro_key: detalle.parametro_key ?? null,
+          parametro: detalle.parametro_label || detalle.parametro || null,
+          grupo_label: detalle.grupo_label ?? null,
+          unidad: detalle.unidad ?? null,
+          valor:
+            numeric != null && Number.isFinite(numeric)
+              ? numeric
+              : detalle.resultado_texto ?? null,
+          nivel,
+          limite: rule ? String(rule.raw ?? '').trim() || null : null,
+        };
+      });
+  }
+
   private resolveLubricantThresholdLineBaseLabel(
     threshold?: LubricantMetricThreshold | null,
   ) {
@@ -11788,9 +11870,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           LUBRICANT_GROUP_LABELS[definition?.group ?? 'OTROS_ELEMENTOS'],
         chart_group: definition?.chartGroup ?? 'otros',
         nivel_alerta: nivel,
-        rango_precaucion: threshold?.warning ?? null,
-        rango_anormal: threshold?.alert ?? null,
-        rangos_generales: threshold,
+        // Cada detalle traia la misma regla tres veces (aqui y dentro de un
+        // `rangos_generales` que nadie leia): ~0,8 MB de la lista completa.
+        rango_precaucion: this.compactLubricantRule(threshold?.warning, baseline),
+        rango_anormal: this.compactLubricantRule(threshold?.alert, baseline),
         linea_base_label: thresholdLabel,
         linea_base_display:
           thresholdLabel ??
@@ -11817,12 +11900,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       >((acc, detalle) => {
         const key = String(detalle.grupo || 'OTROS_ELEMENTOS');
         if (!acc[key]) {
+          // El orden del informe del laboratorio. El `order` de las
+          // definiciones es la posicion dentro de su grupo (todos empiezan en
+          // 1) y dejaba los grupos en cualquier orden.
+          const groupPosition = Object.keys(LUBRICANT_GROUP_LABELS).indexOf(key);
           acc[key] = {
             key,
             label: detalle.grupo_label,
-            order:
-              LUBRICANT_METRIC_DEFINITIONS.find((item) => item.group === key)
-                ?.order ?? 999,
+            order: groupPosition === -1 ? 999 : groupPosition,
             detalles: [],
           };
         }
@@ -21622,12 +21707,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     // La pantalla solo lista y cuenta: los detalles (dos veces, sueltos y por
     // grupo), los rangos y el payload pesaban ~70 KB por analisis. Con
-    // `resumen` se omiten y la pantalla pide el analisis completo al editarlo.
+    // `resumen` se omiten y la pantalla pide el analisis completo al editarlo;
+    // de los detalles queda solo lo que esta fuera de rango (`hallazgos`).
+    // La lista completa tampoco repite los detalles agrupados: era casi la
+    // mitad de sus 9 MB, y cada detalle ya dice su grupo (`grupo_label`).
     const data = options?.resumen
       ? analyses.map(
-          ({ detalles: _detalles, detalle_grupos: _grupos, rangos_generales: _rangos, payload_json: _payload, ...summary }) => summary,
+          ({ detalles, detalle_grupos: _grupos, rangos_generales: _rangos, payload_json: _payload, ...summary }) => ({
+            ...summary,
+            hallazgos: this.buildLubricantFindings(detalles),
+          }),
         )
-      : analyses;
+      : analyses.map(({ detalle_grupos: _grupos, ...analysis }) => analysis);
     return this.wrap(data, 'Análisis de lubricante listados');
   }
 
@@ -21912,6 +22003,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         group_label: string;
         chart_group: string;
         unit: string | null;
+        fuera_de_rango: number;
+        ultimo_nivel: string;
         points: Array<Record<string, unknown>>;
       }
     >();
@@ -21935,28 +22028,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             group_label: detail.grupo_label ?? 'Otros elementos',
             chart_group: detail.chart_group ?? 'otros',
             unit: detail.unidad ?? null,
+            fuera_de_rango: 0,
+            ultimo_nivel: 'NORMAL',
             points: [],
           });
         }
-        seriesMap.get(key)?.points.push({
+        const series = seriesMap.get(key);
+        if (!series) continue;
+        const level = this.normalizeLubricantDetailLevel(detail.nivel_alerta);
+        if (level === 'ANORMAL' || level === 'PRECAUCION') {
+          series.fuera_de_rango += 1;
+        }
+        series.ultimo_nivel = level;
+        // Cada punto lleva sus limites: cambian entre informes del
+        // laboratorio, y el grafico traza el que regia en esa muestra.
+        series.points.push({
           analisis_id: analysis.id,
           codigo: analysis.codigo,
           fecha: referenceDate,
           numero_muestra: analysis.sample_info?.numero_muestra ?? null,
-          compartimento: detail.compartimento ?? analysis.compartimento_principal,
           valor: Number(currentValue.toFixed(4)),
-          linea_base: detail.linea_base_resuelta ?? detail.linea_base ?? null,
-          linea_base_label: detail.linea_base_label ?? null,
-          linea_base_display:
-            detail.linea_base_display ??
-            detail.linea_base_label ??
-            detail.linea_base_resuelta ??
-            detail.linea_base ??
-            null,
-          tendencia: detail.delta_valor ?? detail.tendencia ?? null,
           rango_precaucion: detail.rango_precaucion ?? null,
           rango_anormal: detail.rango_anormal ?? null,
-          nivel_alerta: detail.nivel_alerta ?? 'NORMAL',
+          nivel_alerta: level,
         });
       }
     }
@@ -22036,10 +22130,20 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ).length,
         },
         timeline: sampleHistory,
-        latest_analysis: latestAnalysis,
+        // La ultima muestra sin sus detalles: ya van una vez, agrupados, en
+        // `detail_groups`. Y sin `series`, que repetia `chart_sections`
+        // punto por punto (la mitad de la respuesta).
+        latest_analysis: latestAnalysis
+          ? (({
+              detalles: _detalles,
+              detalle_grupos: _grupos,
+              rangos_generales: _rangos,
+              payload_json: _payload,
+              ...summary
+            }) => summary)(latestAnalysis)
+          : null,
         detail_groups: latestAnalysis?.detalle_grupos ?? [],
         chart_sections: chartSections,
-        series: [...seriesMap.values()],
       },
       'Dashboard de análisis de lubricante generado',
     );
