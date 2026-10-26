@@ -7,6 +7,7 @@ import {
   fechaProximoMantenimiento,
   resolverReferenciaMantenimiento,
 } from './horometro-proyeccion';
+import { aceiteEnGalonesSql } from './material-cost-category';
 
 /**
  * Dashboard Administración: KPI de mantenimiento.
@@ -56,12 +57,24 @@ export class DashboardAdministracionService {
   private readonly CEBADO_VERDE_MAX = 5;
   private readonly CEBADO_AMARILLO_MAX = 10;
 
-  /** Una fila por OT, también cuando no consumió aceite. Misma fuente para gráficos y exportes. */
-  async getControlCebadoAceite(query: { desde?: string; hasta?: string; equipo_id?: string; solo_cebado?: boolean }) {
+  /**
+   * Una fila por OT, también cuando no consumió aceite. Misma fuente para
+   * gráficos y exportes de los dos tableros, Gerencia y Administración.
+   *
+   * La sucursal activa llega en la cabecera `x-sucursal-id`. Sin filtrarla, el
+   * PDF de una central (TPTA) traía también las OT de la otra (CPT). La OT se
+   * ubica por la foto de ubicación que guardó al crearse y, si no la tiene, por
+   * la ubicación actual del equipo, igual que el listado de OT.
+   */
+  async getControlCebadoAceite(
+    query: { desde?: string; hasta?: string; equipo_id?: string; solo_cebado?: boolean },
+    sucursalId?: string | null,
+  ) {
     const period = this.resolvePeriod();
     // Son días de Guayaquil sobre columnas timestamp sin zona: no convertirlos a UTC.
     const desde = query.desde ? `${query.desde.slice(0, 10)} 00:00:00` : period.desde;
     const hasta = query.hasta ? `${query.hasta.slice(0, 10)} 23:59:59.999999` : period.hasta;
+    const sucursal = this.equipoParam(sucursalId);
     const filas = await this.dataSource.query(`
       SELECT wo.id AS work_order_id, wo.code AS work_order_code, wo.title AS work_order_title,
         wo.maintenance_kind, wo.status_workflow AS work_order_status,
@@ -86,7 +99,7 @@ export class DashboardAdministracionService {
           SUM(cr.cantidad * COALESCE(issued.unit_cost, cr.costo_unitario, 0)) AS subtotal,
           string_agg(DISTINCT CONCAT_WS(' - ', p.codigo, p.nombre), ', ') AS producto
         FROM kpi_maintenance.tb_consumo_repuesto cr
-        JOIN kpi_inventory.tb_producto p ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false)
+        JOIN kpi_inventory.tb_producto p ON p.id = cr.producto_id AND ${aceiteEnGalonesSql('p')}
         LEFT JOIN LATERAL (
           SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS unit_cost
           FROM kpi_inventory.tb_entrega_material em
@@ -109,15 +122,17 @@ export class DashboardAdministracionService {
         AND COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
         AND (NOT $4::boolean OR UPPER(wo.maintenance_kind) = 'CEBADO')
+        AND ($5::uuid IS NULL OR COALESCE(
+          NULLIF(wo.equipment_location_snapshot->>'sucursal_id', '')::uuid, l.sucursal_id) = $5::uuid)
       ORDER BY fecha_referencia, wo.code
-    `, [desde, hasta, this.equipoParam(query.equipo_id), query.solo_cebado === true]);
+    `, [desde, hasta, this.equipoParam(query.equipo_id), query.solo_cebado === true, sucursal]);
     const equipos = await this.dataSource.query(`
       SELECT e.id, e.codigo, COALESCE(e.nombre, e.nombre_real) AS nombre, e.es_reserva,
         e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central
       FROM kpi_maintenance.tb_equipo e
       LEFT JOIN kpi_maintenance.tb_equipo_tipo t ON t.id = e.equipo_tipo_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
-      WHERE NOT COALESCE(e.is_deleted, false) AND (
+      WHERE NOT COALESCE(e.is_deleted, false) AND ($1::uuid IS NULL OR l.sucursal_id = $1::uuid) AND (
         UPPER(COALESCE(t.nombre, '') || ' ' || COALESCE(t.codigo, '')) SIMILAR TO '%(GENERACI|GENERADOR)%'
         OR EXISTS (SELECT 1 FROM kpi_process.tb_work_order wo WHERE wo.equipment_id = e.id
           AND NOT COALESCE(wo.is_deleted, false)
@@ -126,12 +141,116 @@ export class DashboardAdministracionService {
           AND UPPER(COALESCE(wo.valor_json->>'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
           AND COALESCE(wo.valor_json->'annulment', 'null'::jsonb) = 'null'::jsonb)
       ) ORDER BY e.codigo, e.nombre, e.id
-    `);
+    `, [sucursal]);
+    const inventario = await this.getInventarioAceite(desde, hasta, sucursal);
     return this.wrap({ filas: filas.map(({ history, valor_json, ...row }) => ({
       ...row, cantidad: Number(row.cantidad), subtotal: Number(row.subtotal),
       horas_trabajadas: workOrderWorkedHours({ ...row, valor_json, status_workflow: row.work_order_status }, history),
       semaforo: this.resolveCebadoSemaforo(Number(row.cantidad)),
-    })), equipos }, 'Control de cebado y aceite generado');
+    })), equipos, inventario }, 'Control de cebado y aceite generado');
+  }
+
+  /**
+   * Movimiento del aceite en las bodegas de la sucursal durante el período.
+   *
+   * Igual que el resumen del Kardex, la existencia se cuenta hacia atrás desde
+   * el stock real de cada bodega, que es el dato autoritativo: existencia al
+   * cierre = stock de hoy - entradas posteriores + salidas posteriores, y la
+   * inicial resta los movimientos del período. Así la tabla siempre cierra:
+   * inicial + ingresos - salidas = final.
+   *
+   * Los valores salen del costo de cada asiento del kardex (FIFO), y el stock
+   * de hoy se valoriza con el costo promedio de las capas vigentes de la bodega.
+   *
+   * Las transferencias se separan de las compras: entre bodegas de la misma
+   * sucursal salen y entran a la vez, y sumarlas como compra inflaría el
+   * ingreso. Una entrada ligada a una OT es material devuelto.
+   */
+  private async getInventarioAceite(desde: string, hasta: string, sucursal: string | null) {
+    const [rows, stock] = await Promise.all([
+      this.dataSource.query(`
+        SELECT
+          CASE
+            WHEN k.fecha > $2::timestamp THEN 'POSTERIOR'
+            WHEN tr.es_transferencia AND k.entrada_cantidad > 0 THEN 'TRANSFERENCIAS_RECIBIDAS'
+            WHEN tr.es_transferencia THEN 'TRANSFERENCIAS_ENVIADAS'
+            WHEN UPPER(COALESCE(k.tipo_movimiento, '')) LIKE 'AJUSTE%' THEN 'AJUSTES'
+            WHEN k.entrada_cantidad > 0 AND m.work_order_id IS NOT NULL THEN 'DEVOLUCIONES'
+            WHEN k.entrada_cantidad > 0 THEN 'COMPRAS'
+            ELSE 'SALIDAS'
+          END AS concepto,
+          SUM(k.entrada_cantidad)::numeric AS entradas,
+          SUM(k.salida_cantidad)::numeric AS salidas,
+          SUM(CASE WHEN k.entrada_cantidad > 0 THEN k.costo_total ELSE 0 END)::numeric AS costo_entradas,
+          SUM(CASE WHEN k.entrada_cantidad > 0 THEN 0 ELSE k.costo_total END)::numeric AS costo_salidas
+        FROM kpi_inventory.tb_kardex k
+        JOIN kpi_inventory.tb_producto p ON p.id = k.producto_id AND ${aceiteEnGalonesSql('p')}
+        JOIN kpi_inventory.tb_bodega b ON b.id = k.bodega_id
+        LEFT JOIN kpi_inventory.tb_movimiento_inventario m ON m.id = k.movimiento_id
+        LEFT JOIN LATERAL (
+          SELECT true AS es_transferencia FROM kpi_inventory.tb_transferencia_bodega t
+          WHERE k.movimiento_id IS NOT NULL
+            AND (t.movimiento_salida_id = k.movimiento_id OR t.movimiento_ingreso_id = k.movimiento_id)
+          LIMIT 1
+        ) tr ON true
+        WHERE NOT COALESCE(k.is_deleted, false)
+          AND k.fecha >= $1::timestamp
+          AND ($3::uuid IS NULL OR b.sucursal_id = $3::uuid)
+        GROUP BY 1
+      `, [desde, hasta, sucursal]),
+      this.dataSource.query(`
+        SELECT COALESCE(SUM(sb.stock_actual), 0)::numeric AS cantidad,
+          COALESCE(SUM(sb.stock_actual * COALESCE(sb.costo_promedio_bodega, 0)), 0)::numeric AS costo
+        FROM kpi_inventory.tb_stock_bodega sb
+        JOIN kpi_inventory.tb_producto p ON p.id = sb.producto_id AND ${aceiteEnGalonesSql('p')}
+        JOIN kpi_inventory.tb_bodega b ON b.id = sb.bodega_id AND NOT COALESCE(b.is_deleted, false)
+        WHERE NOT COALESCE(sb.is_deleted, false)
+          AND ($1::uuid IS NULL OR b.sucursal_id = $1::uuid)
+      `, [sucursal]),
+    ]);
+    const round = (value: number) => Number(value.toFixed(4));
+    const byConcept = new Map<string, any>(rows.map((row: any) => [row.concepto, row]));
+    const flow = (concepto: string, sentido: 'entrada' | 'salida') => {
+      const row = byConcept.get(concepto);
+      return {
+        cantidad: round(Number(sentido === 'entrada' ? row?.entradas : row?.salidas) || 0),
+        costo: round(Number(sentido === 'entrada' ? row?.costo_entradas : row?.costo_salidas) || 0),
+      };
+    };
+    // Un ajuste puede sumar o restar: se informa neto.
+    const ajusteRow = byConcept.get('AJUSTES');
+    const ajustes = {
+      cantidad: round((Number(ajusteRow?.entradas) || 0) - (Number(ajusteRow?.salidas) || 0)),
+      costo: round((Number(ajusteRow?.costo_entradas) || 0) - (Number(ajusteRow?.costo_salidas) || 0)),
+    };
+    const compras = flow('COMPRAS', 'entrada');
+    const devoluciones = flow('DEVOLUCIONES', 'entrada');
+    const transferenciasRecibidas = flow('TRANSFERENCIAS_RECIBIDAS', 'entrada');
+    const salidas = flow('SALIDAS', 'salida');
+    const transferenciasEnviadas = flow('TRANSFERENCIAS_ENVIADAS', 'salida');
+    const posterior = byConcept.get('POSTERIOR');
+    const saldoActual = { cantidad: round(Number(stock[0]?.cantidad) || 0), costo: round(Number(stock[0]?.costo) || 0) };
+    const existenciaFinal = {
+      cantidad: round(saldoActual.cantidad - (Number(posterior?.entradas) || 0) + (Number(posterior?.salidas) || 0)),
+      costo: round(saldoActual.costo - (Number(posterior?.costo_entradas) || 0) + (Number(posterior?.costo_salidas) || 0)),
+    };
+    const neto = (field: 'cantidad' | 'costo') =>
+      compras[field] + devoluciones[field] + transferenciasRecibidas[field] + ajustes[field]
+      - salidas[field] - transferenciasEnviadas[field];
+    return {
+      existencia_inicial: {
+        cantidad: round(existenciaFinal.cantidad - neto('cantidad')),
+        costo: round(existenciaFinal.costo - neto('costo')),
+      },
+      compras,
+      transferencias_recibidas: transferenciasRecibidas,
+      devoluciones,
+      ajustes,
+      salidas,
+      transferencias_enviadas: transferenciasEnviadas,
+      existencia_final: existenciaFinal,
+      saldo_actual: saldoActual,
+    };
   }
 
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

@@ -202,6 +202,10 @@ import {
   SERVICIOS_MPG_SQL,
   resolverReferenciaMantenimiento,
 } from './horometro-proyeccion';
+import {
+  MATERIAL_COST_CATEGORY_SQL,
+  type MaterialCostCategory,
+} from './material-cost-category';
 
 type AlertLevel = 'INFO' | 'WARNING' | 'CRITICAL';
 type AlertCategory =
@@ -27132,6 +27136,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       [...inventoryProductIds],
       [...inventoryWarehouseIds],
     );
+    const materialCategoryMap = await this.loadMaterialCostCategories([
+      ...inventoryProductIds,
+    ]);
 
     // El tablero gerencial valoriza cada consumo con el precio que regia el
     // dia de su OT y el inventario con el vigente al cierre del rango.
@@ -27760,7 +27767,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
             total_costo: 0,
             total_cantidad: 0,
             total_items: 0,
+            costo_repuestos: 0,
+            costo_aceite: 0,
+            costo_insumos: 0,
             _materiales: new Set<string>(),
+            _detalle: new Map<string, any>(),
           },
         ]),
     );
@@ -27810,6 +27821,42 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           );
           maintenanceRow.total_items += 1;
           maintenanceRow._materiales.add(materialLabel);
+
+          // Repuestos, aceite e insumos son excluyentes y suman el costo de
+          // materiales; el detalle por material es lo que se audita en el
+          // reporte financiero de repuestos.
+          const category = materialCategoryMap.get(
+            String(row.producto_id || '').trim(),
+          );
+          const categoria = category?.categoria_costo ?? 'INSUMOS';
+          const categoryKey =
+            categoria === 'REPUESTOS'
+              ? 'costo_repuestos'
+              : categoria === 'ACEITE'
+                ? 'costo_aceite'
+                : 'costo_insumos';
+          maintenanceRow[categoryKey] = Number(
+            (maintenanceRow[categoryKey] + subtotal).toFixed(4),
+          );
+          const detailKey = `${row.producto_id}|${warehouseId}`;
+          const detail = maintenanceRow._detalle.get(detailKey) ?? {
+            producto_id: row.producto_id,
+            material_codigo: product?.codigo ?? null,
+            material_label: materialLabel,
+            linea: category?.linea_nombre ?? null,
+            categoria_costo: categoria,
+            bodega_label: warehouseLabel || 'Sin bodega',
+            cantidad: 0,
+            costo_total: 0,
+            costo_unitario: 0,
+          };
+          detail.cantidad = Number((detail.cantidad + quantity).toFixed(4));
+          detail.costo_total = Number((detail.costo_total + subtotal).toFixed(4));
+          detail.costo_unitario =
+            detail.cantidad > 0
+              ? Number((detail.costo_total / detail.cantidad).toFixed(4))
+              : unitCost;
+          maintenanceRow._detalle.set(detailKey, detail);
         }
 
         const replacedKey = `${context.work_order_id}|${row.producto_id}|${warehouseId}`;
@@ -27856,8 +27903,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           row._materiales as Set<string>
         ).size,
         materiales: [...(row._materiales as Set<string>)].join(' | ') || null,
+        materiales_detalle: [...(row._detalle as Map<string, any>).values()],
       })),
-    ).map(({ _materiales, ...row }) => row);
+    ).map(({ _materiales, _detalle, ...row }) => row);
 
     let costoMantenimientoRows = costoMantenimientoOtRows;
     if (groupBy === 'EQUIPO') {
@@ -36829,6 +36877,27 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
    * lo que costaron de verdad las capas consumidas. Solo cuenta lo entregado
    * desde el corte FIFO (entregas enlazadas a su kardex).
    */
+  /** Repuestos, aceite o insumos por material: ver `material-cost-category.ts`. */
+  private async loadMaterialCostCategories(productIds: string[]) {
+    const ids = [...new Set(productIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    const result = new Map<
+      string,
+      { categoria_costo: MaterialCostCategory; linea_nombre: string | null }
+    >();
+    if (!ids.length) return result;
+    const rows: Array<Record<string, any>> = await this.dataSource.query(
+      MATERIAL_COST_CATEGORY_SQL,
+      [ids],
+    );
+    for (const row of rows) {
+      result.set(String(row.id), {
+        categoria_costo: row.categoria_costo as MaterialCostCategory,
+        linea_nombre: row.linea_nombre ?? null,
+      });
+    }
+    return result;
+  }
+
   private async loadFifoIssueUnitCosts(workOrderIds: string[]) {
     const ids = [...new Set(workOrderIds.filter(Boolean))];
     const costs = new Map<string, number>();

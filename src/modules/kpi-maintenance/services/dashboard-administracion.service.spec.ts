@@ -212,3 +212,59 @@ describe('Dashboard administrativo: proyección por horómetro', () => {
     expect(sql).toContain("jsonb_typeof(wo.valor_json::jsonb -> 'annulment')");
   });
 });
+
+/*
+ * El PDF de cebado de TPTA traía las OT de CPT, y Gerencia pidió el movimiento
+ * del aceite en bodega junto al consumo. El inventario se reconstruye hacia
+ * atrás desde el stock real, así que tiene que cerrar siempre.
+ */
+describe('Dashboard administrativo: control de cebado y aceite', () => {
+  const kardex = [
+    { concepto: 'COMPRAS', entradas: '79', salidas: '0', costo_entradas: '987.5', costo_salidas: '0' },
+    { concepto: 'TRANSFERENCIAS_RECIBIDAS', entradas: '100', salidas: '0', costo_entradas: '1250', costo_salidas: '0' },
+    { concepto: 'SALIDAS', entradas: '0', salidas: '962', costo_entradas: '0', costo_salidas: '11888.5' },
+    { concepto: 'AJUSTES', entradas: '5', salidas: '2', costo_entradas: '62.5', costo_salidas: '25' },
+    { concepto: 'POSTERIOR', entradas: '10', salidas: '30', costo_entradas: '125', costo_salidas: '375' },
+  ];
+  const stock = [{ cantidad: '40', costo: '500' }];
+
+  const consulta = () =>
+    jest.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('tb_kardex')) return kardex;
+      if (sql.includes('tb_stock_bodega')) return stock;
+      return [];
+    });
+
+  it('la existencia inicial más los movimientos da la final, y la final sale del stock de hoy', async () => {
+    const query = consulta();
+    const service = new DashboardAdministracionService({ query } as any);
+    const { data } = await service.getControlCebadoAceite({ desde: '2026-10-01', hasta: '2026-10-20' }, 'suc-tpta');
+    const inventario = (data as any).inventario;
+
+    // Final = hoy (40) - entradas posteriores (10) + salidas posteriores (30).
+    expect(inventario.existencia_final).toEqual({ cantidad: 60, costo: 750 });
+    expect(inventario.ajustes).toEqual({ cantidad: 3, costo: 37.5 });
+    expect(inventario.saldo_actual).toEqual({ cantidad: 40, costo: 500 });
+    const neto = 79 + 100 + 3 - 962;
+    expect(inventario.existencia_inicial.cantidad).toBe(60 - neto);
+    expect(
+      inventario.existencia_inicial.cantidad + inventario.compras.cantidad
+        + inventario.transferencias_recibidas.cantidad + inventario.devoluciones.cantidad
+        + inventario.ajustes.cantidad - inventario.salidas.cantidad
+        - inventario.transferencias_enviadas.cantidad,
+    ).toBe(inventario.existencia_final.cantidad);
+  });
+
+  it('filtra por la sucursal activa y solo cuenta aceite medido en galones', async () => {
+    const query = consulta();
+    const service = new DashboardAdministracionService({ query } as any);
+    await service.getControlCebadoAceite({ desde: '2026-08-01', hasta: '2026-08-31' }, 'suc-tpta');
+    const [filasSql, filasParams] = query.mock.calls[0];
+    expect(filasParams[4]).toBe('suc-tpta');
+    expect(filasSql).toContain("NULLIF(wo.equipment_location_snapshot->>'sucursal_id', '')::uuid, l.sucursal_id) = $5::uuid");
+    expect(filasSql).toContain("LIKE 'GAL%'");
+    const [equiposSql, equiposParams] = query.mock.calls[1];
+    expect(equiposParams).toEqual(['suc-tpta']);
+    expect(equiposSql).toContain('l.sucursal_id = $1::uuid');
+  });
+});

@@ -1057,9 +1057,10 @@ export class KpiMaintenanceController {
   @ApiTags('Dashboard Administracion')
   @ApiOperation({ summary: 'Control unificado de cebado y aceite, una fila por OT' })
   @Get('dashboard-administracion/control-cebado-aceite')
-  async getControlCebadoAceite(@Req() req: Request, @Query() query: ControlCebadoAceiteQueryDto) {
+  async getControlCebadoAceite(@Req() req: any, @Query() query: ControlCebadoAceiteQueryDto) {
     return this.service.omitirCostos(
-      await this.dashboardAdministracion.getControlCebadoAceite(query), getRequestActor(req).roleName,
+      await this.dashboardAdministracion.getControlCebadoAceite(query, getSucursalScopeId(req)),
+      getRequestActor(req).roleName,
     );
   }
 
