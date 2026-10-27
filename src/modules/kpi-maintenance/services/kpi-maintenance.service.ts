@@ -1997,6 +1997,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async ensureInventoryOilSchema() {
+    const [columna] = await this.dataSource.query(`
+      SELECT 1 AS existe
+      FROM information_schema.columns
+      WHERE table_schema = 'kpi_inventory'
+        AND table_name = 'tb_producto'
+        AND column_name = 'es_aceite'
+    `);
     await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_inventory.tb_producto
       ADD COLUMN IF NOT EXISTS es_aceite boolean NOT NULL DEFAULT false
@@ -2006,6 +2013,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       ON kpi_inventory.tb_producto (es_aceite)
       WHERE is_deleted = false
     `);
+    // El marcado por nombre solo siembra la columna recién creada: repetirlo en
+    // cada arranque deshacía las correcciones del catálogo ("FILTRO DE ACEITE"
+    // no es aceite) y volvía a meter esos materiales en los reportes de aceite.
+    if (columna) return;
     await this.dataSource.query(`
       UPDATE kpi_inventory.tb_producto
       SET es_aceite = true
