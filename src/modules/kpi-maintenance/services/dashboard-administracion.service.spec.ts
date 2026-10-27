@@ -222,16 +222,22 @@ describe('Dashboard administrativo: control de cebado y aceite', () => {
   const kardex = [
     { concepto: 'COMPRAS', entradas: '79', salidas: '0', costo_entradas: '987.5', costo_salidas: '0' },
     { concepto: 'TRANSFERENCIAS_RECIBIDAS', entradas: '100', salidas: '0', costo_entradas: '1250', costo_salidas: '0' },
-    { concepto: 'SALIDAS', entradas: '0', salidas: '962', costo_entradas: '0', costo_salidas: '11888.5' },
+    { concepto: 'SALIDAS', entradas: '0', salidas: '867', costo_entradas: '0', costo_salidas: '10701' },
+    { concepto: 'SALIDAS_OTRA_SUCURSAL', entradas: '0', salidas: '95', costo_entradas: '0', costo_salidas: '1187.5' },
+    { concepto: 'SALIDAS_SIN_OT', entradas: '0', salidas: '210', costo_entradas: '0', costo_salidas: '2625' },
     { concepto: 'AJUSTES', entradas: '5', salidas: '2', costo_entradas: '62.5', costo_salidas: '25' },
     { concepto: 'POSTERIOR', entradas: '10', salidas: '30', costo_entradas: '125', costo_salidas: '375' },
   ];
   const stock = [{ cantidad: '40', costo: '500' }];
 
-  const consulta = () =>
+  const consulta = (filas: unknown[] = []) =>
     jest.fn().mockImplementation(async (sql: string) => {
-      if (sql.includes('tb_kardex')) return kardex;
+      if (sql.includes('AS concepto')) return kardex;
       if (sql.includes('tb_stock_bodega')) return stock;
+      if (sql.includes('IS DISTINCT FROM $3::uuid')) {
+        return [{ work_order_code: 'OT-A00370', equipment_name: 'JC - UG12', cantidad: '85.000000', costo: '1062.5000' }];
+      }
+      if (sql.includes('fecha_salida')) return filas;
       return [];
     });
 
@@ -245,14 +251,57 @@ describe('Dashboard administrativo: control de cebado y aceite', () => {
     expect(inventario.existencia_final).toEqual({ cantidad: 60, costo: 750 });
     expect(inventario.ajustes).toEqual({ cantidad: 3, costo: 37.5 });
     expect(inventario.saldo_actual).toEqual({ cantidad: 40, costo: 500 });
-    const neto = 79 + 100 + 3 - 962;
+    // Las salidas a OT incluyen las de OT de otra sucursal; las salidas sin OT van aparte.
+    expect(inventario.salidas).toEqual({ cantidad: 962, costo: 11888.5 });
+    expect(inventario.salidas_otra_sucursal).toEqual({ cantidad: 95, costo: 1187.5 });
+    expect(inventario.salidas_sin_ot).toEqual({ cantidad: 210, costo: 2625 });
+    // Bodega concilia por código: las OT de otra sucursal se listan una a una.
+    expect(inventario.salidas_otra_sucursal_detalle).toEqual([
+      { work_order_code: 'OT-A00370', equipment_name: 'JC - UG12', cantidad: 85, costo: 1062.5 },
+    ]);
+    const neto = 79 + 100 + 3 - 962 - 210;
     expect(inventario.existencia_inicial.cantidad).toBe(60 - neto);
     expect(
       inventario.existencia_inicial.cantidad + inventario.compras.cantidad
         + inventario.transferencias_recibidas.cantidad + inventario.devoluciones.cantidad
-        + inventario.ajustes.cantidad - inventario.salidas.cantidad
+        + inventario.ajustes.cantidad - inventario.salidas.cantidad - inventario.salidas_sin_ot.cantidad
         - inventario.transferencias_enviadas.cantidad,
     ).toBe(inventario.existencia_final.cantidad);
+  });
+
+  /*
+   * Bodega reclamó que el control fechaba el aceite con la hora de inicio de
+   * la OT (OT-A00245: 25-08) mientras el Kardex lo descargaba el día del EB
+   * (27-09), y que sumaba 69 gal cuando el EB entregó 65.
+   */
+  it('fecha y galones salen de la salida de bodega, y avisa cuando la OT no cuadra', async () => {
+    const fila = (overrides: Record<string, unknown>) => ({
+      work_order_code: 'OT-X', work_order_status: 'CLOSED', valor_json: {}, history: [],
+      cantidad: '2', subtotal: '25', cantidad_entregada_total: '2', cantidad_registrada: '2',
+      ...overrides,
+    });
+    const query = consulta([
+      fila({ work_order_code: 'OT-A00245' }),
+      fila({ work_order_code: 'OT-A00137', cantidad_registrada: '4' }),
+      fila({ work_order_code: 'OT-A00163', cantidad: '0', subtotal: '0', cantidad_entregada_total: '0', cantidad_registrada: '15' }),
+      fila({ work_order_code: 'OT-A00517', work_order_status: 'PLANNED', cantidad: '0', cantidad_entregada_total: '0' }),
+      fila({ work_order_code: 'OT-A00261', cantidad: '2', cantidad_entregada_total: '5', cantidad_registrada: '5' }),
+    ]);
+    const service = new DashboardAdministracionService({ query } as any);
+    const { data } = await service.getControlCebadoAceite({ desde: '2026-09-01', hasta: '2026-09-30' }, 'suc-tpta');
+    const [filasSql] = query.mock.calls[0];
+    expect(filasSql).toContain('FROM kpi_inventory.tb_kardex k');
+    expect(filasSql).toContain('COALESCE(o.fecha_salida, wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia');
+    const observaciones = Object.fromEntries(
+      (data as any).filas.map((row: any) => [row.work_order_code, row.observacion]),
+    );
+    expect(observaciones).toEqual({
+      'OT-A00245': null,
+      'OT-A00137': 'La OT registra 4 gal; bodega entregó 2 gal',
+      'OT-A00163': 'La OT registra 15 gal sin salida de bodega',
+      'OT-A00517': 'Pendiente de salida de bodega: 2 gal',
+      'OT-A00261': '3 gal salieron de bodega en otro período',
+    });
   });
 
   it('filtra por la sucursal activa y solo cuenta aceite medido en galones', async () => {

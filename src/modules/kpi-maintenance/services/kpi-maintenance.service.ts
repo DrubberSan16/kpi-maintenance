@@ -204,6 +204,7 @@ import {
 } from './horometro-proyeccion';
 import {
   MATERIAL_COST_CATEGORY_SQL,
+  aceiteEnGalonesSql,
   type MaterialCostCategory,
 } from './material-cost-category';
 
@@ -15779,7 +15780,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         string_agg(DISTINCT p.nombre, ', ') AS productos
       FROM kpi_maintenance.tb_consumo_repuesto cr
       INNER JOIN kpi_inventory.tb_producto p
-        ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        ON p.id = cr.producto_id AND ${aceiteEnGalonesSql('p')}
       WHERE cr.work_order_id = $1::uuid
         AND COALESCE(cr.is_deleted, false) = false
       `,

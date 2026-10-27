@@ -18,19 +18,6 @@
  */
 export type MaterialCostCategory = 'REPUESTOS' | 'ACEITE' | 'INSUMOS';
 
-/**
- * Aceite del control: material marcado como aceite y medido en galones.
- *
- * El reporte habla de galones. El filtro de aceite MTU (B7299) está marcado
- * como aceite pero se mide por unidad, y cada filtro entregado se sumaba como
- * si fuera un galón, con su costo dentro del costo de aceite.
- */
-export function aceiteEnGalonesSql(producto: string) {
-  return `COALESCE(${producto}.es_aceite, false) AND EXISTS (
-    SELECT 1 FROM kpi_inventory.tb_unidad_medida um WHERE um.id = ${producto}.unidad_medida_id
-      AND (UPPER(COALESCE(um.codigo, '')) LIKE 'GAL%' OR UPPER(COALESCE(um.nombre, '')) LIKE 'GAL%'))`;
-}
-
 const LINEAS_REPUESTO = [
   'FILTROS',
   'MECANICO',
@@ -39,6 +26,26 @@ const LINEAS_REPUESTO = [
   'ELÉCTRICO',
   'EQUIPOS Y TRANSFORMADORES',
 ];
+const LINEAS_REPUESTO_SQL = LINEAS_REPUESTO.map((linea) => `'${linea}'`).join(', ');
+
+/**
+ * Aceite del control: material marcado como aceite, medido en galones y que
+ * no es una pieza.
+ *
+ * El reporte habla de galones. El filtro de aceite MTU (B7299) está marcado
+ * como aceite pero se mide por unidad, y cada filtro entregado se sumaba como
+ * si fuera un galón, con su costo dentro del costo de aceite. El enfriador
+ * 4W-4980 (línea MECÁNICO) además está en galones: una pieza de línea de
+ * repuesto nunca es aceite, aunque el catálogo la marque.
+ */
+export function aceiteEnGalonesSql(producto: string) {
+  return `COALESCE(${producto}.es_aceite, false) AND EXISTS (
+    SELECT 1 FROM kpi_inventory.tb_unidad_medida um WHERE um.id = ${producto}.unidad_medida_id
+      AND (UPPER(COALESCE(um.codigo, '')) LIKE 'GAL%' OR UPPER(COALESCE(um.nombre, '')) LIKE 'GAL%'))
+    AND NOT EXISTS (
+      SELECT 1 FROM kpi_inventory.tb_linea ln WHERE ln.id = ${producto}.linea_id
+        AND UPPER(TRIM(COALESCE(ln.nombre, ''))) IN (${LINEAS_REPUESTO_SQL}))`;
+}
 
 /** Consulta la categoría de cada material; devuelve `id`, `categoria_costo`, `linea_nombre`. */
 export const MATERIAL_COST_CATEGORY_SQL = `
@@ -46,7 +53,7 @@ export const MATERIAL_COST_CATEGORY_SQL = `
     CASE
       WHEN ${aceiteEnGalonesSql('p')} THEN 'ACEITE'
       WHEN UPPER(COALESCE(c.nombre, '')) LIKE 'REPUESTO%'
-        OR UPPER(TRIM(COALESCE(l.nombre, ''))) IN (${LINEAS_REPUESTO.map((linea) => `'${linea}'`).join(', ')})
+        OR UPPER(TRIM(COALESCE(l.nombre, ''))) IN (${LINEAS_REPUESTO_SQL})
         THEN 'REPUESTOS'
       ELSE 'INSUMOS'
     END AS categoria_costo,

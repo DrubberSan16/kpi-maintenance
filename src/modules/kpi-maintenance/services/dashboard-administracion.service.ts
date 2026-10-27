@@ -41,6 +41,31 @@ function normalizeHorometro(value: unknown): number | null {
   return Number.isFinite(num) ? Math.round(num) : null;
 }
 
+/**
+ * Aceite que salió de bodega para cada OT, asiento por asiento del kardex.
+ *
+ * Todos los indicadores de cebado y aceite cuentan esto y no lo que se tecleó
+ * en los materiales de la OT, por dos razones que reclamó bodega:
+ *  - La fecha es la de la salida (EB). Las OT se registran a veces semanas
+ *    después del trabajo con `hora_inicio` retroactiva, y con esa fecha el
+ *    aceite caía en agosto mientras el kardex lo descargaba en septiembre.
+ *  - La cantidad es la entregada. Hay OT con la línea de aceite duplicada o
+ *    sin egreso de bodega, y sumar los materiales de la OT no cuadraba.
+ *
+ * Una entrada ligada a la OT es aceite devuelto y resta. Las salidas anuladas
+ * quedan con el asiento borrado (`is_deleted`), así que no cuentan.
+ */
+const ACEITE_ENTREGADO_SQL = `
+  SELECT mi.work_order_id, k.fecha, k.producto_id,
+    COALESCE(k.salida_cantidad, 0) - COALESCE(k.entrada_cantidad, 0) AS galones,
+    CASE WHEN COALESCE(k.entrada_cantidad, 0) > 0
+      THEN -COALESCE(k.costo_total, 0) ELSE COALESCE(k.costo_total, 0) END AS costo
+  FROM kpi_inventory.tb_kardex k
+  JOIN kpi_inventory.tb_movimiento_inventario mi
+    ON mi.id = k.movimiento_id AND mi.work_order_id IS NOT NULL
+  JOIN kpi_inventory.tb_producto p ON p.id = k.producto_id AND ${aceiteEnGalonesSql('p')}
+  WHERE NOT COALESCE(k.is_deleted, false)`;
+
 /** Cómo se lee la unidad guardada de una frecuencia por calendario. */
 const UNIDADES_CALENDARIO: Record<string, string> = {
   DIAS: 'días',
@@ -65,6 +90,13 @@ export class DashboardAdministracionService {
    * PDF de una central (TPTA) traía también las OT de la otra (CPT). La OT se
    * ubica por la foto de ubicación que guardó al crearse y, si no la tiene, por
    * la ubicación actual del equipo, igual que el listado de OT.
+   *
+   * Galones, costo y fecha salen del kardex (`ACEITE_ENTREGADO_SQL`): la OT
+   * entra al período en que bodega le entregó el aceite, con lo entregado, y
+   * así el reporte cuadra con el Kardex línea por línea. Una OT que nunca
+   * recibió aceite entra por su propia fecha y con cero. Lo tecleado en los
+   * materiales de la OT viaja aparte (`cantidad_registrada`) para señalar las
+   * OT que no cuadran con bodega.
    */
   async getControlCebadoAceite(
     query: { desde?: string; hasta?: string; equipo_id?: string; solo_cebado?: boolean },
@@ -76,39 +108,49 @@ export class DashboardAdministracionService {
     const hasta = query.hasta ? `${query.hasta.slice(0, 10)} 23:59:59.999999` : period.hasta;
     const sucursal = this.equipoParam(sucursalId);
     const filas = await this.dataSource.query(`
+      WITH entregado AS (${ACEITE_ENTREGADO_SQL}),
+      por_ot AS (
+        SELECT e.work_order_id,
+          SUM(e.galones) FILTER (WHERE e.fecha BETWEEN $1::timestamp AND $2::timestamp) AS cantidad,
+          SUM(e.costo) FILTER (WHERE e.fecha BETWEEN $1::timestamp AND $2::timestamp) AS subtotal,
+          MIN(e.fecha) FILTER (WHERE e.fecha BETWEEN $1::timestamp AND $2::timestamp) AS fecha_salida,
+          SUM(e.galones) AS cantidad_total,
+          string_agg(DISTINCT CONCAT_WS(' - ', p.codigo, p.nombre), ', ')
+            FILTER (WHERE e.fecha BETWEEN $1::timestamp AND $2::timestamp) AS producto
+        FROM entregado e
+        JOIN kpi_inventory.tb_producto p ON p.id = e.producto_id
+        GROUP BY e.work_order_id
+      )
       SELECT wo.id AS work_order_id, wo.code AS work_order_code, wo.title AS work_order_title,
         wo.maintenance_kind, wo.status_workflow AS work_order_status,
         wo.started_at, wo.closed_at, wo.valor_json,
         wo.scheduled_start AS fecha_programada,
-        COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
+        COALESCE(o.fecha_salida, wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
+        o.fecha_salida,
+        COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_ot,
         wo.equipment_id, e.codigo AS equipment_code, COALESCE(e.nombre, e.nombre_real) AS equipment_name,
         m.nombre AS equipment_brand_name, e.es_reserva,
         CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN (wo.equipment_location_snapshot->>'location_id')::uuid ELSE e.location_id END AS location_id,
         CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', wo.equipment_location_snapshot->>'location_code', wo.equipment_location_snapshot->>'location_name', wo.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', l.codigo, l.nombre) END AS central,
         NULLIF(wo.valor_json->>'horometro_anterior', '')::numeric AS horometro_inicial,
         NULLIF(wo.valor_json->>'horometro_actual', '')::numeric AS horometro_final,
-        COALESCE(oil.cantidad, 0)::numeric AS cantidad, COALESCE(oil.subtotal, 0)::numeric AS subtotal,
-        COALESCE(oil.producto, 'Sin consumo de aceite') AS producto,
+        COALESCE(o.cantidad, 0)::numeric AS cantidad, COALESCE(o.subtotal, 0)::numeric AS subtotal,
+        COALESCE(o.cantidad_total, 0)::numeric AS cantidad_entregada_total,
+        COALESCE(reg.cantidad, 0)::numeric AS cantidad_registrada,
+        COALESCE(o.producto, reg.producto, 'Sin consumo de aceite') AS producto,
         COALESCE(hist.events, '[]'::jsonb) AS history
       FROM kpi_process.tb_work_order wo
+      LEFT JOIN por_ot o ON o.work_order_id = wo.id
       LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
       LEFT JOIN LATERAL (
         SELECT SUM(cr.cantidad) AS cantidad,
-          SUM(cr.cantidad * COALESCE(issued.unit_cost, cr.costo_unitario, 0)) AS subtotal,
           string_agg(DISTINCT CONCAT_WS(' - ', p.codigo, p.nombre), ', ') AS producto
         FROM kpi_maintenance.tb_consumo_repuesto cr
         JOIN kpi_inventory.tb_producto p ON p.id = cr.producto_id AND ${aceiteEnGalonesSql('p')}
-        LEFT JOIN LATERAL (
-          SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS unit_cost
-          FROM kpi_inventory.tb_entrega_material em
-          JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = em.id
-          WHERE em.work_order_id = wo.id AND NOT COALESCE(em.is_deleted, false)
-            AND d.producto_id = cr.producto_id AND d.bodega_id = cr.bodega_id
-        ) issued ON true
         WHERE cr.work_order_id = wo.id AND NOT COALESCE(cr.is_deleted, false)
-      ) oil ON true
+      ) reg ON true
       LEFT JOIN LATERAL (
         SELECT jsonb_agg(jsonb_build_object('changed_at', h.changed_at, 'from_status', h.from_status,
           'to_status', h.to_status) ORDER BY h.changed_at, h.id) AS events
@@ -119,7 +161,8 @@ export class DashboardAdministracionService {
         AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
         AND UPPER(COALESCE(wo.valor_json->>'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
         AND COALESCE(wo.valor_json->'annulment', 'null'::jsonb) = 'null'::jsonb
-        AND COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
+        AND (o.fecha_salida IS NOT NULL OR (o.work_order_id IS NULL
+          AND COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp))
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
         AND (NOT $4::boolean OR UPPER(wo.maintenance_kind) = 'CEBADO')
         AND ($5::uuid IS NULL OR COALESCE(
@@ -145,9 +188,53 @@ export class DashboardAdministracionService {
     const inventario = await this.getInventarioAceite(desde, hasta, sucursal);
     return this.wrap({ filas: filas.map(({ history, valor_json, ...row }) => ({
       ...row, cantidad: Number(row.cantidad), subtotal: Number(row.subtotal),
+      cantidad_registrada: Number(row.cantidad_registrada),
+      cantidad_entregada_total: Number(row.cantidad_entregada_total),
+      observacion: this.observacionAceite(row),
       horas_trabajadas: workOrderWorkedHours({ ...row, valor_json, status_workflow: row.work_order_status }, history),
-      semaforo: this.resolveCebadoSemaforo(Number(row.cantidad)),
+      // El semáforo es una alerta de consumo de la orden completa: mide lo
+      // entregado en todos los períodos o, si es mayor, lo que el técnico
+      // registró. Una OT de 15 gal sin EB no puede quedar como "Normal".
+      semaforo: this.resolveCebadoSemaforo(Math.max(
+        Number(row.cantidad_entregada_total) || 0,
+        Number(row.cantidad_registrada) || 0,
+      )),
     })), equipos, inventario }, 'Control de cebado y aceite generado');
+  }
+
+  /**
+   * Por qué una OT no cuadra con bodega, o `null` si cuadra.
+   *
+   * Lo tecleado en la OT se compara con todo lo que bodega le entregó, no solo
+   * con lo del período: una OT con salidas en dos meses no es un descuadre,
+   * pero se avisa para que nadie busque esos galones en este período.
+   */
+  private observacionAceite(row: {
+    cantidad?: unknown;
+    cantidad_registrada?: unknown;
+    cantidad_entregada_total?: unknown;
+    work_order_status?: string | null;
+  }) {
+    const gal = (value: number) =>
+      `${value.toLocaleString('es-EC', { maximumFractionDigits: 2 })} gal`;
+    const registrada = Number(row.cantidad_registrada) || 0;
+    const entregada = Number(row.cantidad_entregada_total) || 0;
+    const periodo = Number(row.cantidad) || 0;
+    const notas: string[] = [];
+    if (Math.abs(registrada - entregada) >= 0.005) {
+      const abierta = String(row.work_order_status ?? '').toUpperCase() !== 'CLOSED';
+      if (abierta && registrada > entregada) {
+        notas.push(`Pendiente de salida de bodega: ${gal(registrada - entregada)}`);
+      } else if (entregada === 0) {
+        notas.push(`La OT registra ${gal(registrada)} sin salida de bodega`);
+      } else {
+        notas.push(`La OT registra ${gal(registrada)}; bodega entregó ${gal(entregada)}`);
+      }
+    }
+    if (Math.abs(entregada - periodo) >= 0.005 && entregada !== 0) {
+      notas.push(`${gal(entregada - periodo)} salieron de bodega en otro período`);
+    }
+    return notas.length ? notas.join('. ') : null;
   }
 
   /**
@@ -164,10 +251,13 @@ export class DashboardAdministracionService {
    *
    * Las transferencias se separan de las compras: entre bodegas de la misma
    * sucursal salen y entran a la vez, y sumarlas como compra inflaría el
-   * ingreso. Una entrada ligada a una OT es material devuelto.
+   * ingreso. Una entrada ligada a una OT es material devuelto. Una salida sin
+   * OT (ajuste de stock por bodega, egreso manual) va aparte de las salidas a
+   * OT: en agosto de 2026 TPTA egresó así 1.800 gal, y sumarlos al consumo
+   * hacía que bodega y el detalle por OT no cuadraran.
    */
   private async getInventarioAceite(desde: string, hasta: string, sucursal: string | null) {
-    const [rows, stock] = await Promise.all([
+    const [rows, stock, otraSucursal] = await Promise.all([
       this.dataSource.query(`
         SELECT
           CASE
@@ -177,6 +267,10 @@ export class DashboardAdministracionService {
             WHEN UPPER(COALESCE(k.tipo_movimiento, '')) LIKE 'AJUSTE%' THEN 'AJUSTES'
             WHEN k.entrada_cantidad > 0 AND m.work_order_id IS NOT NULL THEN 'DEVOLUCIONES'
             WHEN k.entrada_cantidad > 0 THEN 'COMPRAS'
+            WHEN m.work_order_id IS NULL THEN 'SALIDAS_SIN_OT'
+            WHEN $3::uuid IS NOT NULL AND COALESCE(
+              NULLIF(wo.equipment_location_snapshot->>'sucursal_id', '')::uuid, loc.sucursal_id
+            ) IS DISTINCT FROM $3::uuid THEN 'SALIDAS_OTRA_SUCURSAL'
             ELSE 'SALIDAS'
           END AS concepto,
           SUM(k.entrada_cantidad)::numeric AS entradas,
@@ -187,6 +281,9 @@ export class DashboardAdministracionService {
         JOIN kpi_inventory.tb_producto p ON p.id = k.producto_id AND ${aceiteEnGalonesSql('p')}
         JOIN kpi_inventory.tb_bodega b ON b.id = k.bodega_id
         LEFT JOIN kpi_inventory.tb_movimiento_inventario m ON m.id = k.movimiento_id
+        LEFT JOIN kpi_process.tb_work_order wo ON wo.id = m.work_order_id
+        LEFT JOIN kpi_maintenance.tb_equipo eq ON eq.id = wo.equipment_id
+        LEFT JOIN kpi_maintenance.tb_location loc ON loc.id = eq.location_id AND NOT COALESCE(loc.is_deleted, false)
         LEFT JOIN LATERAL (
           SELECT true AS es_transferencia FROM kpi_inventory.tb_transferencia_bodega t
           WHERE k.movimiento_id IS NOT NULL
@@ -207,6 +304,35 @@ export class DashboardAdministracionService {
         WHERE NOT COALESCE(sb.is_deleted, false)
           AND ($1::uuid IS NULL OR b.sucursal_id = $1::uuid)
       `, [sucursal]),
+      // Qué OT de otra sucursal se llevaron aceite de estas bodegas. El detalle
+      // por OT del reporte no las lista (son de otra central), y bodega las
+      // busca por código al conciliar contra su kardex: UG12 figura en CPT
+      // pero todo su aceite salió de TPTA (OT-A00006, A00118, A00221, A00370).
+      sucursal
+        ? this.dataSource.query(`
+            SELECT wo.code AS work_order_code,
+              COALESCE(eq.nombre, eq.nombre_real) AS equipment_name,
+              CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', wo.equipment_location_snapshot->>'location_code', wo.equipment_location_snapshot->>'location_name', wo.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', loc.codigo, loc.nombre) END AS central,
+              MIN(k.fecha) AS fecha,
+              SUM(k.salida_cantidad)::numeric AS cantidad,
+              SUM(k.costo_total)::numeric AS costo
+            FROM kpi_inventory.tb_kardex k
+            JOIN kpi_inventory.tb_producto p ON p.id = k.producto_id AND ${aceiteEnGalonesSql('p')}
+            JOIN kpi_inventory.tb_bodega b ON b.id = k.bodega_id AND b.sucursal_id = $3::uuid
+            JOIN kpi_inventory.tb_movimiento_inventario m ON m.id = k.movimiento_id AND m.work_order_id IS NOT NULL
+            JOIN kpi_process.tb_work_order wo ON wo.id = m.work_order_id
+            LEFT JOIN kpi_maintenance.tb_equipo eq ON eq.id = wo.equipment_id
+            LEFT JOIN kpi_maintenance.tb_location loc ON loc.id = eq.location_id AND NOT COALESCE(loc.is_deleted, false)
+            WHERE NOT COALESCE(k.is_deleted, false)
+              AND k.fecha BETWEEN $1::timestamp AND $2::timestamp
+              AND NOT COALESCE(k.entrada_cantidad, 0) > 0
+              AND UPPER(COALESCE(k.tipo_movimiento, '')) NOT LIKE 'AJUSTE%'
+              AND COALESCE(NULLIF(wo.equipment_location_snapshot->>'sucursal_id', '')::uuid, loc.sucursal_id)
+                IS DISTINCT FROM $3::uuid
+            GROUP BY wo.id, eq.id, loc.id
+            ORDER BY fecha, wo.code
+          `, [desde, hasta, sucursal])
+        : Promise.resolve([]),
     ]);
     const round = (value: number) => Number(value.toFixed(4));
     const byConcept = new Map<string, any>(rows.map((row: any) => [row.concepto, row]));
@@ -226,7 +352,15 @@ export class DashboardAdministracionService {
     const compras = flow('COMPRAS', 'entrada');
     const devoluciones = flow('DEVOLUCIONES', 'entrada');
     const transferenciasRecibidas = flow('TRANSFERENCIAS_RECIBIDAS', 'entrada');
-    const salidas = flow('SALIDAS', 'salida');
+    // Las salidas a OT de otra sucursal siguen siendo consumo de estas bodegas;
+    // se informan aparte solo para que la conciliación con el detalle cuadre.
+    const salidasOtraSucursal = flow('SALIDAS_OTRA_SUCURSAL', 'salida');
+    const salidasPropias = flow('SALIDAS', 'salida');
+    const salidas = {
+      cantidad: round(salidasPropias.cantidad + salidasOtraSucursal.cantidad),
+      costo: round(salidasPropias.costo + salidasOtraSucursal.costo),
+    };
+    const salidasSinOt = flow('SALIDAS_SIN_OT', 'salida');
     const transferenciasEnviadas = flow('TRANSFERENCIAS_ENVIADAS', 'salida');
     const posterior = byConcept.get('POSTERIOR');
     const saldoActual = { cantidad: round(Number(stock[0]?.cantidad) || 0), costo: round(Number(stock[0]?.costo) || 0) };
@@ -236,7 +370,7 @@ export class DashboardAdministracionService {
     };
     const neto = (field: 'cantidad' | 'costo') =>
       compras[field] + devoluciones[field] + transferenciasRecibidas[field] + ajustes[field]
-      - salidas[field] - transferenciasEnviadas[field];
+      - salidas[field] - salidasSinOt[field] - transferenciasEnviadas[field];
     return {
       existencia_inicial: {
         cantidad: round(existenciaFinal.cantidad - neto('cantidad')),
@@ -247,6 +381,13 @@ export class DashboardAdministracionService {
       devoluciones,
       ajustes,
       salidas,
+      salidas_otra_sucursal: salidasOtraSucursal,
+      salidas_otra_sucursal_detalle: (otraSucursal as any[]).map((row) => ({
+        ...row,
+        cantidad: round(Number(row.cantidad) || 0),
+        costo: round(Number(row.costo) || 0),
+      })),
+      salidas_sin_ot: salidasSinOt,
       transferencias_enviadas: transferenciasEnviadas,
       existencia_final: existenciaFinal,
       saldo_actual: saldoActual,
@@ -432,14 +573,16 @@ export class DashboardAdministracionService {
   /**
    * 3. Cebado y consumo de aceite por equipo.
    *
-   * Los galones salen del consumo de productos marcados como aceite en las OT
-   * de cebado. El semáforo es por acumulado del período; además se devuelve el
-   * acumulado de los últimos 7 y 30 días para leer la tendencia.
+   * Los galones son el aceite que bodega entregó a las OT de cebado, en la
+   * fecha de la salida (`ACEITE_ENTREGADO_SQL`). El semáforo es por acumulado
+   * del período; además se devuelve el acumulado de los últimos 7 y 30 días
+   * para leer la tendencia.
    */
   private async getCebado(desde: string, hasta: string, equipoId: string | null) {
     const filas = await this.dataSource.query(
       `
-      WITH por_orden AS (
+      WITH entregado AS (${ACEITE_ENTREGADO_SQL}),
+      por_orden AS (
         -- El semaforo mide lo que gasto cada orden, asi que primero se totaliza
         -- por OT y solo despues se agrega por equipo. Sumar todas las lineas del
         -- periodo y semaforizar ese total mediria otra cosa.
@@ -447,30 +590,20 @@ export class DashboardAdministracionService {
           wo.id AS work_order_id,
           wo.equipment_id,
           wo.equipment_location_snapshot - 'captured_at' - 'basis' AS equipment_location_snapshot,
-          COALESCE(wo.hora_inicio, wo.created_at) AS momento,
+          MIN(en.fecha) AS momento,
           NULLIF(TRIM(wo.valor_json ->> 'horometro_anterior'), '')::numeric AS horometro_anterior,
           NULLIF(TRIM(wo.valor_json ->> 'horometro_actual'), '')::numeric AS horometro_actual,
-          SUM(cr.cantidad) AS galones,
-          SUM(cr.cantidad * COALESCE(issued.costo_unitario, cr.costo_unitario, 0)) AS costo
+          SUM(en.galones) AS galones,
+          SUM(en.costo) AS costo
         FROM kpi_process.tb_work_order wo
-        INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
-          ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
-        INNER JOIN kpi_inventory.tb_producto p
-          ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
-        LEFT JOIN LATERAL (
-          SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS costo_unitario
-          FROM kpi_inventory.tb_entrega_material em
-          INNER JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = em.id
-          WHERE em.work_order_id = wo.id AND COALESCE(em.is_deleted, false) = false
-            AND d.producto_id = cr.producto_id AND d.bodega_id = cr.bodega_id
-        ) issued ON true
+        INNER JOIN entregado en
+          ON en.work_order_id = wo.id AND en.fecha BETWEEN $1::timestamp AND $2::timestamp
         WHERE COALESCE(wo.is_deleted, false) = false
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
           AND UPPER(COALESCE(wo.valor_json ->> 'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
           AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'CANCELLED', 'VOID')
-          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        GROUP BY wo.id, wo.equipment_id, momento
+        GROUP BY wo.id
       )
       SELECT
         e.id AS equipo_id,
@@ -837,23 +970,21 @@ export class DashboardAdministracionService {
 
     const filas = await this.dataSource.query(
       `
+      WITH entregado AS (${ACEITE_ENTREGADO_SQL})
       SELECT
         e.id AS equipo_id,
         e.codigo AS equipo_codigo,
         COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
         e.nombre_real AS equipo_descripcion,
-        date_trunc($4, COALESCE(wo.hora_inicio, wo.created_at))::date AS periodo,
-        ROUND(COALESCE(SUM(cr.cantidad), 0)::numeric, 2) AS galones,
+        date_trunc($4, en.fecha)::date AS periodo,
+        ROUND(COALESCE(SUM(en.galones), 0)::numeric, 2) AS galones,
         COUNT(DISTINCT wo.id) AS cebados
       FROM kpi_process.tb_work_order wo
       INNER JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
-      INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
-        ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
-      INNER JOIN kpi_inventory.tb_producto p
-        ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+      INNER JOIN entregado en
+        ON en.work_order_id = wo.id AND en.fecha BETWEEN $1::timestamp AND $2::timestamp
       WHERE COALESCE(wo.is_deleted, false) = false
         AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
-        AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
         AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
       GROUP BY e.id, e.codigo, equipo_nombre, equipo_descripcion, periodo
       ORDER BY periodo, e.codigo
@@ -899,34 +1030,26 @@ export class DashboardAdministracionService {
     if (bloque === 'aceite') {
       const filas = await this.dataSource.query(
         `
+        WITH entregado AS (${ACEITE_ENTREGADO_SQL})
         SELECT wo.id AS work_order_id, wo.code AS orden, wo.equipment_id,
           wo.scheduled_start AS fecha_programada,
-          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
+          MIN(en.fecha)::date AS fecha,
+          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha_ot,
           wo.maintenance_kind AS tipo,
           COALESCE(e.nombre, e.nombre_real) AS equipo_nombre,
           CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN (wo.equipment_location_snapshot->>'location_id')::uuid ELSE e.location_id END AS location_id,
         CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', wo.equipment_location_snapshot->>'location_code', wo.equipment_location_snapshot->>'location_name', wo.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', l.codigo, l.nombre) END AS central,
-          ROUND(SUM(cr.cantidad)::numeric, 2) AS galones,
-          ROUND(SUM(cr.cantidad * COALESCE(issued.costo_unitario, cr.costo_unitario, 0))::numeric, 2) AS costo
+          ROUND(SUM(en.galones)::numeric, 2) AS galones,
+          ROUND(SUM(en.costo)::numeric, 2) AS costo
         FROM kpi_process.tb_work_order wo
-        INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
-          ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
-        INNER JOIN kpi_inventory.tb_producto p
-          ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        INNER JOIN entregado en
+          ON en.work_order_id = wo.id AND en.fecha BETWEEN $1::timestamp AND $2::timestamp
         LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
         LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id
           AND COALESCE(l.is_deleted, false) = false
-        LEFT JOIN LATERAL (
-          SELECT SUM(d.cantidad * d.costo_unitario) / NULLIF(SUM(d.cantidad), 0) AS costo_unitario
-          FROM kpi_inventory.tb_entrega_material em
-          INNER JOIN kpi_inventory.tb_entrega_material_det d ON d.entrega_id = em.id
-          WHERE em.work_order_id = wo.id AND COALESCE(em.is_deleted, false) = false
-            AND d.producto_id = cr.producto_id AND d.bodega_id = cr.bodega_id
-        ) issued ON true
         WHERE COALESCE(wo.is_deleted, false) = false
           AND UPPER(COALESCE(wo.valor_json ->> 'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
           AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
-          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
         GROUP BY wo.id, e.id, l.id
         ORDER BY fecha, wo.code
@@ -941,6 +1064,7 @@ export class DashboardAdministracionService {
       // gasto la OT completa, y una orden puede tener varias lineas de aceite.
       const filas = await this.dataSource.query(
         `
+        WITH entregado AS (${ACEITE_ENTREGADO_SQL})
         SELECT
           wo.id AS work_order_id,
           wo.code AS orden,
@@ -950,8 +1074,9 @@ export class DashboardAdministracionService {
           (SELECT jsonb_agg(jsonb_build_object('changed_at', h.changed_at, 'from_status', h.from_status,
             'to_status', h.to_status) ORDER BY h.changed_at, h.id)
             FROM kpi_process.tb_work_order_status_history h WHERE h.work_order_id = wo.id) AS execution_history,
-          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha,
-          COALESCE(wo.hora_inicio, wo.created_at) AS momento,
+          MIN(en.fecha)::date AS fecha,
+          MIN(en.fecha) AS momento,
+          COALESCE(wo.hora_inicio, wo.created_at)::date AS fecha_ot,
           -- El horometro con el que llego la maquina y el que se anoto en el
           -- cebado. Sin los dos no se sabe cuantas horas corrio entre uno y
           -- otro, que es lo que explica si el consumo fue alto o normal.
@@ -961,20 +1086,17 @@ export class DashboardAdministracionService {
             TRIM(CONCAT_WS(' - ', NULLIF(TRIM(p.codigo), ''), NULLIF(TRIM(p.nombre), ''))
                || COALESCE(' (' || NULLIF(TRIM(p.descripcion), '') || ')', ''))
           , ', ') AS producto,
-          ROUND(SUM(cr.cantidad)::numeric, 2) AS galones,
-          ROUND(SUM(COALESCE(cr.subtotal, 0))::numeric, 2) AS costo,
-          COUNT(cr.id) AS lineas
+          ROUND(SUM(en.galones)::numeric, 2) AS galones,
+          ROUND(SUM(en.costo)::numeric, 2) AS costo,
+          COUNT(*) AS lineas
         FROM kpi_process.tb_work_order wo
-        INNER JOIN kpi_maintenance.tb_consumo_repuesto cr
-          ON cr.work_order_id = wo.id AND COALESCE(cr.is_deleted, false) = false
-        INNER JOIN kpi_inventory.tb_producto p
-          ON p.id = cr.producto_id AND COALESCE(p.es_aceite, false) = true
+        INNER JOIN entregado en
+          ON en.work_order_id = wo.id AND en.fecha BETWEEN $1::timestamp AND $2::timestamp
+        INNER JOIN kpi_inventory.tb_producto p ON p.id = en.producto_id
         WHERE COALESCE(wo.is_deleted, false) = false
           AND UPPER(COALESCE(wo.maintenance_kind, '')) = 'CEBADO'
-          AND COALESCE(wo.hora_inicio, wo.created_at) BETWEEN $1::timestamp AND $2::timestamp
           AND ($3::uuid IS NULL OR wo.equipment_id = $3::uuid)
-        GROUP BY wo.id, wo.code, wo.title, wo.equipment_id, fecha, momento,
-                 horometro_anterior, horometro_actual
+        GROUP BY wo.id
         ORDER BY momento DESC, wo.code DESC
         `,
         [desde, hasta, equipoId],
