@@ -318,6 +318,40 @@ describe('Dashboard administrativo: control de cebado y aceite', () => {
     expect(equiposSql).toContain('l.sucursal_id = $1::uuid');
   });
 
+  it('resuelve el procedimiento sin exigir una columna inexistente en el plan', async () => {
+    const query = consulta([
+      {
+        maintenance_kind: 'CORRECTIVO',
+        plan_name: 'MPG 500 H',
+        procedure_hours: '6',
+        plan_frequency: '6',
+        plan_frequency_type: 'HORAS',
+        history: [],
+        valor_json: {},
+      },
+    ]);
+    const service = new DashboardAdministracionService({
+      query,
+    } as unknown as DataSource);
+    const { data } = await service.getControlCebadoAceite({
+      desde: '2026-11-01',
+      hasta: '2026-11-06',
+    });
+    const sql = String((query.mock.calls[0] as unknown[])[0]);
+    expect(sql).not.toContain('plan.procedimiento_id');
+    expect(sql).toContain(
+      "COALESCE(NULLIF(wo.valor_json->>'procedimiento_id', ''),",
+    );
+    expect(sql).toContain('substring(plan.descripcion');
+    expect(
+      (data as { filas: Record<string, unknown>[] }).filas[0],
+    ).toMatchObject({
+      maintenance_kind_original: 'CORRECTIVO',
+      maintenance_kind: 'PREVENTIVO',
+      mpg_interval_hours: 500,
+    });
+  });
+
   it('clasifica MPG en el informe y conserva el tipo original de la OT', async () => {
     const query = consulta([
       {

@@ -149,7 +149,7 @@ export class DashboardAdministracionService {
       LEFT JOIN kpi_maintenance.tb_plan_mantenimiento plan
         ON plan.id = wo.plan_id AND NOT COALESCE(plan.is_deleted, false)
       LEFT JOIN kpi_maintenance.tb_procedimiento_plantilla procedimiento
-        ON procedimiento.id::text = COALESCE(NULLIF(wo.valor_json->>'procedimiento_id', ''), plan.procedimiento_id::text,
+        ON procedimiento.id::text = COALESCE(NULLIF(wo.valor_json->>'procedimiento_id', ''),
           substring(plan.descripcion from '\\[PROCEDIMIENTO:([0-9a-fA-F-]{36})\\]'))
         AND NOT COALESCE(procedimiento.is_deleted, false)
       LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id

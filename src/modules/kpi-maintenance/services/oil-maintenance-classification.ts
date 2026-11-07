@@ -7,7 +7,7 @@ export function oilMaintenanceClassification(row: Record<string, any>) {
     && (['PREVENTIVO', 'MPG'].includes(original) || explicitMpg);
   // Las plantillas antiguas pueden tener frecuencia de programación (6 h)
   // distinta del intervalo del mantenimiento identificado en su nombre (500 h).
-  const namedHours = names.match(/\bMPG\s*[-:]?\s*(\d+(?:[.,]\d+)?)\s*(?:HRS?\b|HORAS?\b)/i);
+  const namedHours = names.match(/\bMPG\s*[-:]?\s*(\d+(?:[.,]\d+)?)\s*(?:H(?:RS?)?\b|HORAS?\b)/i);
   const procedureHours = Number(row.procedure_hours);
   const hours = namedHours ? Number(namedHours[1].replace(',', '.'))
     : procedureHours > 0 ? procedureHours
