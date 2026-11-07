@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { workOrderWorkedHours } from './work-order-hours';
+import { oilMaintenanceClassification } from './oil-maintenance-classification';
 import {
   SERVICIOS_MPG_SQL,
   fechaProximoMantenimiento,
@@ -123,6 +124,9 @@ export class DashboardAdministracionService {
       )
       SELECT wo.id AS work_order_id, wo.code AS work_order_code, wo.title AS work_order_title,
         wo.maintenance_kind, wo.status_workflow AS work_order_status,
+        pl.nombre AS plan_name, pl.frecuencia_tipo AS plan_frequency_type,
+        pl.frecuencia_valor AS plan_frequency, pr.nombre AS procedure_name,
+        pr.frecuencia_horas AS procedure_hours,
         wo.started_at, wo.closed_at, wo.valor_json,
         wo.scheduled_start AS fecha_programada,
         COALESCE(o.fecha_salida, wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
@@ -141,6 +145,9 @@ export class DashboardAdministracionService {
         COALESCE(hist.events, '[]'::jsonb) AS history
       FROM kpi_process.tb_work_order wo
       LEFT JOIN por_ot o ON o.work_order_id = wo.id
+      LEFT JOIN kpi_maintenance.tb_plan_mantenimiento pl ON pl.id = wo.plan_id
+      LEFT JOIN kpi_maintenance.tb_procedimiento_plantilla pr
+        ON pr.id::text = COALESCE(NULLIF(wo.valor_json->>'procedimiento_id', ''), pl.procedimiento_id::text)
       LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
@@ -187,7 +194,7 @@ export class DashboardAdministracionService {
     `, [sucursal]);
     const inventario = await this.getInventarioAceite(desde, hasta, sucursal);
     return this.wrap({ filas: filas.map(({ history, valor_json, ...row }) => ({
-      ...row, cantidad: Number(row.cantidad), subtotal: Number(row.subtotal),
+      ...row, ...oilMaintenanceClassification(row), cantidad: Number(row.cantidad), subtotal: Number(row.subtotal),
       cantidad_registrada: Number(row.cantidad_registrada),
       cantidad_entregada_total: Number(row.cantidad_entregada_total),
       observacion: this.observacionAceite(row),

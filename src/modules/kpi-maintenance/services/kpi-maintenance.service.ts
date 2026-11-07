@@ -31345,7 +31345,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const tasks = await taskRepo.find({
       where: { work_order_id: workOrderId, is_deleted: false },
     });
-    if (!tasks.length) return;
+    if (!tasks.some((task) => this.mapStoredWorkOrderTaskResponsables(task.responsables)
+      .some((person) => Boolean(person.empleado_id || person.user_id)))) {
+      throw new BadRequestException({
+        code: 'WORK_ORDER_RESPONSIBLE_REQUIRED',
+        message: 'Asigna al menos un responsable en las tareas antes de cerrar la orden de trabajo.',
+      });
+    }
 
     const taskIds = [...new Set(tasks.map((task) => String(task.tarea_id || '').trim()).filter(Boolean))];
     const definitions = taskIds.length
