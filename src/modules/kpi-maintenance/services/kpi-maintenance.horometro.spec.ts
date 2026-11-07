@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { KpiMaintenanceService } from './kpi-maintenance.service';
+import { EquipoEntity } from '../entities/kpi-maintenance.entity';
 
 /**
  * Bajar el horometro desde el control operativo del Dashboard.
@@ -9,9 +10,30 @@ import { KpiMaintenanceService } from './kpi-maintenance.service';
  * los informes. Por eso corregirlo hacia atras esta reservado a Administrador y
  * Super Administrador, y exige decir por que.
  */
-type ServiceUnderTest = Record<string, any>;
+type ServiceUnderTest = Pick<
+  KpiMaintenanceService,
+  'updateEquipo' | 'updateEquipoHorometro' | 'listHorometroAjustesDirectos'
+> & {
+  puedeRegistrarHorometroMenor: (role?: string | null) => boolean;
+  hasEquipmentEditPermission: jest.Mock<
+    Promise<boolean>,
+    [actor?: object | null]
+  >;
+  findEquipoOrFail: jest.Mock<Promise<Partial<EquipoEntity>>, [id: string]>;
+  getJson: jest.Mock<Promise<unknown>, [url: string]>;
+  logger: { warn: jest.Mock<void, [message: string]> };
+  operationalHorometer: (equipment: EquipoEntity, now: Date) => number;
+  buildHorometerAdjustmentNote: (
+    backward: boolean,
+    previous: number,
+    reason: string | null,
+  ) => string;
+  extractHorometerAdjustmentReason: (note: string | null) => string | null;
+};
 
-function createService(overrides: Record<string, any> = {}): ServiceUnderTest {
+function createService(
+  overrides: Record<string, unknown> = {},
+): ServiceUnderTest {
   const service = Object.create(
     KpiMaintenanceService.prototype,
   ) as ServiceUnderTest;
@@ -20,8 +42,9 @@ function createService(overrides: Record<string, any> = {}): ServiceUnderTest {
     // corre: se repiten las que la logica bajo prueba consulta.
     HOROMETRO_FUENTE_AJUSTE_DIRECTO: 'AJUSTE_DIRECTO',
     HOROMETRO_FUENTE_MANUAL: 'MANUAL_EQUIPOS',
+    hasEquipmentEditPermission: jest.fn().mockResolvedValue(true),
     findEquipoOrFail: jest.fn().mockResolvedValue({ horometro_actual: 1000 }),
-    updateEquipo: jest.fn(async () => ({ data: {} })),
+    updateEquipo: jest.fn().mockResolvedValue({ data: {} }),
     ...overrides,
   });
   return service;
@@ -50,6 +73,20 @@ describe('KpiMaintenanceService horometro del control operativo', () => {
   });
 
   describe('updateEquipoHorometro', () => {
+    it('rechaza una petición directa sin permiso aunque la lectura avance', async () => {
+      const service = createService({
+        hasEquipmentEditPermission: jest.fn().mockResolvedValue(false),
+      });
+      await expect(
+        service.updateEquipoHorometro(
+          'eq-1',
+          { horometro_actual: 1200 },
+          { userId: 'sin-permiso' },
+        ),
+      ).rejects.toThrow(ForbiddenException);
+      expect(service.findEquipoOrFail).not.toHaveBeenCalled();
+      expect(service.updateEquipo).not.toHaveBeenCalled();
+    });
     it('deja subir la lectura sin pedir motivo', async () => {
       const service = createService();
       await service.updateEquipoHorometro(
@@ -137,28 +174,119 @@ describe('KpiMaintenanceService horometro del control operativo', () => {
     });
   });
 
+  describe('permiso de Equipos en seguridad', () => {
+    function permissionService(payload: unknown) {
+      const service = createService({
+        securityServiceUrl: 'http://security',
+        getJson: jest.fn().mockResolvedValue(payload),
+        logger: { warn: jest.fn() },
+      });
+      Reflect.deleteProperty(service, 'hasEquipmentEditPermission');
+      return service;
+    }
+
+    it('consulta la identidad del gateway y busca el componente aunque cambie el nombre', async () => {
+      const service = permissionService({
+        data: [
+          {
+            children: [
+              {
+                nombre: 'Unidades de Generación',
+                urlComponent: '/app/equipos',
+                permissions: { isReaded: true, isEdited: true },
+              },
+            ],
+          },
+        ],
+      });
+      await expect(
+        service.hasEquipmentEditPermission({
+          userId: 'usuario-1',
+          roleName: 'Supervisor',
+        }),
+      ).resolves.toBe(true);
+      expect(service.getJson).toHaveBeenCalledWith(
+        'http://security/menu-users/tree/by-user/usuario-1',
+      );
+    });
+
+    it.each([
+      {
+        nombre: 'Equipos',
+        urlComponent: 'otro',
+        permissions: { isReaded: true, isEdited: true },
+      },
+      {
+        urlComponent: 'equipos',
+        permissions: { isReaded: true, isEdited: false },
+      },
+      {
+        urlComponent: 'equipos',
+        permissions: { isReaded: false, isEdited: true },
+      },
+    ])(
+      'no concede acceso por nombre, solo lectura o edición sin lectura: %o',
+      async (node) => {
+        const service = permissionService([node]);
+        await expect(
+          service.hasEquipmentEditPermission({ userId: 'usuario-1' }),
+        ).resolves.toBe(false);
+      },
+    );
+
+    it('mantiene el acceso del Super Administrador sin consultar seguridad', async () => {
+      const service = permissionService([]);
+      await expect(
+        service.hasEquipmentEditPermission({ roleName: 'Super Administrador' }),
+      ).resolves.toBe(true);
+      expect(service.getJson).not.toHaveBeenCalled();
+    });
+
+    it('deniega sin identidad o cuando seguridad no responde', async () => {
+      const service = permissionService([]);
+      await expect(service.hasEquipmentEditPermission(null)).resolves.toBe(
+        false,
+      );
+      expect(service.getJson).not.toHaveBeenCalled();
+      service.getJson.mockRejectedValueOnce(new Error('sin conexión'));
+      await expect(
+        service.hasEquipmentEditPermission({ userId: 'usuario-1' }),
+      ).resolves.toBe(false);
+      expect(service.logger.warn).toHaveBeenCalled();
+    });
+  });
+
   describe('fila que queda en el historial', () => {
     /**
      * `updateEquipo` escribe la fila dentro de una transaccion. Se sustituye por
      * un doble que ejecuta el callback con repositorios de mentira, para poder
      * mirar exactamente lo que se guarda.
      */
-    function createServiceForHistory(current: Record<string, any>) {
+    function createServiceForHistory(current: Partial<EquipoEntity>) {
+      let stored = { ...current };
       const historyRepo = {
         create: jest.fn((value: unknown) => value),
-        save: jest.fn(async (value: unknown) => value),
+        save: jest.fn((value: unknown) => Promise.resolve(value)),
       };
       const equipoRepo = {
-        findOne: jest.fn(async () => ({ ...current })),
-        save: jest.fn(async (value: any) => value),
+        findOne: jest.fn(() => Promise.resolve({ ...stored })),
+        save: jest.fn((value: Partial<EquipoEntity>) => {
+          stored = { ...value };
+          return Promise.resolve(value);
+        }),
       };
       const service = createService({
         findEquipoOrFail: jest.fn().mockResolvedValue({ ...current }),
         triggerAlertRecalculation: jest.fn(),
         dataSource: {
-          transaction: jest.fn(async (cb: any) =>
+          transaction: jest.fn(
+            (
+              cb: (manager: {
+                getRepository: (entity: { name?: string }) => unknown;
+              }) => Promise<unknown>,
+            ) =>
             cb({
-              getRepository: (entity: any) =>
+                getRepository: (entity: { name?: string }) =>
                 entity?.name === 'EquipoHorometroHistorialEntity'
                   ? historyRepo
                   : equipoRepo,
@@ -166,8 +294,8 @@ describe('KpiMaintenanceService horometro del control operativo', () => {
           ),
         },
       });
-      delete (service as any).updateEquipo;
-      return { service, historyRepo };
+      Reflect.deleteProperty(service, 'updateEquipo');
+      return { service, historyRepo, equipoRepo };
     }
 
     it('marca AJUSTE_DIRECTO y guarda el motivo cuando la lectura baja', async () => {
@@ -178,7 +306,7 @@ describe('KpiMaintenanceService horometro del control operativo', () => {
       await service.updateEquipo(
         'eq-1',
         { horometro_actual: 800, horometro_motivo: 'Error de tecleo' },
-        { userId: null, username: 'admin' },
+        { userId: null, username: 'admin', roleName: 'Administrador' },
       );
       expect(historyRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -202,6 +330,120 @@ describe('KpiMaintenanceService horometro del control operativo', () => {
       expect(historyRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({ fuente: 'MANUAL_EQUIPOS', horometro_nuevo: 1200 }),
       );
+    });
+
+    it('la API general de Equipos también exige permiso cuando cambia el horómetro', async () => {
+      const { service, equipoRepo } = createServiceForHistory({
+        id: 'eq-1',
+        horometro_actual: 1000,
+      });
+      service.hasEquipmentEditPermission.mockResolvedValue(false);
+      await expect(
+        service.updateEquipo(
+          'eq-1',
+          { horometro_actual: 1200 },
+          { userId: 'sin-permiso' },
+        ),
+      ).rejects.toThrow(ForbiddenException);
+      expect(equipoRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('el perfil no administrativo no puede saltarse la restricción descendente por la API general', async () => {
+      const { service, equipoRepo } = createServiceForHistory({
+        id: 'eq-1',
+        horometro_actual: 1000,
+      });
+      await expect(
+        service.updateEquipo(
+          'eq-1',
+          { horometro_actual: 800, horometro_motivo: 'Error' },
+          { roleName: 'Supervisor' },
+        ),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        service.updateEquipo(
+          'eq-1',
+          { horometro_actual: 800 },
+          { roleName: 'Administrador' },
+        ),
+      ).rejects.toThrow(/motivo/);
+      expect(equipoRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('compara contra el contador proyectado bajo bloqueo y reinicia su referencia al registrar lectura', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-06T15:00:00Z'));
+      try {
+        const { service, equipoRepo, historyRepo } = createServiceForHistory({
+          id: 'eq-1',
+          horometro_actual: 1000,
+          estado_funcionamiento: 'FUNCIONAMIENTO',
+          horometro_operativo_desde: new Date('2026-11-06T13:00:00Z'),
+        });
+        // 1001 supera la base almacenada, pero baja respecto del contador vigente: 1002.
+        await expect(
+          service.updateEquipo(
+            'eq-1',
+            { horometro_actual: 1001 },
+            { roleName: 'Supervisor' },
+          ),
+        ).rejects.toThrow(ForbiddenException);
+        expect(equipoRepo.save).not.toHaveBeenCalled();
+        const result = await service.updateEquipo(
+          'eq-1',
+          { horometro_actual: 1200 },
+          { roleName: 'Supervisor' },
+        );
+        expect(result.data).toMatchObject({
+          horometro_actual: 1200,
+          horometro_operativo_desde: new Date('2026-11-06T15:00:00Z'),
+        });
+        expect(historyRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            horometro_anterior: 1002,
+            horometro_nuevo: 1200,
+          }),
+        );
+        expect(
+          service.operationalHorometer(
+            result.data,
+            new Date('2026-11-06T15:00:00Z'),
+          ),
+        ).toBe(1200);
+        expect(
+          service.operationalHorometer(
+            result.data,
+            new Date('2026-11-06T16:00:00Z'),
+          ),
+        ).toBe(1201);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('editar la ficha con la lectura vigente conserva el reloj y no exige permiso adicional de horómetro', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-06T15:00:00Z'));
+      try {
+        const since = new Date('2026-11-06T13:00:00Z');
+        const { service, historyRepo } = createServiceForHistory({
+          id: 'eq-1',
+          horometro_actual: 1000,
+          estado_funcionamiento: 'FUNCIONAMIENTO',
+          horometro_operativo_desde: since,
+        });
+        service.hasEquipmentEditPermission.mockResolvedValue(false);
+        const result = await service.updateEquipo('eq-1', {
+          nombre: 'Nombre corregido',
+          horometro_actual: 1002,
+        });
+        expect(result.data).toMatchObject({
+          nombre: 'Nombre corregido',
+          horometro_actual: 1000,
+          horometro_operativo_desde: since,
+        });
+        expect(historyRepo.save).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 

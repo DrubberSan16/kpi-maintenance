@@ -124,9 +124,10 @@ export class DashboardAdministracionService {
       )
       SELECT wo.id AS work_order_id, wo.code AS work_order_code, wo.title AS work_order_title,
         wo.maintenance_kind, wo.status_workflow AS work_order_status,
-        pl.nombre AS plan_name, pl.frecuencia_tipo AS plan_frequency_type,
-        pl.frecuencia_valor AS plan_frequency, pr.nombre AS procedure_name,
-        pr.frecuencia_horas AS procedure_hours,
+        plan.nombre AS plan_name, procedimiento.nombre AS procedimiento_nombre,
+        procedimiento.frecuencia_horas AS procedimiento_horas,
+        plan.frecuencia_tipo AS plan_frequency_type, plan.frecuencia_valor AS plan_frequency,
+        procedimiento.nombre AS procedure_name, procedimiento.frecuencia_horas AS procedure_hours,
         wo.started_at, wo.closed_at, wo.valor_json,
         wo.scheduled_start AS fecha_programada,
         COALESCE(o.fecha_salida, wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
@@ -145,9 +146,12 @@ export class DashboardAdministracionService {
         COALESCE(hist.events, '[]'::jsonb) AS history
       FROM kpi_process.tb_work_order wo
       LEFT JOIN por_ot o ON o.work_order_id = wo.id
-      LEFT JOIN kpi_maintenance.tb_plan_mantenimiento pl ON pl.id = wo.plan_id
-      LEFT JOIN kpi_maintenance.tb_procedimiento_plantilla pr
-        ON pr.id::text = COALESCE(NULLIF(wo.valor_json->>'procedimiento_id', ''), pl.procedimiento_id::text)
+      LEFT JOIN kpi_maintenance.tb_plan_mantenimiento plan
+        ON plan.id = wo.plan_id AND NOT COALESCE(plan.is_deleted, false)
+      LEFT JOIN kpi_maintenance.tb_procedimiento_plantilla procedimiento
+        ON procedimiento.id::text = COALESCE(NULLIF(wo.valor_json->>'procedimiento_id', ''), plan.procedimiento_id::text,
+          substring(plan.descripcion from '\\[PROCEDIMIENTO:([0-9a-fA-F-]{36})\\]'))
+        AND NOT COALESCE(procedimiento.is_deleted, false)
       LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
@@ -178,8 +182,10 @@ export class DashboardAdministracionService {
     `, [desde, hasta, this.equipoParam(query.equipo_id), query.solo_cebado === true, sucursal]);
     const equipos = await this.dataSource.query(`
       SELECT e.id, e.codigo, COALESCE(e.nombre, e.nombre_real) AS nombre, e.es_reserva,
+        m.nombre AS equipment_brand_name,
         e.location_id, CONCAT_WS(' - ', l.codigo, l.nombre) AS central
       FROM kpi_maintenance.tb_equipo e
+      LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id AND NOT COALESCE(m.is_deleted, false)
       LEFT JOIN kpi_maintenance.tb_equipo_tipo t ON t.id = e.equipo_tipo_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
       WHERE NOT COALESCE(e.is_deleted, false) AND ($1::uuid IS NULL OR l.sucursal_id = $1::uuid) AND (

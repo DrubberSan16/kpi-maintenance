@@ -1428,6 +1428,9 @@ describe('KpiMaintenanceService alerts', () => {
   });
 
   it('la actualización manual del equipo registra historial interno', async () => {
+    jest
+      .spyOn(service as any, 'hasEquipmentEditPermission')
+      .mockResolvedValue(true);
     const current = {
       id: 'equipo-1',
       codigo: 'EQ-1',
@@ -1469,6 +1472,9 @@ describe('KpiMaintenanceService alerts', () => {
   });
 
   it('el módulo de Equipos permite corregir el horómetro hacia abajo y usa la lectura menor como nueva base', async () => {
+    jest
+      .spyOn(service as any, 'hasEquipmentEditPermission')
+      .mockResolvedValue(true);
     const current = {
       id: 'equipo-1',
       codigo: 'EQ-1',
@@ -1495,8 +1501,8 @@ describe('KpiMaintenanceService alerts', () => {
     // listarla aparte del trabajo real de la máquina.
     await service.updateEquipo(
       'equipo-1',
-      { horometro_actual: 90 } as any,
-      { username: 'supervisor' },
+      { horometro_actual: 90, horometro_motivo: 'Error de digitación' },
+      { username: 'administrador', roleName: 'Administrador' },
     );
 
     expect(equipmentTxRepo.save).toHaveBeenCalledWith(
@@ -1517,6 +1523,9 @@ describe('KpiMaintenanceService alerts', () => {
   });
 
   it('el endpoint dedicado de horómetro reutiliza la actualización manual auditada', async () => {
+    jest
+      .spyOn(service as any, 'hasEquipmentEditPermission')
+      .mockResolvedValue(true);
     repos.equipoRepo.findOne.mockResolvedValue({
       id: 'equipo-1',
       codigo: 'EQ-1',
@@ -1542,6 +1551,9 @@ describe('KpiMaintenanceService alerts', () => {
   });
 
   it('el control operativo solo deja bajar el horómetro a un perfil administrativo', async () => {
+    jest
+      .spyOn(service as any, 'hasEquipmentEditPermission')
+      .mockResolvedValue(true);
     // Es un contador físico: que baje significa que alguien tecleó mal, y ese
     // error se propaga al par "anterior -> actual" de todos los informes. Por
     // eso bajarlo es un acto administrativo, y ademas hay que decir por qué.

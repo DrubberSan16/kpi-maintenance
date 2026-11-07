@@ -19706,6 +19706,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (requestedHorometer < 0) {
       throw new BadRequestException('El horometro actual no puede ser negativo.');
     }
+    // Consultar seguridad antes del bloqueo de equipo: una red lenta no debe
+    // retener la fila. El cambio real se vuelve a evaluar con la fila bloqueada.
+    const canEditHorometer =
+      dto.horometro_actual !== undefined
+        ? await this.hasEquipmentEditPermission(actor)
+        : false;
     const actorSnapshot = this.resolveHorometerActor(actor, dto.updated_by);
     const closedOrders: WorkOrderEntity[] = [];
     const saved = await this.dataSource.transaction(async (manager) => {
@@ -19720,13 +19726,41 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (restarting) {
         closedOrders.push(...await this.closeWorkOrdersOnRestart(manager, e, actor));
       }
-      const previousHorometer = this.toNumeric(e.horometro_actual, 0);
-      if (restarting || dto.horometro_actual === undefined) requestedHorometer = previousHorometer;
-      const isBackwardCorrection = requestedHorometer < previousHorometer;
-      const horometerChanged = this.haveDifferentNumericValue(
-        previousHorometer,
-        requestedHorometer,
-      );
+      const now = new Date();
+      const storedHorometer = this.toNumeric(e.horometro_actual, 0);
+      const hasManualReading =
+        dto.horometro_actual !== undefined && !restarting;
+      const previousHorometer = hasManualReading
+        ? this.operationalHorometer(e, now)
+        : storedHorometer;
+      // El formulario de Equipos también envía la lectura al editar la ficha.
+      // Si coincide a horas enteras, conservar la base y el reloj en marcha.
+      const horometerChanged =
+        hasManualReading &&
+        this.normalizeHorometro(previousHorometer) !==
+          this.normalizeHorometro(requestedHorometer);
+      if (!horometerChanged) requestedHorometer = storedHorometer;
+      const isBackwardCorrection =
+        horometerChanged && requestedHorometer < previousHorometer;
+      if (horometerChanged) {
+        if (!canEditHorometer) {
+          throw new ForbiddenException(
+            'No tienes permiso de edición sobre Equipos para registrar el horómetro.',
+          );
+        }
+        if (isBackwardCorrection) {
+          if (!this.puedeRegistrarHorometroMenor(actor?.roleName)) {
+            throw new ForbiddenException(
+              'Solo Administrador y Super Administrador pueden registrar una lectura menor.',
+            );
+          }
+          if (!this.trimNullableText(horometroMotivo)) {
+            throw new BadRequestException(
+              'Debes indicar el motivo por el que se registra un horometro menor que la lectura vigente.',
+            );
+          }
+        }
+      }
       Object.assign(e, {
         ...equipoPayload,
       criticidad:
@@ -19768,7 +19802,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           ? String(dto.updated_by ?? '').trim() || null
           : e.updated_by,
       horometro_actual: requestedHorometer,
-      fecha_ultima_lectura: horometerChanged ? new Date() : e.fecha_ultima_lectura,
+        fecha_ultima_lectura: horometerChanged ? now : e.fecha_ultima_lectura,
+        ...(horometerChanged
+          ? {
+              horometro_operativo_desde:
+                (equipoPayload.estado_funcionamiento ??
+                  e.estado_funcionamiento) === 'FUNCIONAMIENTO'
+                  ? now
+                  : null,
+            }
+          : {}),
     });
       if (e.estado_funcionamiento === 'FUNCIONAMIENTO') e.es_reserva = false;
       const savedEquipo = await equipoRepo.save(e);
@@ -19829,8 +19872,15 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     dto: { horometro_actual: number; motivo?: string | null },
     actor?: RequestActorContext | null,
   ) {
+    if (!(await this.hasEquipmentEditPermission(actor))) {
+      throw new ForbiddenException(
+        'No tienes permiso de edición sobre Equipos para registrar el horómetro.',
+      );
+    }
     const current = await this.findEquipoOrFail(id);
-    const lecturaVigente = this.normalizeHorometro(current.horometro_actual);
+    const lecturaVigente = this.normalizeHorometro(
+      this.operationalHorometer(current),
+    );
     const lecturaNueva = this.normalizeHorometro(dto.horometro_actual);
 
     if (lecturaNueva == null) {
@@ -32672,10 +32722,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
     if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'cerrar');
-      await this.assertWorkOrderTaskCapturesReadyForClosure(
-        this.dataSource.manager,
-        wo.id,
-      );
     }
     if (nextWorkflowStatus === 'REVIEW' && previousStatus !== 'REVIEW') {
       await this.assertCanCloseOrVoidWorkOrder(wo, actor, 'pasar a revisión');
@@ -32851,6 +32897,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (nextWorkflowStatus !== previousStatus) {
         await this.assertCanCloseOrVoidWorkOrder(current, actor, 'cambiar el estado de');
       }
+      if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
+        await this.assertWorkOrderTaskCapturesReadyForClosure(manager, wo.id);
+      }
       const persisted = await manager.save(WorkOrderEntity, wo);
       if (previousStatus !== persisted.status_workflow) await manager.save(WorkOrderStatusHistoryEntity, manager.create(WorkOrderStatusHistoryEntity, {
         id: randomUUID(),
@@ -33018,6 +33067,46 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       .replace(/^\/+/, '')
       .replace(/^app\//, '')
       .replace(/[\s_]+/g, '-');
+  }
+
+  private findEquipmentEditPermission(nodes: unknown): boolean {
+    if (!Array.isArray(nodes)) return false;
+    return nodes.some((value: unknown) => {
+      if (!value || typeof value !== 'object') return false;
+      const node = value as Record<string, unknown>;
+      const permissions = node.permissions;
+      return (
+        (this.normalizeMenuComponentName(node.urlComponent) === 'equipos' &&
+          permissions !== null &&
+          typeof permissions === 'object' &&
+          'isReaded' in permissions &&
+          permissions.isReaded === true &&
+          'isEdited' in permissions &&
+          permissions.isEdited === true) ||
+        this.findEquipmentEditPermission(node.children)
+      );
+    });
+  }
+
+  private async hasEquipmentEditPermission(actor?: RequestActorContext | null) {
+    if (this.isSuperAdministratorRoleName(actor?.roleName ?? undefined))
+      return true;
+    const userId = this.firstNonEmptyString(actor?.userId);
+    if (!userId || !this.securityServiceUrl) return false;
+    try {
+      const payload: unknown = await this.getJson(
+        `${this.securityServiceUrl}/menu-users/tree/by-user/${encodeURIComponent(userId)}`,
+      );
+      return this.findEquipmentEditPermission(
+        this.unwrapServiceData<unknown>(payload),
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'desconocido';
+      this.logger.warn(
+        `No se pudo verificar el permiso de Equipos del usuario ${userId}: ${message}`,
+      );
+      return false;
+    }
   }
 
   private findWorkOrderMenuDeletePermission(nodes: unknown): boolean {

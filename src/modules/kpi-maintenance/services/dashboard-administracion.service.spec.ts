@@ -1,4 +1,5 @@
 import { DashboardAdministracionService } from './dashboard-administracion.service';
+import type { DataSource } from 'typeorm';
 
 /*
  * La proyección por horómetro del Dashboard administrativo leía la columna
@@ -315,5 +316,54 @@ describe('Dashboard administrativo: control de cebado y aceite', () => {
     const [equiposSql, equiposParams] = query.mock.calls[1];
     expect(equiposParams).toEqual(['suc-tpta']);
     expect(equiposSql).toContain('l.sucursal_id = $1::uuid');
+  });
+
+  it('clasifica MPG en el informe y conserva el tipo original de la OT', async () => {
+    const query = consulta([
+      {
+        work_order_id: 'ot-mpg',
+        maintenance_kind: 'CORRECTIVO',
+        plan_name: 'MPG 500 HORAS MTU',
+        procedimiento_nombre: 'MPG 500 HORAS MTU',
+        procedimiento_horas: '500',
+        equipment_brand_name: 'MTU',
+        cantidad: '20',
+        subtotal: '250',
+        cantidad_registrada: '20',
+        cantidad_entregada_total: '20',
+        history: [],
+        valor_json: {},
+      },
+    ]);
+    const service = new DashboardAdministracionService({
+      query,
+    } as unknown as DataSource);
+    const { data } = await service.getControlCebadoAceite({
+      desde: '2026-11-01',
+      hasta: '2026-11-06',
+    });
+    expect(
+      (data as { filas: Record<string, unknown>[] }).filas[0],
+    ).toMatchObject({
+      maintenance_kind: 'PREVENTIVO',
+      maintenance_kind_original: 'CORRECTIVO',
+      mpg_interval_hours: 500,
+      plan_name: 'MPG 500 HORAS MTU',
+      procedimiento_horas: '500',
+      equipment_brand_name: 'MTU',
+      cantidad: 20,
+      subtotal: 250,
+    });
+    const calls = query.mock.calls as unknown as [string, unknown[]][];
+    const sql = calls[0][0];
+    expect(sql).toContain('plan.id = wo.plan_id');
+    expect(sql).toContain("NULLIF(wo.valor_json->>'procedimiento_id', '')");
+    expect(sql).toContain(
+      "substring(plan.descripcion from '\\[PROCEDIMIENTO:([0-9a-fA-F-]{36})\\]')",
+    );
+    expect(sql).toContain(
+      'procedimiento.frecuencia_horas AS procedimiento_horas',
+    );
+    expect(calls[1][0]).toContain('m.nombre AS equipment_brand_name');
   });
 });
