@@ -1,3 +1,4 @@
+import { ACEITE_ENTREGADO_SQL, addOilDeliveryCosts, splitOilCostPeriods } from './oil-deliveries';
 import { withWorkOrderLocation } from './work-order-location';
 import {
   BadRequestException,
@@ -2924,7 +2925,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return new Intl.DateTimeFormat('es-EC', {
       month: 'long',
       year: 'numeric',
-      timeZone: 'UTC',
+      timeZone: 'America/Guayaquil',
     }).format(date);
   }
 
@@ -26987,10 +26988,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    const datedOrderIds = new Set(datedWorkOrders.map(row => row.id));
+    const oilDeliveries = scopedWorkOrders.length ? await this.dataSource.query(`
+      SELECT oil.*, to_char(oil.fecha, 'YYYY-MM-DD') AS fecha_referencia
+      FROM (${ACEITE_ENTREGADO_SQL}) oil
+      JOIN kpi_process.tb_work_order oil_wo ON oil_wo.id = oil.work_order_id
+      JOIN kpi_maintenance.tb_equipo oil_equipment ON oil_equipment.id = oil_wo.equipment_id
+        AND NOT COALESCE(oil_equipment.is_deleted, false)
+      LEFT JOIN kpi_maintenance.tb_location oil_location ON oil_location.id = oil_equipment.location_id
+        AND NOT COALESCE(oil_location.is_deleted, false)
+      WHERE oil.work_order_id = ANY($1::uuid[])
+        AND oil.fecha >= $2::date AND oil.fecha < ($3::date + INTERVAL '1 day')
+        AND ($4::uuid IS NULL OR oil.bodega_id = $4::uuid)
+        AND ($5::uuid IS NULL OR COALESCE(NULLIF(oil_wo.equipment_location_snapshot->>'sucursal_id', '')::uuid,
+          oil_location.sucursal_id) = $5::uuid)
+      ORDER BY oil.fecha
+    `, [scopedWorkOrders.map(row => row.id), dateRange.from, dateRange.to, requestedWarehouseId, sucursalId || null]) : [];
+    const oilDateByOrder = new Map<string, string>();
+    for (const row of oilDeliveries) if (!oilDateByOrder.has(row.work_order_id)) {
+      oilDateByOrder.set(row.work_order_id, row.fecha_referencia);
+    }
+    const financialWorkOrders = scopedWorkOrders.filter(row => datedOrderIds.has(row.id) || oilDateByOrder.has(row.id));
     const workOrderIds = datedWorkOrders.map((row) => row.id);
     const planIds = [
       ...new Set(
-        datedWorkOrders
+        financialWorkOrders
           .map((row) => String(row.plan_id || '').trim())
           .filter(Boolean),
       ),
@@ -27064,7 +27086,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     };
     const procedureIds = new Set<string>();
-    for (const workOrder of datedWorkOrders) {
+    for (const workOrder of financialWorkOrders) {
       const payload =
         workOrder.valor_json && typeof workOrder.valor_json === 'object'
           ? (workOrder.valor_json as Record<string, unknown>)
@@ -27347,8 +27369,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       events.push(event); primingHistoryByOrder.set(event.work_order_id, events);
     }
     const workOrderContextMap = new Map<string, any>();
-    for (const workOrder of datedWorkOrders) {
-      const referenceDate = this.resolveWorkOrderReferenceDate(workOrder);
+    const financialContextMap = new Map<string, any>();
+    for (const workOrder of financialWorkOrders) {
+      const inOrderPeriod = datedOrderIds.has(workOrder.id);
+      const referenceDate = inOrderPeriod ? this.resolveWorkOrderReferenceDate(workOrder)
+        : new Date(`${oilDateByOrder.get(workOrder.id)}T12:00:00-05:00`);
       if (!referenceDate) continue;
       const plan = workOrder.plan_id ? planMap.get(workOrder.plan_id) : null;
       const payload =
@@ -27383,9 +27408,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
           (resolvedEnd.getTime() - start.getTime()) / (60 * 60 * 1000);
         return Number(Math.max(duration, 0).toFixed(4));
       };
-      const consumptionWarehouseIds = [
+      const consumptionWarehouseIds = [...new Set([
         ...(consumoWarehouseIdsByWorkOrder.get(workOrder.id) ?? new Set<string>()),
-      ];
+        ...oilDeliveries.filter((row: any) => row.work_order_id === workOrder.id).map((row: any) => String(row.bodega_id)),
+      ])];
       const procedureWarehouseId =
         this.firstNonEmptyString(procedure?.bodega_id) ?? null;
       const primaryWarehouseId =
@@ -27408,7 +27434,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         consumptionWarehouseIds.includes(requestedWarehouseId);
       if (!matchesRequestedWarehouse) continue;
 
-      workOrderContextMap.set(workOrder.id, {
+      const context = {
         work_order_id: workOrder.id,
         work_order_code: workOrder.code,
         work_order_title: workOrder.title,
@@ -27435,7 +27461,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         effective_in_progress: Boolean(effectiveStart && !effectiveEnd),
         fecha_referencia: referenceDate.toISOString(),
         periodo: this.buildSystemReportPeriodLabel(referenceDate),
-        period_key: referenceDate.toISOString().slice(0, 7),
+        period_key: this.currentGuayaquilDateString(referenceDate).slice(0, 7),
         equipment_id: equipment?.id ?? workOrder.equipment_id ?? null,
         equipment_code: equipment?.codigo ?? null,
         equipment_name: this.buildEquipmentManagerLabel(equipment),
@@ -27463,7 +27489,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         horometro_actual_ot: horometerSnapshot.horometro_actual,
         horometro_anterior_ot: horometerSnapshot.horometro_anterior,
         horas_a_realizar_ot: horometerSnapshot.horas_a_realizar,
-      });
+        aceite_fuente: 'KARDEX',
+        solo_aceite_periodo: !inOrderPeriod,
+      };
+      financialContextMap.set(workOrder.id, context);
+      if (inOrderPeriod) workOrderContextMap.set(workOrder.id, context);
     }
 
     const filteredWorkOrderIds = new Set([...workOrderContextMap.keys()]);
@@ -27820,8 +27850,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     );
 
     const maintenanceOtMap = new Map<string, any>(
-      [...workOrderContextMap.values()]
-        .filter((row) => row.is_maintenance)
+      [...financialContextMap.values()]
+        .filter((row) => row.is_maintenance || oilDateByOrder.has(row.work_order_id))
         .map((row) => [
           row.work_order_id,
           {
@@ -27874,7 +27904,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
       if (context.is_maintenance) {
         const maintenanceRow = maintenanceOtMap.get(context.work_order_id);
-        if (maintenanceRow) {
+        if (maintenanceRow && materialCategoryMap.get(String(row.producto_id || '').trim())?.categoria_costo !== 'ACEITE') {
           maintenanceRow.total_costo = Number(
             (maintenanceRow.total_costo + subtotal).toFixed(4),
           );
@@ -27952,6 +27982,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         replacedBaseMap.set(replacedKey, replacedCurrent);
       }
     }
+
+    addOilDeliveryCosts(maintenanceOtMap, oilDeliveries);
 
     const costoMantenimientoOtRows = sortRowsByDateDesc(
       [...maintenanceOtMap.values()].map((row) => ({
@@ -28062,7 +28094,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         .sort((a, b) => b.total_costo - a.total_costo);
     } else if (groupBy === 'MES') {
       const grouped = new Map<string, any>();
-      for (const row of costoMantenimientoOtRows) {
+      for (const row of costoMantenimientoOtRows.flatMap(splitOilCostPeriods)) {
         const key = String(row.period_key || 'SIN_PERIODO');
         const current = grouped.get(key) ?? {
           period_key: row.period_key,

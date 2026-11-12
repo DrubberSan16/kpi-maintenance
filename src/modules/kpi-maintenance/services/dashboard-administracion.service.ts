@@ -9,6 +9,7 @@ import {
   resolverReferenciaMantenimiento,
 } from './horometro-proyeccion';
 import { aceiteEnGalonesSql } from './material-cost-category';
+import { ACEITE_ENTREGADO_SQL } from './oil-deliveries';
 
 /**
  * Dashboard Administración: KPI de mantenimiento.
@@ -41,31 +42,6 @@ function normalizeHorometro(value: unknown): number | null {
   const num = Number(value);
   return Number.isFinite(num) ? Math.round(num) : null;
 }
-
-/**
- * Aceite que salió de bodega para cada OT, asiento por asiento del kardex.
- *
- * Todos los indicadores de cebado y aceite cuentan esto y no lo que se tecleó
- * en los materiales de la OT, por dos razones que reclamó bodega:
- *  - La fecha es la de la salida (EB). Las OT se registran a veces semanas
- *    después del trabajo con `hora_inicio` retroactiva, y con esa fecha el
- *    aceite caía en agosto mientras el kardex lo descargaba en septiembre.
- *  - La cantidad es la entregada. Hay OT con la línea de aceite duplicada o
- *    sin egreso de bodega, y sumar los materiales de la OT no cuadraba.
- *
- * Una entrada ligada a la OT es aceite devuelto y resta. Las salidas anuladas
- * quedan con el asiento borrado (`is_deleted`), así que no cuentan.
- */
-const ACEITE_ENTREGADO_SQL = `
-  SELECT mi.work_order_id, k.fecha, k.producto_id,
-    COALESCE(k.salida_cantidad, 0) - COALESCE(k.entrada_cantidad, 0) AS galones,
-    CASE WHEN COALESCE(k.entrada_cantidad, 0) > 0
-      THEN -COALESCE(k.costo_total, 0) ELSE COALESCE(k.costo_total, 0) END AS costo
-  FROM kpi_inventory.tb_kardex k
-  JOIN kpi_inventory.tb_movimiento_inventario mi
-    ON mi.id = k.movimiento_id AND mi.work_order_id IS NOT NULL
-  JOIN kpi_inventory.tb_producto p ON p.id = k.producto_id AND ${aceiteEnGalonesSql('p')}
-  WHERE NOT COALESCE(k.is_deleted, false)`;
 
 /** Cómo se lee la unidad guardada de una frecuencia por calendario. */
 const UNIDADES_CALENDARIO: Record<string, string> = {
@@ -131,10 +107,12 @@ export class DashboardAdministracionService {
         wo.started_at, wo.closed_at, wo.valor_json,
         wo.scheduled_start AS fecha_programada,
         COALESCE(o.fecha_salida, wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_referencia,
-        o.fecha_salida,
+        o.fecha_salida AS fecha_salida_aceite,
+        COALESCE(o.fecha_salida, egreso.fecha_salida) AS fecha_salida,
         COALESCE(wo.hora_inicio, wo.started_at, wo.created_at) AS fecha_ot,
         wo.equipment_id, e.codigo AS equipment_code, COALESCE(e.nombre, e.nombre_real) AS equipment_name,
         m.nombre AS equipment_brand_name, e.es_reserva,
+        t.nombre AS equipment_type_name,
         CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN (wo.equipment_location_snapshot->>'location_id')::uuid ELSE e.location_id END AS location_id,
         CASE WHEN wo.equipment_location_snapshot IS NOT NULL THEN CONCAT_WS(' - ', wo.equipment_location_snapshot->>'location_code', wo.equipment_location_snapshot->>'location_name', wo.equipment_location_snapshot->>'sucursal_name') ELSE CONCAT_WS(' - ', l.codigo, l.nombre) END AS central,
         NULLIF(wo.valor_json->>'horometro_anterior', '')::numeric AS horometro_inicial,
@@ -153,6 +131,14 @@ export class DashboardAdministracionService {
           substring(plan.descripcion from '\\[PROCEDIMIENTO:([0-9a-fA-F-]{36})\\]'))
         AND NOT COALESCE(procedimiento.is_deleted, false)
       LEFT JOIN kpi_maintenance.tb_equipo e ON e.id = wo.equipment_id
+      LEFT JOIN kpi_maintenance.tb_equipo_tipo t ON t.id = e.equipo_tipo_id
+      LEFT JOIN LATERAL (
+        SELECT MIN(k.fecha) AS fecha_salida
+        FROM kpi_inventory.tb_movimiento_inventario mi
+        JOIN kpi_inventory.tb_kardex k ON k.movimiento_id = mi.id
+        WHERE mi.work_order_id = wo.id AND NOT COALESCE(mi.is_deleted, false)
+          AND NOT COALESCE(k.is_deleted, false) AND COALESCE(k.salida_cantidad, 0) > 0
+      ) egreso ON true
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
       LEFT JOIN LATERAL (
@@ -168,6 +154,8 @@ export class DashboardAdministracionService {
         FROM kpi_process.tb_work_order_status_history h WHERE h.work_order_id = wo.id
       ) hist ON true
       WHERE NOT COALESCE(wo.is_deleted, false)
+        AND NOT COALESCE(e.is_deleted, false)
+        AND UPPER(COALESCE(t.nombre, '') || ' ' || COALESCE(t.codigo, '')) SIMILAR TO '%(GENERACI|GENERADOR)%'
         AND UPPER(COALESCE(wo.status, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
         AND UPPER(COALESCE(wo.status_workflow, '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELLED', 'CANCELED', 'VOID', 'VOIDED')
         AND UPPER(COALESCE(wo.valor_json->>'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
@@ -188,22 +176,20 @@ export class DashboardAdministracionService {
       LEFT JOIN kpi_inventory.tb_marca m ON m.id = e.marca_id AND NOT COALESCE(m.is_deleted, false)
       LEFT JOIN kpi_maintenance.tb_equipo_tipo t ON t.id = e.equipo_tipo_id
       LEFT JOIN kpi_maintenance.tb_location l ON l.id = e.location_id AND NOT COALESCE(l.is_deleted, false)
-      WHERE NOT COALESCE(e.is_deleted, false) AND ($1::uuid IS NULL OR l.sucursal_id = $1::uuid) AND (
-        UPPER(COALESCE(t.nombre, '') || ' ' || COALESCE(t.codigo, '')) SIMILAR TO '%(GENERACI|GENERADOR)%'
-        OR EXISTS (SELECT 1 FROM kpi_process.tb_work_order wo WHERE wo.equipment_id = e.id
-          AND NOT COALESCE(wo.is_deleted, false)
-          AND (wo.started_at IS NOT NULL OR wo.status_workflow IN ('IN_PROGRESS', 'REVIEW', 'CLOSED'))
-          AND UPPER(COALESCE(wo.status, '')) NOT LIKE '%ANUL%'
-          AND UPPER(COALESCE(wo.valor_json->>'approval_action', '')) NOT IN ('ANULADA', 'ANULADO', 'CANCELADA', 'CANCELADO')
-          AND COALESCE(wo.valor_json->'annulment', 'null'::jsonb) = 'null'::jsonb)
-      ) ORDER BY e.codigo, e.nombre, e.id
+      WHERE NOT COALESCE(e.is_deleted, false) AND ($1::uuid IS NULL OR l.sucursal_id = $1::uuid)
+        AND UPPER(COALESCE(t.nombre, '') || ' ' || COALESCE(t.codigo, '')) SIMILAR TO '%(GENERACI|GENERADOR)%' ORDER BY e.codigo, e.nombre, e.id
     `, [sucursal]);
     const inventario = await this.getInventarioAceite(desde, hasta, sucursal);
     return this.wrap({ filas: filas.map(({ history, valor_json, ...row }) => ({
       ...row, ...oilMaintenanceClassification(row), cantidad: Number(row.cantidad), subtotal: Number(row.subtotal),
       cantidad_registrada: Number(row.cantidad_registrada),
       cantidad_entregada_total: Number(row.cantidad_entregada_total),
-      observacion: this.observacionAceite(row),
+      observacion: [
+        this.observacionAceite(row),
+        !row.fecha_salida_aceite && row.fecha_salida ? 'Egreso de bodega sin aceite; fecha correspondiente a otros materiales.' : null,
+        oilMaintenanceClassification(row).maintenance_kind !== 'CEBADO' && 'horometro_final' in row && row.horometro_final == null
+          ? 'Sin lectura final de horómetro registrada en la OT.' : null,
+      ].filter(Boolean).join(' ') || null,
       horas_trabajadas: workOrderWorkedHours({ ...row, valor_json, status_workflow: row.work_order_status }, history),
       // El semáforo es una alerta de consumo de la orden completa: mide lo
       // entregado en todos los períodos o, si es mayor, lo que el técnico
