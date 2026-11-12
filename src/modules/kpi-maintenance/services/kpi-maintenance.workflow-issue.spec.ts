@@ -26,11 +26,23 @@ function fixture(state = 'PLANNED') {
 
 describe('Flujo automático de OT y egreso', () => {
   it('crea planificada e impide iniciar por una edición de estado', () => {
-    const { service } = fixture();
-    expect(service.resolveManualWorkOrderStatus(null, 'IN_PROGRESS', true)).toBe('PLANNED');
-    expect(() => service.resolveManualWorkOrderStatus('PLANNED', 'IN_PROGRESS')).toThrow(ForbiddenException);
-    expect(service.resolveManualWorkOrderStatus('IN_PROGRESS', 'REVIEW')).toBe('REVIEW');
-    expect(() => service.resolveManualWorkOrderStatus('REVIEW', 'IN_PROGRESS')).toThrow(ForbiddenException);
+    const { service, wo } = fixture();
+    expect(service.resolveManualWorkOrderStatus(null, 'IN_PROGRESS')).toBe('PLANNED');
+    expect(() => service.resolveManualWorkOrderStatus(wo, 'IN_PROGRESS')).toThrow(ForbiddenException);
+    expect(service.resolveManualWorkOrderStatus({ ...wo, status_workflow: 'IN_PROGRESS' }, 'REVIEW')).toBe('REVIEW');
+    expect(() => service.resolveManualWorkOrderStatus({ ...wo, status_workflow: 'REVIEW' }, 'IN_PROGRESS')).toThrow(ForbiddenException);
+  });
+  it.each(['PLANNED', 'BLOCKED'])('no permite finalizar desde %s aunque tenga constancia de un egreso', state => {
+    const { service, wo } = fixture(state);
+    wo.valor_json.execution_start = { issue_document_ids: ['egreso'] };
+    expect(() => service.resolveManualWorkOrderStatus(wo, 'CLOSED')).toThrow(/confirmar la impresión/);
+  });
+  it.each(['IN_PROGRESS', 'REVIEW'])('solo permite finalizar desde %s con impresión confirmada', state => {
+    const { service, wo } = fixture(state);
+    wo.started_at = new Date('2026-10-03T14:00:00Z');
+    expect(() => service.resolveManualWorkOrderStatus(wo, 'CLOSED')).toThrow(/confirmar la impresión/);
+    wo.valor_json.execution_start = { issue_document_ids: ['egreso'] };
+    expect(service.resolveManualWorkOrderStatus(wo, 'CLOSED')).toBe('CLOSED');
   });
   it.each(['ADMINISTRADOR', 'GERENTE GENERAL', 'SUPERVISOR'])('no permite a %s confirmar el egreso', async roleName => {
     const { service } = fixture();
@@ -44,7 +56,8 @@ describe('Flujo automático de OT y egreso', () => {
     wo.valor_json = { horometro_actual: 999, horometro_anterior: 900, horas_plantilla: 1.5 };
     await service.confirmWorkOrderIssue('wo', actor);
     expect(wo.status_workflow).toBe('IN_PROGRESS');
-    expect(wo.valor_json.execution_start).toMatchObject({ by_name: 'Ana Bodega', by_user_id: actor.userId });
+    expect(wo.valor_json.execution_start).toMatchObject({ by_name: 'Ana Bodega', by_user_id: actor.userId, issue_document_ids: ['egreso'] });
+    expect(service.resolveManualWorkOrderStatus(wo, 'CLOSED')).toBe('CLOSED');
     expect(equipment.estado_funcionamiento).toBe('FUNCIONAMIENTO');
     expect(wo.valor_json.horometro_actual).toBeCloseTo(1001.25, 3);
     expect(equipment.horometro_actual).toBe(1000.25);
@@ -63,13 +76,29 @@ describe('Flujo automático de OT y egreso', () => {
     await service.confirmWorkOrderIssue('wo', actor);
     expect(wo.started_at.toISOString()).toBe('2026-10-03T14:00:00.000Z');
     expect(wo.valor_json.execution_start.by_name).toBe('Inicio original');
+    expect(wo.valor_json.execution_start.issue_document_ids).toEqual(['egreso']);
     expect(saves.find(row => row.entity === WorkOrderStatusHistoryEntity).value).toMatchObject({ from_status: 'REVIEW', to_status: 'IN_PROGRESS', changed_by: actor.userId, note: expect.stringContaining('reanudada') });
   });
   it.each(['IN_PROGRESS', 'CLOSED'])('reimprimir en %s no modifica el inicio ni duplica eventos', async state => {
-    const { service, manager } = fixture(state);
+    const { service, manager, wo } = fixture(state);
+    wo.valor_json.execution_start = { issue_document_ids: ['egreso'] };
     await service.confirmWorkOrderIssue('wo', actor);
     expect(manager.save).not.toHaveBeenCalled();
     expect(service.listWorkOrderIssueDocuments).toHaveBeenCalled();
+  });
+  it('registra el egreso de una OT antigua en ejecución y conserva su inicio', async () => {
+    const { service, manager, wo, saves } = fixture('IN_PROGRESS');
+    wo.started_at = new Date('2026-10-03T14:00:00Z');
+    wo.valor_json.execution_start = { at: wo.started_at.toISOString(), by_name: 'Inicio original' };
+    wo.valor_json.horometro_inicio_ejecucion = 500;
+    await service.confirmWorkOrderIssue('wo', actor);
+    await service.confirmWorkOrderIssue('wo', actor);
+    expect(wo.started_at.toISOString()).toBe('2026-10-03T14:00:00.000Z');
+    expect(wo.valor_json.horometro_inicio_ejecucion).toBe(500);
+    expect(wo.valor_json.execution_start).toMatchObject({ by_name: 'Inicio original', issue_document_ids: ['egreso'] });
+    expect(manager.save).toHaveBeenCalledTimes(1);
+    expect(saves[0].entity).toBe(WorkOrderEntity);
+    expect(service.resolveManualWorkOrderStatus(wo, 'CLOSED')).toBe('CLOSED');
   });
   it('rechaza un egreso vacío sin cambiar la OT ni el equipo', async () => {
     const { service, wo, equipment, manager } = fixture();

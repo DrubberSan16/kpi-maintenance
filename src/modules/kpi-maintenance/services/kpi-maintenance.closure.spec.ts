@@ -184,6 +184,28 @@ describe('Responsables obligatorios al finalizar la OT', () => {
     expect(service.assertMaterialShortfallAcknowledged).not.toHaveBeenCalled();
   });
 
+  it.each(['PLANNED', 'REVIEW'])('rechaza finalizar desde %s sin impresión, por ambos guardados', async status => {
+    const { service, manager } = fixture([]);
+    const order = { id: 'ot-1', status_workflow: status, valor_json: {} };
+    const lockedManager = {
+      ...manager,
+      findOne: jest.fn().mockResolvedValue(order),
+      save: jest.fn(),
+    };
+    Object.assign(service, {
+      dataSource: { transaction: jest.fn(async callback => callback(lockedManager)) },
+      findOneOrFail: jest.fn().mockResolvedValue(order),
+      assertOperatorAssignedToWorkOrder: jest.fn(),
+      assertWorkOrderNotBlockedByActiveAnnex: jest.fn(),
+      logger: { error: jest.fn() },
+    });
+    const header = { status_workflow: 'CLOSED', valor_json: { execution_start: { issue_document_ids: ['supuesto-egreso'] } } };
+    await expect(service.updateWorkOrder('ot-1', header)).rejects.toThrow(/confirmar la impresión/);
+    await expect(service.saveWorkOrderBundle('ot-1', { header })).rejects.toThrow(/confirmar la impresión/);
+    expect(lockedManager.save).not.toHaveBeenCalled();
+    expect(order.status_workflow).toBe(status);
+  });
+
   it('la actualización directa valida responsables con la cabecera bloqueada antes de persistir el cierre', async () => {
     const { service, manager, taskRepo } = fixture([
       { id: 'tarea-1', responsables: [] },
@@ -196,6 +218,7 @@ describe('Responsables obligatorios al finalizar la OT', () => {
         causa: 'Desgaste',
         accion: 'Cambio',
         prevencion: 'Inspección',
+        execution_start: { issue_document_ids: ['egreso'] },
       },
     };
     const lockedManager = {

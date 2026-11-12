@@ -6296,11 +6296,28 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return isOverhaul;
   }
 
-  private resolveManualWorkOrderStatus(current: unknown, requested: unknown, isNew = false) {
-    if (isNew) return 'PLANNED';
-    const previous = this.normalizeWorkflowStatus(current);
-    const next = this.normalizeWorkflowStatus(requested ?? current);
-    if (next === previous || (next === 'CLOSED' && previous !== 'CLOSED')) return next;
+  private hasWorkOrderIssueConfirmation(workOrder: WorkOrderEntity) {
+    const start = workOrder.valor_json?.execution_start as { issue_document_ids?: unknown } | undefined;
+    return Array.isArray(start?.issue_document_ids) &&
+      start.issue_document_ids.some(id => typeof id === 'string' && id.trim());
+  }
+
+  private canFinalizeWorkOrder(workOrder: WorkOrderEntity) {
+    return ['IN_PROGRESS', 'REVIEW'].includes(this.normalizeWorkflowStatus(workOrder.status_workflow)) &&
+      this.hasWorkOrderIssueConfirmation(workOrder);
+  }
+
+  private resolveManualWorkOrderStatus(workOrder: WorkOrderEntity | null, requested: unknown) {
+    if (!workOrder) return 'PLANNED';
+    const previous = this.normalizeWorkflowStatus(workOrder.status_workflow);
+    const next = this.normalizeWorkflowStatus(requested ?? workOrder.status_workflow);
+    if (next === previous) return next;
+    if (next === 'CLOSED') {
+      if (!this.canFinalizeWorkOrder(workOrder)) {
+        throw new ForbiddenException('Para finalizar la OT, Bodega debe confirmar la impresión del egreso y la OT debe haber pasado a En proceso.');
+      }
+      return next;
+    }
     if (previous === 'IN_PROGRESS' && next === 'REVIEW') return next;
     throw new ForbiddenException('El estado es automático. Para iniciar la ejecución, Bodega debe imprimir el egreso. El creador puede pasar a En revisión, Finalizada o Anulada.');
   }
@@ -17501,9 +17518,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         workOrder.closed_at = ahora;
         if (!workOrder.started_at) workOrder.started_at = ahora;
       }
-      // Si la OT se cierra sin haber pasado por EN PROCESO no hay tramo que
-      // medir: se ancla el inicio al arranque del flujo en vez de dejar la
-      // duracion sin calcular.
+      // Conserva un inicio medible para registros históricos sin hora_inicio.
       if (!workOrder.hora_inicio) {
         workOrder.hora_inicio = workOrder.started_at ?? ahora;
       }
@@ -19188,6 +19203,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       approval_action:
         this.firstNonEmptyString(auditPayload.approval_action) ?? null,
       can_close_or_void: canCloseOrVoid,
+      can_finalize: canCloseOrVoid && this.canFinalizeWorkOrder(workOrder),
       ...this.buildWorkOrderAuditLabels(
         workOrder,
         users ?? await this.fetchSecurityUsers(),
@@ -31502,6 +31518,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const previousStatus = this.normalizeWorkflowStatus(
       workOrder?.status_workflow ?? 'PLANNED',
     );
+    const nextWorkflowStatus = this.resolveManualWorkOrderStatus(workOrder, header.status_workflow);
     const previousHeaderPayload =
       ((workOrder?.valor_json as Record<string, unknown> | null | undefined) ??
         null);
@@ -31609,9 +31626,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       existingLegacyOfficialName:
         workOrder?.equipo_componente_nombre_oficial ?? null,
     });
-    const nextWorkflowStatus = this.resolveManualWorkOrderStatus(
-      workOrder?.status_workflow ?? 'PLANNED', header.status_workflow, isNew,
-    );
     const nextBlockedByWorkOrderId =
       header.blocked_by_work_order_id !== undefined
         ? header.blocked_by_work_order_id
@@ -32402,7 +32416,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         })
       : await this.resolveProcedimientoFromPlan(resolvedPlan);
 
-    const normalizedStatus = this.resolveManualWorkOrderStatus('PLANNED', dto.status_workflow, true);
+    const normalizedStatus = this.resolveManualWorkOrderStatus(null, dto.status_workflow);
     this.assertBlockedWorkflowHasBlockingOrder(
       normalizedStatus,
       dto.blocked_by_work_order_id,
@@ -32705,6 +32719,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       undefined,
       'guardar o cambiar el estado de la orden',
     );
+    const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
+    const nextWorkflowStatus = this.resolveManualWorkOrderStatus(wo, dto.status_workflow);
     const dtoOwnershipHints = this.resolveWorkOrderOwnershipHints(
       (dto.valor_json ?? null) as Record<string, unknown> | null,
     );
@@ -32715,7 +32731,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const equipment = wo.equipment_id
       ? await this.findEquipoOrFail(wo.equipment_id)
       : null;
-    const previousStatus = this.normalizeWorkflowStatus(wo.status_workflow);
     let resolvedPlanId = wo.plan_id ?? null;
     if (dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
@@ -32741,9 +32756,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       existingLegacyName: wo.equipo_componente_nombre ?? null,
       existingLegacyOfficialName: wo.equipo_componente_nombre_oficial ?? null,
     });
-    const nextWorkflowStatus = this.resolveManualWorkOrderStatus(
-      wo.status_workflow, dto.status_workflow,
-    );
     const nextBlockedByWorkOrderId =
       dto.blocked_by_work_order_id !== undefined
         ? dto.blocked_by_work_order_id
@@ -32930,6 +32942,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         await this.assertCanCloseOrVoidWorkOrder(current, actor, 'cambiar el estado de');
       }
       if (nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
+        this.resolveManualWorkOrderStatus(current, nextWorkflowStatus);
         await this.assertWorkOrderTaskCapturesReadyForClosure(manager, wo.id);
       }
       const persisted = await manager.save(WorkOrderEntity, wo);
@@ -35947,19 +35960,29 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!candidate) throw new NotFoundException('Orden de trabajo no encontrada');
       await this.assertWorkOrderVisibleForSucursal(candidate, sucursalId);
       if (this.isWorkOrderAnnulled(candidate)) throw new ForbiddenException('La OT está anulada y no tiene un egreso vigente.');
-      const previous = this.normalizeWorkflowStatus(candidate.status_workflow);
-      // Reimprimir una OT iniciada o finalizada no modifica su ejecución.
-      if (previous === 'CLOSED' || previous === 'IN_PROGRESS') return { workOrder: candidate, started: false };
+      const candidateStatus = this.normalizeWorkflowStatus(candidate.status_workflow);
+      if (candidateStatus === 'CLOSED' ||
+          (candidateStatus === 'IN_PROGRESS' && this.hasWorkOrderIssueConfirmation(candidate))) {
+        return { workOrder: candidate, started: false };
+      }
       const equipment = await this.lockWorkOrderEquipmentForIssue(manager, candidate);
       const workOrder = await manager.findOne(WorkOrderEntity, {
         where: { id: workOrderId, is_deleted: false }, lock: { mode: 'pessimistic_write' },
       });
       if (!workOrder) throw new NotFoundException('Orden de trabajo no encontrada');
-      if (this.normalizeWorkflowStatus(workOrder.status_workflow) === 'IN_PROGRESS') return { workOrder, started: false };
-      this.assertWorkOrderAllowsMaterialIssue(workOrder);
-      await this.assertWorkOrderNotBlockedByActiveAnnex(workOrder, manager, 'imprimir el egreso e iniciar la ejecución');
-      await this.assertWorkOrderCanMoveToInProgress({ maintenanceKind: workOrder.maintenance_kind,
-        workOrderId: workOrder.id, fallbackValorJson: workOrder.valor_json as Record<string, unknown> | null });
+      if (this.isWorkOrderAnnulled(workOrder)) throw new ForbiddenException('La OT está anulada y no tiene un egreso vigente.');
+      const previous = this.normalizeWorkflowStatus(workOrder.status_workflow);
+      const hasIssueConfirmation = this.hasWorkOrderIssueConfirmation(workOrder);
+      if (previous === 'CLOSED' || (previous === 'IN_PROGRESS' && hasIssueConfirmation)) {
+        return { workOrder, started: false };
+      }
+      const alreadyInExecution = previous === 'IN_PROGRESS' && Boolean(workOrder.started_at);
+      if (!alreadyInExecution) {
+        if (previous !== 'IN_PROGRESS') this.assertWorkOrderAllowsMaterialIssue(workOrder);
+        await this.assertWorkOrderNotBlockedByActiveAnnex(workOrder, manager, 'imprimir el egreso e iniciar la ejecución');
+        await this.assertWorkOrderCanMoveToInProgress({ maintenanceKind: workOrder.maintenance_kind,
+          workOrderId: workOrder.id, fallbackValorJson: workOrder.valor_json as Record<string, unknown> | null });
+      }
       const movements = await this.findWorkOrderIssueMovements(manager, workOrder.id);
       if (!movements.length) throw new BadRequestException('Registra la salida de los materiales antes de imprimir el egreso.');
       const actualIssues = await manager.count(EntregaMaterialDetEntity, {
@@ -35972,6 +35995,23 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const actorId = this.resolveActorHistoryUserId(actor);
       const actorName = this.firstNonEmptyString(actor?.displayName, actor?.username) || 'Usuario de bodega';
       const hadStarted = Boolean(workOrder.started_at);
+      if (!hasIssueConfirmation) {
+        const originalStart = workOrder.valor_json?.execution_start as Record<string, unknown> | undefined;
+        workOrder.valor_json = {
+          ...workOrder.valor_json,
+          execution_start: {
+            ...(!hadStarted ? { at: now.toISOString(), by_user_id: actorId, by_username: actor?.username ?? null, by_name: actorName } : {}),
+            ...originalStart,
+            issue_document_ids: movements.map(row => row.id),
+            issue_document_numbers: movements.map(row => row.numero_documento),
+          },
+        };
+      }
+      if (alreadyInExecution) {
+        // La primera confirmación registrada de una OT antigua conserva su inicio.
+        await manager.save(WorkOrderEntity, workOrder);
+        return { workOrder, started: false };
+      }
       if (!hadStarted && equipment && !this.isProyectoMaintenanceKind(workOrder.maintenance_kind)) {
         const reading = this.operationalHorometer(equipment, now);
         workOrder.valor_json = { ...(workOrder.valor_json ?? {}), horometro_automatico: true,
@@ -35991,10 +36031,6 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (!workOrder.started_at) workOrder.started_at = now;
       this.applyWorkflowDates(workOrder, previous, 'IN_PROGRESS');
       this.applyWorkOrderAuditStamp(workOrder, actor, 'PROCESSED');
-      if (!hadStarted) workOrder.valor_json = { ...(workOrder.valor_json ?? {}), execution_start: workOrder.valor_json?.execution_start ?? {
-        at: now.toISOString(), by_user_id: actorId, by_username: actor?.username ?? null, by_name: actorName,
-        issue_document_ids: movements.map(row => row.id), issue_document_numbers: movements.map(row => row.numero_documento),
-      } };
       workOrder.updated_by = actor?.username || actorName;
       // El equipo se guarda antes que la OT: el disparador que fotografía el
       // horómetro al iniciar lee así el contador ya congelado.
