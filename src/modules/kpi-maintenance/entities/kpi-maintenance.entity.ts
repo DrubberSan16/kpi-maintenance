@@ -298,8 +298,8 @@ export class PlanTareaEntity {
 export class ProgramacionPlanEntity {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'text', nullable: true }) codigo?: string | null;
-  @Column({ type: 'uuid' }) equipo_id: string;
-  @Column({ type: 'uuid' }) plan_id: string;
+  @Column({ type: 'uuid', nullable: true }) equipo_id: string | null;
+  @Column({ type: 'uuid', nullable: true }) plan_id: string | null;
   @Column({ type: 'uuid', nullable: true }) work_order_id?: string | null;
   @Column({ type: 'text', default: 'DINAMICA' }) modo_programacion: string;
   @Column({ type: 'text', default: 'MANUAL' }) origen_programacion: string;

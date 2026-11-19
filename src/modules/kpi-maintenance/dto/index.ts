@@ -637,9 +637,10 @@ export class CreateProgramacionDto {
   @IsOptional()
   @IsString()
   codigo?: string;
-  @ApiProperty({ description: 'ID del equipo', format: 'uuid' })
+  @ApiPropertyOptional({ description: 'ID del equipo; opcional para OT de proyecto', format: 'uuid' })
+  @IsOptional()
   @IsUUID()
-  equipo_id: string;
+  equipo_id?: string;
   @ApiPropertyOptional({ description: 'ID del plan operativo interno', format: 'uuid' })
   @IsOptional()
   @IsUUID()

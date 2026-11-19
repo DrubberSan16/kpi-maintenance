@@ -2129,6 +2129,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
 
   private async ensureProgramacionScheduleSchema() {
     await this.dataSource.query(`
+      ALTER TABLE IF EXISTS kpi_maintenance.tb_programacion_plan
+        ALTER COLUMN equipo_id DROP NOT NULL,
+        ALTER COLUMN plan_id DROP NOT NULL
+    `);
+    await this.dataSource.query(`
       ALTER TABLE IF EXISTS kpi_maintenance.tb_programacion_mensual_det
       ADD COLUMN IF NOT EXISTS horas_mantenimiento numeric(10, 2) NULL
     `);
@@ -18200,9 +18205,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (this.normalizeMaintenanceKind(options.maintenanceKind) === 'CEBADO') {
       return null;
     }
-    // La programacion exige equipo (`tb_programacion_plan.equipo_id`) y una OT
-    // de Proyecto no tiene: pedirla la dejaba sin poder pasar a En proceso y,
-    // con ello, sin salida de materiales.
+    // Las OT de Proyecto se pueden programar, pero la programación sigue
+    // siendo opcional para pasar a En proceso y solicitar materiales.
     if (this.isProyectoMaintenanceKind(options.maintenanceKind)) {
       return null;
     }
@@ -18445,8 +18449,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const key = String(id ?? '').trim().toLowerCase();
       return key ? map.get(key) ?? null : null;
     };
-    // Sin equipo o plan vigente la consulta suelta lanza NotFoundException; el
-    // contexto conserva ese comportamiento.
+    // Las referencias existentes deben seguir siendo válidas; los proyectos
+    // pueden omitir equipo y plan.
     const requireFromContext = <T>(map: Map<string, T>, id: unknown) => {
       const item = fromContext(map, id);
       if (!item) throw new NotFoundException('Registro no encontrado');
@@ -18454,45 +18458,49 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     };
     const [equipo, plan, linkedWorkOrder] = context
       ? [
-          requireFromContext(context.equipos, programacion.equipo_id),
-          requireFromContext(context.planes, programacion.plan_id),
+          programacion.equipo_id ? requireFromContext(context.equipos, programacion.equipo_id) : null,
+          programacion.plan_id ? requireFromContext(context.planes, programacion.plan_id) : null,
           programacion.work_order_id
             ? fromContext(context.workOrders, programacion.work_order_id)
             : null,
         ]
       : await Promise.all([
-          this.findEquipoOrFail(programacion.equipo_id),
-          this.findOneOrFail(this.planRepo, {
+          programacion.equipo_id ? this.findEquipoOrFail(programacion.equipo_id) : Promise.resolve(null),
+          programacion.plan_id ? this.findOneOrFail(this.planRepo, {
             id: programacion.plan_id,
             is_deleted: false,
-          }),
+          }) : Promise.resolve(null),
           programacion.work_order_id
             ? this.woRepo.findOne({
                 where: { id: programacion.work_order_id, is_deleted: false },
               })
             : Promise.resolve(null),
         ]);
-    const procedimiento = context
+    const isProject = this.isProyectoMaintenanceKind(linkedWorkOrder?.maintenance_kind);
+    if (!isProject && (!equipo || !plan)) {
+      throw new NotFoundException('Registro no encontrado');
+    }
+    const procedimiento = !plan ? null : context
       ? fromContext(
           context.procedimientos,
           this.extractProcedimientoIdFromPlan(plan),
         )
       : await this.resolveProcedimientoFromPlan(plan);
 
-    const freqType = String(plan.frecuencia_tipo || 'HORAS').toUpperCase();
-    const freqValue = this.toNumeric(plan.frecuencia_valor, 0);
+    const freqType = String(plan?.frecuencia_tipo || 'HORAS').toUpperCase();
+    const freqValue = this.toNumeric(plan?.frecuencia_valor, 0);
     const patch: Partial<ProgramacionPlanEntity> = {};
     const scheduleMode = String(
-      programacion.modo_programacion || 'DINAMICA',
+      isProject ? 'CALENDARIO' : programacion.modo_programacion || 'DINAMICA',
     ).toUpperCase();
 
-    if (scheduleMode !== 'CALENDARIO') {
+    if (scheduleMode !== 'CALENDARIO' && equipo && plan) {
       if (freqType === 'HORAS') {
         const previousExecutionHours =
           programacion.ultima_ejecucion_horas == null
             ? await this.resolvePreviousProgramacionExecutionHours(
-                programacion.equipo_id,
-                programacion.plan_id,
+                equipo.id,
+                plan.id,
                 programacion.work_order_id,
               )
             : null;
@@ -18529,11 +18537,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const currentHours = this.toNumeric(equipo.horometro_actual);
-    const nextHours = patch.proxima_horas ?? programacion.proxima_horas ?? null;
+    const currentHours = !isProject && equipo ? this.toNumeric(equipo.horometro_actual) : null;
+    const nextHours = isProject ? null : patch.proxima_horas ?? programacion.proxima_horas ?? null;
     const nextDate = patch.proxima_fecha ?? programacion.proxima_fecha ?? null;
     const hoursRemaining =
-      nextHours == null
+      nextHours == null || currentHours == null
         ? null
         : Number((this.toNumeric(nextHours) - currentHours).toFixed(2));
     const todayString = this.currentGuayaquilDateString();
@@ -18590,11 +18598,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const enriched = {
       ...programacion,
       ...patch,
-      equipo_nombre: equipo.nombre,
-      equipo_codigo: equipo.codigo,
-      plan_nombre: plan.nombre,
-      plan_codigo: plan.codigo,
-      plan_tipo: plan.tipo,
+      equipo_nombre: equipo?.nombre ?? null,
+      equipo_codigo: equipo?.codigo ?? null,
+      plan_nombre: plan?.nombre ?? linkedWorkOrder?.title ?? null,
+      plan_codigo: plan?.codigo ?? linkedWorkOrder?.code ?? null,
+      plan_tipo: isProject ? 'PROYECTO' : plan?.tipo,
       codigo: programacion.codigo ?? null,
       modo_programacion: scheduleMode,
       origen_programacion:
@@ -18609,8 +18617,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       procedimiento_id: procedimiento?.id ?? null,
       procedimiento_codigo: procedimiento?.codigo ?? null,
       procedimiento_nombre: procedimiento?.nombre ?? null,
-      frecuencia_tipo: plan.frecuencia_tipo,
-      frecuencia_valor: plan.frecuencia_valor,
+      frecuencia_tipo: isProject ? null : plan?.frecuencia_tipo,
+      frecuencia_valor: isProject ? null : plan?.frecuencia_valor,
       horometro_actual: currentHours,
       horas_restantes: hoursRemaining,
       dias_restantes: daysRemaining,
@@ -20675,6 +20683,41 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return this.wrap(true, 'Tarea eliminada');
   }
 
+  private async resolveProgramacionResources(
+    dto: CreateProgramacionDto,
+    workOrder: WorkOrderEntity,
+    current?: ProgramacionPlanEntity,
+  ) {
+    const isProject = this.isProyectoMaintenanceKind(workOrder.maintenance_kind);
+    const equipmentId = isProject
+      ? workOrder.equipment_id ?? null
+      : dto.equipo_id ?? workOrder.equipment_id ?? current?.equipo_id ?? null;
+    if (!equipmentId && !isProject) {
+      throw new BadRequestException('Debes seleccionar el equipo o la orden de trabajo vinculada.');
+    }
+    const equipment = equipmentId ? await this.findEquipoOrFail(equipmentId) : null;
+    let planId = isProject
+      ? workOrder.plan_id ?? null
+      : dto.plan_id ?? workOrder.plan_id ?? current?.plan_id ?? null;
+    if (dto.procedimiento_id && !isProject) {
+      planId = (await this.syncPlanFromProcedimiento(dto.procedimiento_id)).plan.id;
+    }
+    if (!planId && !isProject) {
+      throw new BadRequestException('Debes seleccionar una plantilla MPG o un plan operativo.');
+    }
+    if (planId) await this.findOneOrFail(this.planRepo, { id: planId, is_deleted: false });
+    if (isProject && !this.safeDateOnlyString(dto.proxima_fecha ?? current?.proxima_fecha)) {
+      throw new BadRequestException('Debes indicar la fecha programada para la OT de proyecto.');
+    }
+    return { isProject, equipmentId, planId, equipment };
+  }
+
+  private matchesProgramacionScope(row: ProgramacionPlanEntity, scope: SucursalScopeContext) {
+    return row.equipo_id
+      ? scope.equipmentIds.has(String(row.equipo_id).trim())
+      : String(row.payload_json?.sucursal_id || '').trim() === scope.sucursalId;
+  }
+
   async createProgramacion(dto: CreateProgramacionDto) {
     const linkedWorkOrder = await this.resolveProgramacionWorkOrder(
       dto.work_order_id,
@@ -20684,25 +20727,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'Debes vincular la programación a la orden de trabajo que se ejecutará.',
       );
     }
-    const resolvedEquipmentId =
-      dto.equipo_id ?? linkedWorkOrder?.equipment_id ?? null;
-    if (!resolvedEquipmentId) {
-      throw new BadRequestException(
-        'Debes seleccionar el equipo o la orden de trabajo vinculada.',
-      );
-    }
-    await this.findEquipoOrFail(resolvedEquipmentId);
-    let resolvedPlanId = dto.plan_id ?? linkedWorkOrder?.plan_id ?? null;
-    if (dto.procedimiento_id) {
-      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
-      resolvedPlanId = synced.plan.id;
-    }
-    if (!resolvedPlanId) {
-      throw new BadRequestException(
-        'Debes seleccionar una plantilla MPG o un plan operativo.',
-      );
-    }
-    await this.findOneOrFail(this.planRepo, { id: resolvedPlanId, is_deleted: false });
+    const { isProject, equipmentId: resolvedEquipmentId, planId: resolvedPlanId } =
+      await this.resolveProgramacionResources(dto, linkedWorkOrder);
     const nextDate = this.safeDateOnlyString(dto.proxima_fecha);
     this.assertFechaProgramadaNoPasada(nextDate, 'La fecha programada', {
       allowPast: linkedWorkOrder.is_emergency === true,
@@ -20721,17 +20747,17 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       plan_id: resolvedPlanId,
       work_order_id: linkedWorkOrder.id,
       modo_programacion: String(
-        dto.modo_programacion || 'DINAMICA',
+        isProject ? 'CALENDARIO' : dto.modo_programacion || 'DINAMICA',
       ).toUpperCase(),
       origen_programacion: String(
         dto.origen_programacion || 'MANUAL',
       ).toUpperCase(),
       ultima_ejecucion_fecha:
-        dto.ultima_ejecucion_fecha ?? null,
+        isProject ? null : dto.ultima_ejecucion_fecha ?? null,
       ultima_ejecucion_horas:
-        dto.ultima_ejecucion_horas ?? null,
+        isProject ? null : dto.ultima_ejecucion_horas ?? null,
       proxima_fecha: nextDate ?? null,
-      proxima_horas: dto.proxima_horas ?? null,
+      proxima_horas: isProject ? null : dto.proxima_horas ?? null,
       documento_origen: dto.documento_origen ?? null,
       payload_json: this.mergeProgramacionWorkOrderPayload(
         { ...((dto.payload_json ?? {}) as Record<string, unknown>) },
@@ -20755,7 +20781,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     //   level: 'info',
     // });
     await this.writeSecurityLog({
-      description: `[PROGRAMACION:${saved.id}] Programación creada para equipo ${saved.equipo_id} y plan ${saved.plan_id}` ,
+      description: `[PROGRAMACION:${saved.id}] Programación creada para OT ${linkedWorkOrder.code || linkedWorkOrder.id}` ,
       typeLog: 'PROGRAMACION',
     });
     await this.registerProcessEvent({
@@ -20766,7 +20792,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       referencia_codigo: enriched.plan_codigo ?? saved.id,
       equipo_id: saved.equipo_id,
       title: 'Programación registrada',
-      body: `${enriched.plan_nombre} para ${enriched.equipo_nombre}`,
+      body: isProject ? `Proyecto: ${linkedWorkOrder.title || linkedWorkOrder.code}` : `${enriched.plan_nombre} para ${enriched.equipo_nombre}`,
       payload_kpi: {
         estado_programacion: enriched.estado_programacion,
       },
@@ -20781,7 +20807,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const scopedRows = !scope
       ? rows
       : rows.filter((row) =>
-          scope.equipmentIds.has(String(row.equipo_id || '').trim()),
+          this.matchesProgramacionScope(row, scope),
         );
     const data = await this.recalculateProgramacionesForRead(scopedRows);
     data.sort((a: any, b: any) => {
@@ -20801,7 +20827,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       const scope = await this.buildSucursalScopeContext(sucursalId);
       if (
         scope &&
-        !scope.equipmentIds.has(String(row.equipo_id || '').trim())
+        !this.matchesProgramacionScope(row, scope)
       ) {
         throw new NotFoundException('Programación no encontrada');
       }
@@ -20828,27 +20854,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'La programación debe permanecer vinculada a una orden de trabajo.',
       );
     }
-    const resolvedEquipmentId =
-      dto.equipo_id ?? linkedWorkOrder?.equipment_id ?? p.equipo_id;
-    if (!resolvedEquipmentId) {
-      throw new BadRequestException(
-        'Debes seleccionar el equipo o la orden de trabajo vinculada.',
-      );
-    }
-    const resolvedEquipment = await this.findEquipoOrFail(resolvedEquipmentId);
-    const reprogramHorometer = Number(
-      this.toNumeric(resolvedEquipment.horometro_actual, 0).toFixed(2),
-    );
-    let resolvedPlanId = dto.plan_id ?? linkedWorkOrder?.plan_id ?? p.plan_id;
-    if (dto.procedimiento_id) {
-      const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
-      resolvedPlanId = synced.plan.id;
-    }
-    if (!resolvedPlanId) {
-      throw new BadRequestException(
-        'Debes seleccionar una plantilla MPG o un plan operativo.',
-      );
-    }
+    const { isProject, equipmentId: resolvedEquipmentId, planId: resolvedPlanId, equipment } =
+      await this.resolveProgramacionResources(dto, linkedWorkOrder, p);
+    const reprogramHorometer = !isProject && equipment
+      ? Number(this.toNumeric(equipment.horometro_actual, 0).toFixed(2))
+      : null;
     const nextDate = this.safeDateOnlyString(
       dto.proxima_fecha ?? p.proxima_fecha ?? null,
     );
@@ -20869,16 +20879,16 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         dto.work_order_id !== undefined
           ? linkedWorkOrder?.id ?? null
           : p.work_order_id ?? null,
-      modo_programacion: dto.modo_programacion
+      modo_programacion: isProject ? 'CALENDARIO' : dto.modo_programacion
         ? String(dto.modo_programacion).toUpperCase()
         : p.modo_programacion ?? 'DINAMICA',
       origen_programacion: dto.origen_programacion
         ? String(dto.origen_programacion).toUpperCase()
         : p.origen_programacion ?? 'MANUAL',
-      ultima_ejecucion_fecha: dto.ultima_ejecucion_fecha ?? p.ultima_ejecucion_fecha ?? null,
-      ultima_ejecucion_horas: dto.ultima_ejecucion_horas ?? p.ultima_ejecucion_horas ?? null,
+      ultima_ejecucion_fecha: isProject ? null : dto.ultima_ejecucion_fecha ?? p.ultima_ejecucion_fecha ?? null,
+      ultima_ejecucion_horas: isProject ? null : dto.ultima_ejecucion_horas ?? p.ultima_ejecucion_horas ?? null,
       proxima_fecha: nextDate ?? null,
-      proxima_horas: dto.proxima_horas ?? p.proxima_horas ?? null,
+      proxima_horas: isProject ? null : dto.proxima_horas ?? p.proxima_horas ?? null,
       documento_origen: dto.documento_origen ?? p.documento_origen ?? null,
       payload_json:
         dto.payload_json !== undefined || dto.work_order_id !== undefined
@@ -20895,7 +20905,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       horometro_equipo_referencia: reprogramHorometer,
     };
     const saved = await this.programacionRepo.save(p);
-    await this.syncReprogrammingHorometer({
+    if (reprogramHorometer !== null) await this.syncReprogrammingHorometer({
       workOrderId: linkedWorkOrder.id,
       equipmentId: saved.equipo_id,
       horometroActual: reprogramHorometer,
@@ -20925,7 +20935,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       referencia_codigo: enriched.plan_codigo ?? saved.id,
       equipo_id: saved.equipo_id,
       title: 'Programación actualizada',
-      body: `${enriched.plan_nombre} para ${enriched.equipo_nombre}`,
+      body: isProject ? `Proyecto: ${linkedWorkOrder.title || linkedWorkOrder.code}` : `${enriched.plan_nombre} para ${enriched.equipo_nombre}`,
       payload_kpi: {
         estado_programacion: enriched.estado_programacion,
       },
@@ -24381,29 +24391,35 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         'Debes indicar el valor mensual a programar, por ejemplo 325, 650, 975, R20 o una cantidad de horas.',
       );
     }
-    const equipos = await this.equipoRepo.find({ where: { is_deleted: false } });
+    const workOrder = await this.resolveProgramacionWorkOrder(this.firstNonEmptyString(
+      dto.payload_json?.work_order_id !== undefined
+        ? dto.payload_json.work_order_id
+        : current?.payload_json?.work_order_id,
+    ));
+    const isProject = this.isProyectoMaintenanceKind(workOrder?.maintenance_kind);
+    const equipos = isProject ? [] : await this.equipoRepo.find({ where: { is_deleted: false } });
     let equipo: Pick<
       EquipoEntity,
       'id' | 'codigo' | 'nombre' | 'horometro_actual'
     > | null =
-      dto.equipo_id != null
+      !isProject && dto.equipo_id != null
         ? await this.findEquipoOrFail(dto.equipo_id)
         : null;
-    if (!equipo && dto.equipo_codigo) {
+    if (!isProject && !equipo && dto.equipo_codigo) {
       equipo =
         this.matchEquipoByCodeOrName(
           String(dto.equipo_codigo || ''),
           equipos,
         ) ?? null;
     }
-    if (!equipo && current?.equipo_id) {
+    if (!isProject && !equipo && current?.equipo_id) {
       equipo = await this.findEquipoOrFail(current.equipo_id);
     }
     const equipoCodigo = this.normalizeProgramacionWorkbookValue(
-      equipo?.codigo ?? dto.equipo_codigo ?? current?.equipo_codigo ?? '',
+      isProject ? workOrder?.code || workOrder?.id || 'Proyecto' : equipo?.codigo ?? dto.equipo_codigo ?? current?.equipo_codigo ?? '',
     );
     const equipoNombre = this.normalizeProgramacionWorkbookValue(
-      equipo?.nombre ?? current?.equipo_nombre ?? equipoCodigo,
+      isProject ? workOrder?.title || equipoCodigo : equipo?.nombre ?? current?.equipo_nombre ?? equipoCodigo,
     );
     if (!equipo && !equipoCodigo) {
       throw new BadRequestException(
@@ -24412,7 +24428,11 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const descriptor = this.resolveProgramacionMaintenanceDescriptor(rawValue);
-    const procedimientos = await this.procedimientoRepo.find({
+    if (isProject) {
+      descriptor.tipo_mantenimiento = 'PROYECTO';
+      descriptor.frecuencia_horas = null;
+    }
+    const procedimientos = isProject ? [] : await this.procedimientoRepo.find({
       where: { is_deleted: false },
     });
     const syncCache = new Map<
@@ -24425,14 +24445,14 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       plan_id: null as string | null,
       es_sincronizable: false,
     };
-    if (dto.procedimiento_id) {
+    if (!isProject && dto.procedimiento_id) {
       const synced = await this.syncPlanFromProcedimiento(dto.procedimiento_id);
       mapping = {
         procedimiento_id: dto.procedimiento_id,
         plan_id: synced.plan.id,
         es_sincronizable: true,
       };
-    } else {
+    } else if (!isProject) {
       mapping = await this.resolveProgramacionMensualProcedure(
         descriptor.raw,
         descriptor.frecuencia_horas,
@@ -24492,13 +24512,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       nextPayload.horometro_actual = equipmentHorometer;
       nextPayload.horometro_equipo_referencia = equipmentHorometer;
     }
-    const workOrderId = this.firstNonEmptyString(nextPayload.work_order_id);
     let allowPast = false;
-    if (workOrderId) {
-      const workOrder = await this.findOneOrFail(this.woRepo, {
-        id: workOrderId,
-        is_deleted: false,
-      });
+    if (workOrder) {
       if (workOrder.equipment_id && equipo && workOrder.equipment_id !== equipo.id) {
         throw new BadRequestException(
           'La orden de trabajo seleccionada no pertenece al equipo del bloque mensual.',
@@ -24532,10 +24547,18 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (proximaHoras != null) {
       nextPayload.horometro_programado = proximaHoras;
     }
+    if (isProject) {
+      nextPayload.color_key = 'PROYECTO';
+      nextPayload.horometro_actual = null;
+      nextPayload.horometro_ultimo = null;
+      nextPayload.horometro_programado = null;
+    }
     nextPayload.horas_programadas = maintenanceHours ?? null;
     nextPayload.horas_mantenimiento = maintenanceHours ?? null;
 
     return {
+      isProject,
+      workOrder,
       equipo,
       equipoCodigo,
       equipoNombre,
@@ -24547,6 +24570,31 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       proximaHoras,
       maintenanceHours,
     };
+  }
+
+  private async syncProjectMonthlyProgramacion(
+    header: ProgramacionMensualEntity,
+    prepared: Awaited<ReturnType<KpiMaintenanceService['prepareProgramacionMensualDetailInput']>>,
+    programacionId: string | null,
+  ) {
+    if (!prepared.workOrder) throw new BadRequestException('Debes seleccionar la OT de proyecto.');
+    const projectDto: CreateProgramacionDto = {
+      work_order_id: prepared.workOrder.id,
+      proxima_fecha: prepared.fechaProgramada,
+      origen_programacion: 'MENSUAL_MANUAL',
+      documento_origen: header.documento_origen || 'MENSUAL_MANUAL',
+      payload_json: {
+        ...prepared.nextPayload,
+        sucursal_id: header.sucursal_id ?? header.payload_json?.sucursal_id ?? null,
+        programacion_mensual_id: header.id,
+        programacion_mensual_codigo: header.codigo,
+        tipo_mantenimiento: 'PROYECTO',
+      },
+    };
+    const scheduled = programacionId
+      ? await this.updateProgramacion(programacionId, projectDto)
+      : await this.createProgramacion(projectDto);
+    return (scheduled.data as ProgramacionPlanEntity).id;
   }
 
   async createProgramacionMensualDetalle(
@@ -24563,7 +24611,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       proximaFecha: prepared.fechaProgramada,
     });
     let programacionId: string | null = null;
-    if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id && prepared.equipo) {
+    if (prepared.isProject && prepared.workOrder) {
+      programacionId = await this.syncProjectMonthlyProgramacion(header, prepared, programacionId);
+    } else if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id && prepared.equipo) {
       const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
         equipo_id: prepared.equipo.id,
         plan_id: prepared.mapping.plan_id,
@@ -24602,8 +24652,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
         procedimiento_id: prepared.mapping.procedimiento_id,
         plan_id: prepared.mapping.plan_id,
         es_sincronizable:
-          Boolean(prepared.mapping.es_sincronizable) &&
-          Boolean(prepared.equipo?.id),
+          prepared.isProject || (Boolean(prepared.mapping.es_sincronizable) &&
+          Boolean(prepared.equipo?.id)),
         observacion: prepared.observacion,
         payload_json: prepared.nextPayload,
       }),
@@ -24633,7 +24683,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       excludeProgramacionId: detail.programacion_id ?? null,
     });
     let programacionId = detail.programacion_id ?? null;
-    if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id && prepared.equipo) {
+    if (prepared.isProject && prepared.workOrder) {
+      programacionId = await this.syncProjectMonthlyProgramacion(header, prepared, programacionId);
+    } else if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id && prepared.equipo) {
       const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
         equipo_id: prepared.equipo.id,
         plan_id: prepared.mapping.plan_id,
@@ -24674,8 +24726,8 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       procedimiento_id: prepared.mapping.procedimiento_id,
       plan_id: prepared.mapping.plan_id,
       es_sincronizable:
-        Boolean(prepared.mapping.es_sincronizable) &&
-        Boolean(prepared.equipo?.id),
+        prepared.isProject || (Boolean(prepared.mapping.es_sincronizable) &&
+        Boolean(prepared.equipo?.id)),
       observacion: prepared.observacion,
       payload_json: prepared.nextPayload,
     });
@@ -24750,12 +24802,12 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    if (reprogramHorometer == null) {
+    if (reprogramHorometer == null && !this.isProyectoMaintenanceKind(linkedWorkOrder?.maintenance_kind)) {
       throw new BadRequestException(
         'El equipo no tiene un horometro manual disponible para reprogramar la orden.',
       );
     }
-    if (reprogramHorometer < 0) {
+    if (reprogramHorometer != null && reprogramHorometer < 0) {
       throw new BadRequestException('El horometro actual no puede ser negativo.');
     }
 
@@ -24834,7 +24886,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     });
 
     let programacionId = detail.programacion_id ?? null;
-    if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id && prepared.equipo) {
+    if (prepared.isProject && prepared.workOrder) {
+      programacionId = await this.syncProjectMonthlyProgramacion(header, prepared, programacionId);
+    } else if (prepared.mapping.es_sincronizable && prepared.mapping.plan_id && prepared.equipo) {
       const programacion = await this.upsertCalendarProgramacionFromMonthlyDetail({
         equipo_id: prepared.equipo.id,
         plan_id: prepared.mapping.plan_id,
@@ -24878,13 +24932,13 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       procedimiento_id: prepared.mapping.procedimiento_id,
       plan_id: prepared.mapping.plan_id,
       es_sincronizable:
-        Boolean(prepared.mapping.es_sincronizable) &&
-        Boolean(prepared.equipo?.id),
+        prepared.isProject || (Boolean(prepared.mapping.es_sincronizable) &&
+        Boolean(prepared.equipo?.id)),
       observacion: prepared.observacion,
       payload_json: prepared.nextPayload,
     });
     await this.programacionMensualDetRepo.save(detail);
-    await this.syncReprogrammingHorometer({
+    if (reprogramHorometer !== null) await this.syncReprogrammingHorometer({
       workOrderId: this.firstNonEmptyString(prepared.nextPayload.work_order_id),
       equipmentId: prepared.equipo?.id ?? null,
       horometroActual: reprogramHorometer,
@@ -26248,7 +26302,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const scopedProgramaciones = !scope
       ? programaciones
       : programaciones.filter((row: any) =>
-          this.matchesScopedEquipment(row.equipo_id, row.equipo_codigo, scope),
+          this.matchesProgramacionScope(row, scope),
         );
     const scopedPendingWorkOrders = await this.filterWorkOrdersByScope(
       pendingWorkOrders,
