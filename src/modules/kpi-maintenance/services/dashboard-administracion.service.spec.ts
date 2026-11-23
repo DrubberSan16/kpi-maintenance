@@ -133,22 +133,30 @@ describe('Dashboard administrativo: proyección por horómetro', () => {
     expect(row).not.toHaveProperty('servicios_mpg');
   });
 
-  it('si el último servicio no registró horómetro, proyecta desde el anterior que sí lo hizo', async () => {
-    // Antes la base era "actual menos frecuencia": objetivo = actual, 0 h restantes.
-    const [row] = await proyeccion([
+  it('reconoce la última OT cerrada aunque su horómetro siga pendiente', async () => {
+    const query = jest.fn().mockResolvedValue([
       fila({
         estado_funcionamiento: 'PARADO', horometro_operativo_desde: null,
-        servicios_mpg: [servicio({ work_order_code: 'OT-9', horometro: null }), servicio({ work_order_code: 'OT-5', horometro: '780' })],
+        servicios_mpg: [
+          servicio({ work_order_code: 'OT-9', cerrada_en: '2026-10-08T11:00:00', horometro: null }),
+          servicio({ work_order_code: 'OT-5', horometro: '700' }),
+        ],
       }),
     ]);
-    expect(row).toMatchObject({
-      referencia_estimada: true,
-      ultima_ot: 'OT-5',
-      horometro_ultimo_mantenimiento: 780,
-      horometro_proximo_mantenimiento: 1030,
-      horas_restantes: 30,
+    const service = new DashboardAdministracionService({ query } as any);
+    const { data } = (await service.getProyeccionVigente({})) as { data: any };
+    expect(data).toMatchObject({ mantenimientos_vencidos: 0, mantenimientos_proximos: 0 });
+    expect(data.proyeccion[0]).toMatchObject({
+      aplica: true,
+      horometro_pendiente: true,
+      ultima_ot: 'OT-9',
+      fecha_ultimo_mantenimiento: '2026-10-08',
+      horometro_ultimo_mantenimiento: null,
+      horometro_proximo_mantenimiento: null,
+      horas_restantes: null,
+      fecha_proximo_mantenimiento: null,
+      semaforo: { nivel: 'PENDIENTE', etiqueta: 'Realizado · lectura pendiente' },
     });
-    expect(row.motivo_referencia_estimada).toContain('OT-9');
   });
 
   it('una lectura mayor al horómetro actual tampoco sirve de base', async () => {
