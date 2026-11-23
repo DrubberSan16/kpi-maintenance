@@ -827,6 +827,32 @@ export class DashboardAdministracionService {
           };
         }
 
+        // El cierre acredita el servicio aunque falte la lectura para proyectar el ciclo siguiente.
+        const ultimoServicio = Array.isArray(servicios) ? servicios[0] : undefined;
+        if (ultimoServicio && String(ultimoServicio.horometro ?? '').trim() === '') {
+          return {
+            ...datos,
+            horometro_operativo_base: horometroBase,
+            horometro_actual: Math.round(horometroActual),
+            aplica: true,
+            horometro_pendiente: true,
+            referencia_estimada: false,
+            motivo_referencia_estimada: null,
+            horometro_ultimo_mantenimiento: null,
+            fecha_ultimo_mantenimiento: ultimoServicio.cerrada_en
+              ? String(ultimoServicio.cerrada_en).slice(0, 10)
+              : null,
+            ultima_ot: ultimoServicio.work_order_code ?? null,
+            ultimo_plan: ultimoServicio.plan_nombre ?? null,
+            horometro_proximo_mantenimiento: null,
+            horometro_objetivo: null,
+            horas_restantes: null,
+            horas_excedidas: null,
+            fecha_proximo_mantenimiento: null,
+            semaforo: { nivel: 'PENDIENTE', etiqueta: 'Realizado · lectura pendiente' },
+          };
+        }
+
         const referencia = resolverReferenciaMantenimiento(servicios, horometroActual, frecuencia);
         const base = referencia.base;
         const objetivo = Number((base + frecuencia).toFixed(2));
@@ -874,9 +900,9 @@ export class DashboardAdministracionService {
         };
       })
       .sort((a: any, b: any) => {
-        const orden: Record<string, number> = { ROJO: 0, AMARILLO: 1, VERDE: 2 };
-        const va = orden[a.semaforo?.nivel] ?? 3;
-        const vb = orden[b.semaforo?.nivel] ?? 3;
+        const orden: Record<string, number> = { ROJO: 0, AMARILLO: 1, PENDIENTE: 2, VERDE: 3 };
+        const va = orden[a.semaforo?.nivel] ?? 4;
+        const vb = orden[b.semaforo?.nivel] ?? 4;
         if (va !== vb) return va - vb;
         return Number(a.horas_restantes ?? 0) - Number(b.horas_restantes ?? 0);
       });
