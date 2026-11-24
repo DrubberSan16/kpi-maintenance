@@ -3389,17 +3389,49 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     return role === 'OPERADOR';
   }
 
+  private async isSsaWorkOrderActor(actor?: RequestActorContext | null) {
+    const userId = this.firstNonEmptyString(actor?.userId);
+    if (!this.isUuidLike(userId)) return false;
+
+    const [employee] = await this.dataSource.query(
+      `SELECT cargo
+         FROM kpi_maintenance.tb_empleado
+        WHERE user_id = $1 AND status = 'ACTIVE' AND NOT is_deleted`,
+      [userId],
+    );
+    return /(^|[^A-Z])SSA([^A-Z]|$)/i.test(employee?.cargo ?? '');
+  }
+
+  private async resolveNewWorkOrderMaintenanceKind(
+    value: unknown,
+    actor?: RequestActorContext | null,
+  ) {
+    if (!this.firstNonEmptyString(value) && await this.isSsaWorkOrderActor(actor)) {
+      return 'SSA';
+    }
+    return this.resolveWorkOrderMaintenanceKind(value);
+  }
+
   private async assertOperatorWorkOrderKind(
     actor: RequestActorContext | null | undefined,
     maintenanceKind: string,
     equipment: EquipoEntity | null,
+    existingOrder?: Pick<WorkOrderEntity, 'maintenance_kind' | 'equipment_id'> | null,
   ) {
     if (!this.isOperatorActor(actor)) return;
+    if (
+      existingOrder &&
+      ['SSA', 'CEBADO'].includes(maintenanceKind) &&
+      this.normalizeMaintenanceKind(existingOrder.maintenance_kind) === maintenanceKind &&
+      existingOrder.equipment_id === (equipment?.id ?? null)
+    ) return;
+
     const [context] = equipment
       ? await this.attachEquipmentBrandNames([equipment])
       : [null];
     const requiredKind = operatorMaintenanceKindForEquipment(context);
     if (maintenanceKind === requiredKind) return;
+    if (maintenanceKind === 'SSA' && await this.isSsaWorkOrderActor(actor)) return;
     throw new BadRequestException(
       `Para el perfil operador, el equipo seleccionado requiere una orden de trabajo de tipo ${requiredKind}.`,
     );
@@ -31584,11 +31616,9 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     const ownerUsername =
       this.firstNonEmptyString(actor?.username, headerOwnershipHints.username) ??
       null;
-    const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
-      header.maintenance_kind,
-      workOrder?.maintenance_kind,
-      'CORRECTIVO',
-    );
+    const resolvedMaintenanceKind = workOrder
+      ? this.resolveWorkOrderMaintenanceKind(header.maintenance_kind, workOrder.maintenance_kind)
+      : await this.resolveNewWorkOrderMaintenanceKind(header.maintenance_kind, actor);
     const isProyectoWorkOrder = this.isProyectoMaintenanceKind(
       resolvedMaintenanceKind,
     );
@@ -31708,7 +31738,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       header.hora_fin,
       workOrder,
     );
-    await this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind, equipment);
+    await this.assertOperatorWorkOrderKind(actor, resolvedMaintenanceKind, equipment, workOrder);
     if (workOrder && nextWorkflowStatus === 'CLOSED' && previousStatus !== 'CLOSED') {
       await this.assertCanCloseOrVoidWorkOrder(workOrder, actor, 'cerrar');
     }
@@ -32475,10 +32505,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       normalizedStatus,
       dto.blocked_by_work_order_id,
     );
-    const resolvedMaintenanceKind = this.resolveWorkOrderMaintenanceKind(
-      dto.maintenance_kind,
-      'CORRECTIVO',
-    );
+    const resolvedMaintenanceKind = await this.resolveNewWorkOrderMaintenanceKind(dto.maintenance_kind, actor);
     this.assertCebadoWorkOrderHasRequiredLinks(
       resolvedMaintenanceKind,
       dto.equipment_id,
@@ -32761,6 +32788,7 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
     actor?: RequestActorContext | null,
   ) {
     const wo = await this.findOneOrFail(this.woRepo, { id, is_deleted: false });
+    const existingKind = wo.maintenance_kind;
     const currentAudit = (wo.valor_json ?? {}) as Record<string, unknown>;
     if (this.normalizeRoleName(currentAudit.approval_action) === 'ANULADA') {
       throw new BadRequestException(
@@ -32952,7 +32980,10 @@ export class KpiMaintenanceService implements OnModuleInit, OnModuleDestroy {
       wo.created_by ??
       this.firstNonEmptyString(actor?.username, dtoOwnershipHints.username) ??
       null;
-    await this.assertOperatorWorkOrderKind(actor, wo.maintenance_kind, equipment);
+    await this.assertOperatorWorkOrderKind(actor, nextMaintenanceKind, equipment, {
+      maintenance_kind: existingKind,
+      equipment_id: wo.equipment_id,
+    });
     if (nextWorkflowStatus === 'IN_PROGRESS' && previousStatus !== 'IN_PROGRESS') {
       await this.assertWorkOrderCanMoveToInProgress({
         maintenanceKind: wo.maintenance_kind,
