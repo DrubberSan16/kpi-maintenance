@@ -143,6 +143,30 @@ describe('OT de operador según el equipo SSA', () => {
     await expect(service.assertOperatorWorkOrderKind({ ...actor, roleName: 'SUPERVISOR' }, 'CORRECTIVO', equipment)).resolves.toBeUndefined();
   });
 
+  it('propone SSA para la cuenta vinculada a un empleado SSA y lo permite en un equipo ordinario', async () => {
+    const userId = '627a948c-2e73-4159-8c65-02a72b4749fc';
+    const ssaActor = { ...actor, userId };
+    const query = jest.fn().mockResolvedValue([{ cargo: 'Supervisor de SSA' }]);
+    const service = operatorFixture({ dataSource: { query } });
+
+    await expect(service.resolveNewWorkOrderMaintenanceKind(undefined, ssaActor)).resolves.toBe('SSA');
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("status = 'ACTIVE' AND NOT is_deleted"), [userId]);
+    await expect(service.resolveNewWorkOrderMaintenanceKind('CEBADO', ssaActor)).resolves.toBe('CEBADO');
+    await expect(service.assertOperatorWorkOrderKind(ssaActor, 'SSA', equipment)).resolves.toBeUndefined();
+    await expect(service.assertOperatorWorkOrderKind(ssaActor, 'CEBADO', equipment)).resolves.toBeUndefined();
+
+    query.mockResolvedValue([{ cargo: 'Operador de generación' }]);
+    await expect(service.resolveNewWorkOrderMaintenanceKind(undefined, ssaActor)).resolves.toBe('CORRECTIVO');
+    await expect(service.assertOperatorWorkOrderKind(ssaActor, 'SSA', equipment)).rejects.toThrow(/requiere.*CEBADO/);
+  });
+
+  it('conserva el tipo SSA de una OT existente cuando se guarda para el mismo equipo', async () => {
+    const service = operatorFixture();
+    const existing = { maintenance_kind: 'SSA', equipment_id: equipment.id };
+    await expect(service.assertOperatorWorkOrderKind(actor, 'SSA', equipment, existing)).resolves.toBeUndefined();
+    await expect(service.assertOperatorWorkOrderKind(actor, 'SSA', { ...equipment, id: 'other' }, existing)).rejects.toThrow(/requiere.*CEBADO/);
+  });
+
   it('SSA admite un material normal y Cebado conserva la restricción a aceite', () => {
     const service = operatorFixture();
     const product = { id: 'product', nombre: 'Guantes de seguridad', es_aceite: false };
